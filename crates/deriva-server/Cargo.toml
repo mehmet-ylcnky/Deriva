@@ -10,9 +10,11 @@ deriva-storage = { path = "../deriva-storage" }
 tonic = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-anyhow = { workspace = true }
+tokio-stream = "0.1"
+bytes = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

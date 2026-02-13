@@ -36,6 +36,18 @@ pub enum Value {
     List(Vec<Value>),
 }
 
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::String(s) => write!(f, "{}", s),
+            Value::Int(n) => write!(f, "{}", n),
+            Value::Bool(b) => write!(f, "{}", b),
+            Value::Bytes(b) => write!(f, "<{} bytes>", b.len()),
+            Value::List(l) => write!(f, "[{}]", l.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")),
+        }
+    }
+}
+
 // --- CAddr ---
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]

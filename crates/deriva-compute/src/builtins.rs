@@ -94,3 +94,11 @@ impl ComputeFunction for RepeatFn {
         ComputeCost { cpu_ms: 1, memory_bytes: size * 10 }
     }
 }
+
+pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
+    use std::sync::Arc;
+    registry.register(Arc::new(IdentityFn));
+    registry.register(Arc::new(ConcatFn));
+    registry.register(Arc::new(UppercaseFn));
+    registry.register(Arc::new(RepeatFn));
+}

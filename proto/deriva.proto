@@ -1,12 +1,46 @@
 syntax = "proto3";
 package deriva;
 
-// Full service definition in section 1.7
 service Deriva {
-    rpc Ping (PingRequest) returns (PingResponse);
+  rpc PutLeaf (PutLeafRequest) returns (PutLeafResponse);
+  rpc PutRecipe (PutRecipeRequest) returns (PutRecipeResponse);
+  rpc Get (GetRequest) returns (stream GetResponse);
+  rpc Resolve (ResolveRequest) returns (ResolveResponse);
+  rpc Invalidate (InvalidateRequest) returns (InvalidateResponse);
+  rpc Status (StatusRequest) returns (StatusResponse);
 }
 
-message PingRequest {}
-message PingResponse {
-    string version = 1;
+message PutLeafRequest { bytes data = 1; }
+message PutLeafResponse { bytes addr = 1; }
+
+message PutRecipeRequest {
+  string function_name = 1;
+  string function_version = 2;
+  repeated bytes inputs = 3;
+  map<string, string> params = 4;
+}
+message PutRecipeResponse { bytes addr = 1; }
+
+message GetRequest { bytes addr = 1; }
+message GetResponse { bytes chunk = 1; }
+
+message ResolveRequest { bytes addr = 1; }
+message ResolveResponse {
+  bool found = 1;
+  string function_name = 2;
+  string function_version = 3;
+  repeated bytes inputs = 4;
+  map<string, string> params = 5;
+}
+
+message InvalidateRequest { bytes addr = 1; }
+message InvalidateResponse { bool was_cached = 1; }
+
+message StatusRequest {}
+message StatusResponse {
+  uint64 recipe_count = 1;
+  uint64 blob_count = 2;
+  uint64 cache_entries = 3;
+  uint64 cache_size_bytes = 4;
+  double cache_hit_rate = 5;
 }

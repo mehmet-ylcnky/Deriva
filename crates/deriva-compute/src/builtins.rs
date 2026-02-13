@@ -79,6 +79,11 @@ impl ComputeFunction for RepeatFn {
         }
         let count = match params.get("count") {
             Some(Value::Int(n)) if *n > 0 => *n as usize,
+            Some(Value::String(s)) => s.parse::<usize>()
+                .map_err(|_| ComputeError::InvalidParam("count must be a positive integer".into()))
+                .and_then(|n| if n > 0 { Ok(n) } else {
+                    Err(ComputeError::InvalidParam("count must be a positive integer".into()))
+                })?,
             _ => return Err(ComputeError::InvalidParam("count must be a positive integer".into())),
         };
         let input = &inputs[0];

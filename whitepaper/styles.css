@@ -53,6 +53,9 @@ body {
     margin-top: 0;
 }
 
+.logo-container { text-align: center; margin: 1rem 0; }
+.logo { max-width: 200px; width: 100%; height: auto; border-radius: 8px; }
+
 .author-link { color: var(--secondary-color); text-decoration: none; }
 .author-link:hover { text-decoration: underline; }
 

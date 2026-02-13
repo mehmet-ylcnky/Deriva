@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo2.png" width="250" alt="Deriva logo"><br>
+  <img src="logo.png" width="250" alt="Deriva logo"><br>
   A computation-addressed distributed file system built in Rust.
 </p>
 

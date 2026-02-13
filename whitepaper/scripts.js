@@ -58,6 +58,7 @@ document.addEventListener('DOMContentLoaded', function() {
         { id: 'implementation', file: 'implementation.html' },
         { id: 'evaluation', file: 'evaluation.html' },
         { id: 'tradeoffs', file: 'tradeoffs.html' },
+        { id: 'discussion', file: 'discussion.html' },
         { id: 'future-work', file: 'future-work.html' },
         { id: 'conclusion', file: 'conclusion.html' },
         { id: 'references', file: 'references.html' }

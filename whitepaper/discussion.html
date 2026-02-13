@@ -1,0 +1,128 @@
+<div class="section-content">
+    <h1 id="discussion">9. Discussion: A Data Engineering Perspective</h1>
+
+    <p>
+        The preceding sections describe Deriva's design, implementation, and tradeoffs in systems terms. This section
+        steps back and evaluates the project from the perspective of its primary audience: data engineers who build and
+        maintain the pipelines, transformations, and storage infrastructure that Deriva aims to improve.
+    </p>
+
+    <h2 id="what-deriva-gets-right">9.1 What Deriva Gets Right</h2>
+
+    <p>
+        The derived data problem is genuine and underappreciated. In most data platforms, the vast majority of stored
+        data — often 80–90% — is the output of some transformation. ETL pipelines produce outputs that immediately get
+        treated as primary data: stored in S3, cataloged in Glue, queried by Athena, copied to downstream systems. Nobody
+        tracks the relationship between the output and the computation that produced it at the storage level. The result
+        is exactly the four symptoms identified in Section 2: bloat, staleness, manual lifecycle management, and lost
+        reproducibility.
+    </p>
+
+    <p>
+        Pushing lineage into the addressing scheme — rather than bolting it on as external metadata — is a strong
+        architectural choice. Tools like Apache Atlas, OpenLineage, and Dagster all track lineage, but they do so
+        externally. External lineage drifts, becomes incomplete, or gets ignored. In Deriva, the address <em>is</em>
+        the computation. Lineage is structural, not optional. You cannot store a derived result without recording how
+        it was derived, because the "how" is the address.
+    </p>
+
+    <p>
+        Cost-aware eviction is the kind of decision that only makes sense when the storage layer understands
+        recomputation. No external orchestrator has the information to say "this cached result is cheap to recompute
+        (200ms, small inputs already cached) but that one takes 40 minutes with a full table scan — evict the cheap
+        one." That decision requires simultaneous knowledge of the dependency graph, the cache state, and the
+        computation cost. In the current data engineering stack, those three pieces of information live in three
+        different systems. In Deriva, they live in one.
+    </p>
+
+    <h2 id="landscape-position">9.2 Position in the Data Engineering Landscape</h2>
+
+    <p>
+        Deriva occupies a gap between orchestrators (Airflow, Dagster, Prefect) and storage systems (S3, HDFS, GCS).
+        Orchestrators know about computation but don't own storage. Storage systems own data but are blind to
+        computation. Deriva merges both — which is architecturally interesting but also means it competes with neither
+        directly. It is more of a new category than a replacement for an existing tool.
+    </p>
+
+    <p>
+        The closest analogy in the current ecosystem is Nix's store: packages addressed by the hash of their build
+        recipe plus all inputs. But Nix is single-node, eager, and scoped to software packages. Deriva generalizes
+        the same idea to arbitrary data, with lazy materialization and a path toward distributed execution.
+    </p>
+
+    <p>
+        For data engineers evaluating Deriva, the honest framing is: this is not a drop-in replacement for your object
+        store or your orchestrator. It is a new storage primitive that makes certain classes of problems — reproducibility,
+        cache management, dependency tracking, incremental recomputation — structurally solvable rather than operationally
+        managed.
+    </p>
+
+    <h2 id="practical-concerns">9.3 Practical Concerns</h2>
+
+    <p>
+        <strong>The determinism requirement is the biggest practical constraint.</strong> Real-world data pipelines call
+        APIs, read timestamps, sample randomly, depend on library versions with non-deterministic behavior, and interact
+        with external systems that change state. The determinism contract (Section 8.1) limits Deriva to a subset of
+        data engineering workloads — primarily batch transformations on immutable inputs. This is a meaningful subset
+        (it covers most of what dbt, Spark SQL, and pandas pipelines do), but it excludes pipelines that inherently
+        depend on external state.
+    </p>
+
+    <p>
+        <strong>Adoption friction is high.</strong> Data engineers already have orchestrators, object stores, and catalog
+        tools. Convincing teams to route data through a new storage layer that requires functions to be deterministic and
+        registered is a hard sell — even if the benefits are real. The system must demonstrate clear, measurable advantages
+        over the existing stack before teams will accept the migration cost.
+    </p>
+
+    <p>
+        <strong>The single-node Phase 1 cannot demonstrate the most compelling value proposition.</strong> Distributed
+        cache-aware compute routing (Phase 3) is the feature that would make a data engineer say "I cannot do this with
+        S3 + Airflow." The idea that <code>get()</code> automatically routes computation to the node that already has
+        the inputs cached — that solves a real problem that Spark, Dask, and Ray all struggle with (data shuffle). Until
+        Phase 3 is implemented, the system's strongest argument remains theoretical.
+    </p>
+
+    <h2 id="compelling-use-cases">9.4 Where Deriva Becomes Compelling</h2>
+
+    <p>
+        Despite the practical concerns, there are specific data engineering contexts where Deriva's design provides
+        clear advantages over the current stack:
+    </p>
+
+    <p>
+        <strong>Reproducible ML pipelines.</strong> Machine learning workflows are particularly well-suited to
+        computation-addressed storage. Feature engineering, model training, and evaluation are all deterministic
+        transformations on versioned datasets. The ability to say "give me the exact features that were used to train
+        model X" — and have the system either return the cached result or recompute it identically — eliminates an
+        entire class of ML reproducibility bugs.
+    </p>
+
+    <p>
+        <strong>Scientific computing.</strong> Research pipelines that transform raw experimental data through a series
+        of analysis steps benefit from both the provenance guarantees and the recomputation capability. When a reviewer
+        asks "how did you produce Figure 3?", the answer is the CAddr — which encodes the complete computation chain
+        back to the raw data.
+    </p>
+
+    <p>
+        <strong>Data mesh architectures.</strong> In organizations adopting data mesh principles, where domain teams own
+        their data products, Deriva provides a natural model for data product versioning and dependency tracking. A
+        downstream team's data product that depends on an upstream team's output is expressed as a recipe — and the
+        system automatically handles cache invalidation when the upstream data changes.
+    </p>
+
+    <p>
+        <strong>Iterative, DAG-structured workloads.</strong> Any workload where the same computation graph is executed
+        repeatedly with small input changes — A/B test analysis, parameter sweeps, incremental ETL — benefits from
+        Deriva's ability to reuse cached intermediate results. The DAG-aware cache means that changing one leaf input
+        only recomputes the affected subgraph, not the entire pipeline.
+    </p>
+
+    <div class="insight-box">
+        <strong>The key question for adoption</strong> is whether the determinism constraint and migration cost are
+        worth the benefits for enough real-world use cases. For reproducible ML pipelines, scientific computing, and
+        data mesh architectures where provenance matters — the answer is likely yes. For ad-hoc analytics and
+        pipelines with heavy external dependencies — the current stack remains more practical.
+    </div>
+</div>

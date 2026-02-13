@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deriva - Technical White Papers</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Condensed:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Roboto Condensed', 'Arial', sans-serif;
+            background: #f5f5f5;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+        }
+        .container { max-width: 800px; text-align: center; }
+        .container > img { max-width: 400px; width: 100%; height: auto; margin-bottom: 1rem; }
+        h1 { color: #1a1a2e; font-size: 3rem; margin-bottom: 0.5rem; }
+        .subtitle { color: #666; font-size: 1.5rem; margin-bottom: 1rem; }
+        .description {
+            color: #555; line-height: 1.7; max-width: 800px; margin: 0 auto 2rem;
+            font-size: 0.95rem; text-align: justify;
+        }
+        .papers { display: grid; gap: 1.5rem; }
+        .paper {
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 12px;
+            padding: 2rem;
+            text-align: left;
+        }
+        .paper h2 { color: #1a1a2e; font-size: 1.5rem; margin-bottom: 0.5rem; }
+        .paper h2 code {
+            background: #e8f5e9; color: #2e7d32;
+            padding: 0.2rem 0.5rem; border-radius: 4px;
+            font-family: 'Consolas', monospace;
+        }
+        .paper p { color: #666; line-height: 1.6; margin-bottom: 1rem; }
+        .paper .tag {
+            display: inline-block;
+            background: #e8f5e9; color: #2e7d32;
+            padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.8rem;
+        }
+        .paper .tag.dev { background: #fff3e0; color: #e65100; }
+        .paper .tag.roadmap { background: #f5f5f5; color: #888; }
+        .articles {
+            list-style: none; margin-top: 1rem;
+            border-top: 1px solid #eee; padding-top: 1rem;
+        }
+        .articles li { margin-bottom: 0.5rem; }
+        .articles a {
+            display: flex; align-items: center;
+            padding: 0.75rem 1rem; background: #fafafa;
+            border-radius: 8px; text-decoration: none; color: #1a1a2e;
+            transition: all 0.2s ease;
+        }
+        .articles a:hover { background: #e8f5e9; transform: translateX(4px); }
+        .articles a::before { content: "📄"; margin-right: 0.75rem; font-size: 1.1rem; }
+        .articles .article-title { font-weight: 500; }
+        .articles .article-desc {
+            font-size: 0.85rem; color: #666; margin-left: auto; padding-left: 1rem;
+        }
+        .no-articles { color: #999; font-style: italic; font-size: 0.9rem; padding: 0.5rem 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Deriva</h1>
+        <p class="subtitle">Technical White Papers & Documentation</p>
+        <p class="description">
+            Deriva is a computation-addressed distributed file system written in Rust. Instead of naming files by path or content hash,
+            every piece of derived data is addressed by the <strong>computation that produces it</strong> — the function, its inputs, and its parameters.
+            The system stores recipes, materializes results lazily on read, caches intelligently, and evicts under storage pressure — knowing it can always recompute.
+            This approach collapses storage, lineage tracking, and caching into a single unified layer.
+        </p>
+
+        <div class="papers">
+            <div class="paper">
+                <h2>Computation-Addressed Storage</h2>
+                <p>
+                    A distributed file system where data is addressed by the computation that produces it.
+                    Covers motivation, architecture, the recipe-based addressing model, cost-aware cache eviction,
+                    DAG-based provenance, and comparison with existing systems.
+                </p>
+                <span class="tag">Phase 1 Complete</span>
+                <ul class="articles">
+                    <li>
+                        <a href="whitepaper/">
+                            <span class="article-title">Introducing Deriva: Computation-Addressed Distributed File System</span>
+                            <span class="article-desc">Architecture & Design · Feb 2026</span>
+                        </a>
+                    </li>
+                </ul>
+            </div>
+
+            <div class="paper placeholder">
+                <h2>Distribution & Replication</h2>
+                <p>
+                    Gossip-based node discovery, recipe replication, locality-aware compute routing,
+                    and cache placement strategies for multi-node Deriva clusters.
+                </p>
+                <span class="tag roadmap">Future Roadmap</span>
+                <p class="no-articles">No articles yet</p>
+            </div>
+
+            <div class="paper placeholder">
+                <h2>WASM Compute Sandbox</h2>
+                <p>
+                    Deterministic execution of user-defined functions via WebAssembly.
+                    Trust boundaries, resource limits, and the native/sandboxed execution tiers.
+                </p>
+                <span class="tag roadmap">Future Roadmap</span>
+                <p class="no-articles">No articles yet</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

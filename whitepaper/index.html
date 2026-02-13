@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Introducing Deriva - Computation-Addressed Distributed File System</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Condensed:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <a href="../" class="back-link">Back to Deriva</a>
+
+    <div class="navigation">
+        <h3>Quick Navigation</h3>
+        <ul>
+            <li><a href="#introduction">1. Introduction</a></li>
+            <li><a href="#motivation">2. Motivation</a></li>
+            <li><a href="#prior-art">3. Prior Art</a></li>
+            <li><a href="#core-concepts">4. Core Concepts</a></li>
+            <li><a href="#architecture">5. Architecture</a></li>
+            <li><a href="#implementation">6. Implementation</a></li>
+            <li><a href="#evaluation">7. Evaluation</a></li>
+            <li><a href="#tradeoffs">8. Tradeoffs</a></li>
+            <li><a href="#future-work">9. Future Work</a></li>
+            <li><a href="#conclusion">10. Conclusion</a></li>
+            <li><a href="#references">11. References</a></li>
+        </ul>
+    </div>
+
+    <div class="header">
+        <h1 class="title">Introducing Deriva</h1>
+        <p class="subtitle">A Computation-Addressed Distributed File System</p>
+        <div class="authors">
+            <strong>Author:</strong> <a href="https://www.linkedin.com/in/mehmetylcnky/" target="_blank" class="author-link">Mehmet Yalcinkaya, PhD</a><br>
+            Senior Software Engineer<br><br>
+            <strong>Date:</strong> February 2026<br>
+            <div class="badges">
+                <a href="https://github.com/mehmet-ylcnky/Deriva" target="_blank">
+                    <img src="https://img.shields.io/badge/GitHub-Repository-181717?style=for-the-badge&logo=github" alt="GitHub Repository">
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Abstract -->
+    <div class="section-container" id="abstract-container">
+        <div class="loading">Loading Abstract...</div>
+    </div>
+
+    <!-- Table of Contents -->
+    <div class="toc">
+        <h2>Table of Contents</h2>
+        <ul>
+            <li><a href="#introduction">1. Introduction</a></li>
+            <li>
+                <span class="toc-toggle">▶</span>
+                <a href="#motivation">2. Motivation: The Derived Data Problem</a>
+                <ul class="toc-sub collapsed">
+                    <li><a href="#the-storage-landscape">2.1 The Storage Landscape</a></li>
+                    <li><a href="#four-symptoms">2.2 Four Symptoms of a Missing Abstraction</a></li>
+                    <li><a href="#why-now">2.3 Why Now</a></li>
+                </ul>
+            </li>
+            <li>
+                <span class="toc-toggle">▶</span>
+                <a href="#prior-art">3. Prior Art & Related Work</a>
+                <ul class="toc-sub collapsed">
+                    <li><a href="#build-systems">3.1 Build Systems</a></li>
+                    <li><a href="#content-addressed-storage">3.2 Content-Addressed Storage</a></li>
+                    <li><a href="#lineage-systems">3.3 Data Lineage & Provenance</a></li>
+                    <li><a href="#memoization">3.4 Memoization & Caching</a></li>
+                    <li><a href="#lazy-evaluation">3.5 Functional & Lazy Evaluation</a></li>
+                    <li><a href="#positioning">3.6 Where Deriva Sits</a></li>
+                </ul>
+            </li>
+            <li>
+                <span class="toc-toggle">▶</span>
+                <a href="#core-concepts">4. Core Concepts</a>
+                <ul class="toc-sub collapsed">
+                    <li><a href="#computation-address">4.1 Computation Address (CAddr)</a></li>
+                    <li><a href="#recipes">4.2 Recipes</a></li>
+                    <li><a href="#materialization">4.3 Materialization</a></li>
+                    <li><a href="#the-dag">4.4 The Dependency DAG</a></li>
+                    <li><a href="#eviction-model">4.5 Cost-Aware Eviction</a></li>
+                </ul>
+            </li>
+            <li>
+                <span class="toc-toggle">▶</span>
+                <a href="#architecture">5. System Architecture</a>
+                <ul class="toc-sub collapsed">
+                    <li><a href="#layered-design">5.1 Layered Design</a></li>
+                    <li><a href="#crate-structure">5.2 Crate Structure</a></li>
+                    <li><a href="#data-flow">5.3 Data Flow</a></li>
+                    <li><a href="#grpc-api">5.4 gRPC API</a></li>
+                </ul>
+            </li>
+            <li>
+                <span class="toc-toggle">▶</span>
+                <a href="#implementation">6. Implementation</a>
+                <ul class="toc-sub collapsed">
+                    <li><a href="#tech-stack">6.1 Technology Stack</a></li>
+                    <li><a href="#addressing-scheme">6.2 Addressing Scheme</a></li>
+                    <li><a href="#compute-engine">6.3 Compute Engine</a></li>
+                    <li><a href="#storage-backend">6.4 Storage Backend</a></li>
+                    <li><a href="#cache-layer">6.5 Cache Layer</a></li>
+                    <li><a href="#testing-strategy">6.6 Testing Strategy</a></li>
+                </ul>
+            </li>
+            <li>
+                <span class="toc-toggle">▶</span>
+                <a href="#evaluation">7. Evaluation</a>
+                <ul class="toc-sub collapsed">
+                    <li><a href="#phase1-metrics">7.1 Phase 1 Metrics</a></li>
+                    <li><a href="#comparison-matrix">7.2 Comparison Matrix</a></li>
+                </ul>
+            </li>
+            <li>
+                <span class="toc-toggle">▶</span>
+                <a href="#tradeoffs">8. Tradeoffs & Limitations</a>
+                <ul class="toc-sub collapsed">
+                    <li><a href="#determinism-requirement">8.1 Determinism Requirement</a></li>
+                    <li><a href="#recomputation-latency">8.2 Recomputation Latency</a></li>
+                    <li><a href="#complexity">8.3 System Complexity</a></li>
+                    <li><a href="#function-versioning">8.4 Function Versioning</a></li>
+                    <li><a href="#cold-start">8.5 Cold Start Penalty</a></li>
+                    <li><a href="#trust-boundary">8.6 Trust Boundary</a></li>
+                </ul>
+            </li>
+            <li>
+                <span class="toc-toggle">▶</span>
+                <a href="#future-work">9. Future Work</a>
+                <ul class="toc-sub collapsed">
+                    <li><a href="#phase2-robustness">9.1 Phase 2: Robustness</a></li>
+                    <li><a href="#phase3-distribution">9.2 Phase 3: Distribution</a></li>
+                    <li><a href="#phase4-advanced">9.3 Phase 4: Advanced Features</a></li>
+                </ul>
+            </li>
+            <li><a href="#conclusion">10. Conclusion</a></li>
+            <li><a href="#references">11. References</a></li>
+        </ul>
+    </div>
+
+    <!-- Section Containers -->
+    <div class="section-container" id="introduction-container">
+        <div class="loading">Loading Introduction...</div>
+    </div>
+    <div class="section-container" id="motivation-container">
+        <div class="loading">Loading Motivation...</div>
+    </div>
+    <div class="section-container" id="prior-art-container">
+        <div class="loading">Loading Prior Art...</div>
+    </div>
+    <div class="section-container" id="core-concepts-container">
+        <div class="loading">Loading Core Concepts...</div>
+    </div>
+    <div class="section-container" id="architecture-container">
+        <div class="loading">Loading Architecture...</div>
+    </div>
+    <div class="section-container" id="implementation-container">
+        <div class="loading">Loading Implementation...</div>
+    </div>
+    <div class="section-container" id="evaluation-container">
+        <div class="loading">Loading Evaluation...</div>
+    </div>
+    <div class="section-container" id="tradeoffs-container">
+        <div class="loading">Loading Tradeoffs...</div>
+    </div>
+    <div class="section-container" id="future-work-container">
+        <div class="loading">Loading Future Work...</div>
+    </div>
+    <div class="section-container" id="conclusion-container">
+        <div class="loading">Loading Conclusion...</div>
+    </div>
+    <div class="section-container" id="references-container">
+        <div class="loading">Loading References...</div>
+    </div>
+
+    <script src="scripts.js"></script>
+</body>
+</html>

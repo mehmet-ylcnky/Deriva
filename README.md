@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo2.png" width="200" alt="Deriva logo">
+  <img src="logo2.png" width="300" alt="Deriva logo">
 </p>
 
 <!-- <h1 align="center">Deriva</h1> -->

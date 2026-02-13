@@ -18,7 +18,7 @@ struct MemCache {
 }
 
 impl MaterializationCache for MemCache {
-    fn get(&self, addr: &CAddr) -> Option<Bytes> {
+    fn get(&mut self, addr: &CAddr) -> Option<Bytes> {
         self.store.get(addr).cloned()
     }
     fn put(&mut self, addr: CAddr, data: Bytes) -> u64 {

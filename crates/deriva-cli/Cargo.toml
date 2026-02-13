@@ -3,8 +3,23 @@ name = "deriva-cli"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "deriva"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 tonic = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true }
-anyhow = { workspace = true }
+tokio-stream = "0.1"
+
+[build-dependencies]
+tonic-build = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"

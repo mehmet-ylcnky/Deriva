@@ -1,6 +1,10 @@
-# Deriva
+<p align="center">
+  <img src="logo2.png" width="200" alt="Deriva logo">
+</p>
 
-A computation-addressed distributed file system built in Rust.
+<h1 align="center">Deriva</h1>
+
+<p align="center">A computation-addressed distributed file system built in Rust.</p>
 
 Deriva stores data by its content hash (BLAKE3) and treats computation as a first-class citizen — recipes describing how to derive data are stored alongside the data itself. If a result can be recomputed, it doesn't need to be replicated; the recipe travels instead.
 

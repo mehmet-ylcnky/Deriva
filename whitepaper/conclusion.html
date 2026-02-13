@@ -1,3 +1,60 @@
 <div class="section-content">
-    <p class="loading">Content coming soon...</p>
+    <h1 id="conclusion">10. Conclusion</h1>
+
+    <p>
+        This paper introduced Deriva, a distributed file system that addresses data by the computation that produces it.
+        The core insight is simple: if the storage system knows that <code>output = f(inputs)</code>, it can treat materialized
+        results as a cache rather than as primary storage, track provenance as a structural property of the addressing scheme
+        rather than as external metadata, cascade invalidation through the dependency graph rather than through manual
+        intervention, and make eviction decisions based on recomputation cost rather than on access recency alone.
+    </p>
+
+    <p>
+        We described the motivation for computation-addressed storage — the derived data problem that causes storage bloat,
+        stale data, manual lifecycle management, and lost reproducibility in data-intensive organizations. We surveyed related
+        work across build systems, content-addressed storage, lineage trackers, memoization systems, and lazy evaluation
+        frameworks, positioning Deriva as the intersection of general-purpose distributed storage and native computation
+        understanding. We defined the core abstractions — computation addresses, recipes, materialization, the dependency DAG,
+        and cost-aware eviction — and showed how they interlock to produce emergent capabilities that no single abstraction
+        provides alone.
+    </p>
+
+    <p>
+        We presented the Phase 1 implementation: a fully functional single-node system written in Rust, organized as six
+        composable crates, with a complete gRPC API (six RPCs including server-streaming retrieval), a command-line client,
+        and 244 passing tests covering leaf storage, recipe-based derivation, multi-level DAG resolution, diamond dependencies,
+        cache behavior, persistence across restarts, large blob streaming, error handling, and concurrent operations. The
+        implementation demonstrates that computation-addressed storage is not merely a theoretical concept but a practical
+        system that can be built, tested, and used.
+    </p>
+
+    <p>
+        We discussed the tradeoffs honestly: the determinism requirement constrains which computations can be addressed, the
+        recomputation latency on cache miss makes the system unsuitable for strict-latency workloads, the system complexity
+        exceeds that of a traditional blob store, and function versioning requires careful management. For each limitation,
+        we described concrete mitigation strategies — some already implemented, others planned for future phases.
+    </p>
+
+    <p>
+        The road ahead includes making the single-node system production-grade (Phase 2: persistent DAG, async parallel
+        materialization, verification mode, observability), scaling to multiple nodes (Phase 3: gossip-based discovery,
+        tiered replication, locality-aware compute routing), and expanding to new use cases (Phase 4: WASM plugins, FUSE
+        mount, chunk-level partial reads, mutable references).
+    </p>
+
+    <p>
+        Deriva's contribution is not any single technique — content addressing, memoization, DAG-based lineage, and cost-aware
+        caching are all established ideas. The contribution is <em>unifying</em> them at the storage layer, where their
+        combination enables decisions that none of them can make independently. A lineage tracker cannot trigger eviction. An
+        orchestrator cannot see what's cached where. A cache cannot assess recomputation cost. A storage system cannot track
+        provenance. Deriva can do all of these because, in Deriva, they are not separate systems — they are different facets
+        of a single abstraction: the recipe.
+    </p>
+
+    <div class="insight-box">
+        <strong>The recipe is the load-bearing abstraction.</strong> From a single compact descriptor — function, inputs,
+        parameters — Deriva derives the address (hash the recipe), the provenance (read the recipe), the recomputability
+        (execute the recipe), the dependencies (walk the recipe's inputs), and the eviction safety (the recipe is never lost).
+        Everything else follows.
+    </div>
 </div>

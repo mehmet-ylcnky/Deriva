@@ -1,3 +1,22 @@
 <div class="section-content">
-    <p class="loading">Content coming soon...</p>
+    <div class="abstract">
+        <h1>Abstract</h1>
+        <p>
+            Modern data infrastructure stores vast quantities of derived data — transformations, aggregations, model outputs,
+            format conversions — as opaque bytes, indistinguishable from the raw inputs that produced them. This leads to
+            unbounded storage growth, stale data without provenance, manual lifecycle management, and lost reproducibility.
+            We present <strong>Deriva</strong>, a distributed file system that addresses data not by path or content hash, but by
+            the <em>computation that produces it</em>. In Deriva, every piece of derived data is identified by a cryptographic hash
+            of its recipe: the function, its input addresses, and its parameters. This computation-addressed model unifies storage,
+            provenance tracking, and intelligent caching into a single layer. The system stores lightweight recipes permanently and
+            treats materialized results as an evictable cache — knowing that any evicted result can be deterministically recomputed
+            from its recipe. We describe the motivation, architecture, and core abstractions of Deriva, detail its Rust implementation
+            across six composable crates, and report on Phase 1: a fully functional single-node system with 244 passing tests covering
+            leaf storage, recipe-based derivation, multi-level DAG resolution, cost-aware cache eviction, persistence, streaming,
+            and a complete gRPC API with CLI client. Deriva demonstrates that collapsing the traditional three-layer stack of
+            orchestrator, lineage tracker, and storage into a single computation-aware storage layer yields a system that can make
+            decisions no external tool can — because it has simultaneous visibility into data provenance, cache state, storage pressure,
+            and compute cost.
+        </p>
+    </div>
 </div>

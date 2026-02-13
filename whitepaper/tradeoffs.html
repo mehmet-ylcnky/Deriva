@@ -1,3 +1,130 @@
 <div class="section-content">
-    <p class="loading">Content coming soon...</p>
+    <h1 id="tradeoffs">8. Tradeoffs & Limitations</h1>
+
+    <p>
+        Computation-addressed storage is not a universal improvement over traditional storage. It introduces constraints and
+        tradeoffs that make it well-suited for some workloads and poorly suited for others. This section discusses each
+        limitation honestly, along with the mitigation strategies that Deriva employs or plans to employ.
+    </p>
+
+    <h2 id="determinism-requirement">8.1 Determinism Requirement</h2>
+
+    <div class="problem-statement">
+        <strong>The Constraint:</strong> All compute functions in Deriva must be deterministic — the same inputs and parameters
+        must always produce identical output bytes. Non-deterministic operations (wall-clock timestamps, unseeded random number
+        generation, network calls, filesystem reads) cannot be computation-addressed because their output is not a pure function
+        of their inputs.
+    </div>
+
+    <p>
+        This is Deriva's hardest constraint, and it is fundamental to the system's correctness. If a function is non-deterministic,
+        then the CAddr (which is computed from the recipe, not the output) does not uniquely identify a result — different
+        executions of the same recipe could produce different bytes, and the system would serve stale cached results without
+        knowing they are stale.
+    </p>
+
+    <div class="solution-statement">
+        <strong>Mitigation:</strong> Deriva addresses this through a multi-pronged strategy. First, the <code>ComputeFunction</code>
+        trait's documentation establishes a clear determinism contract that implementors must uphold. Second, future phases will
+        introduce a <code>DeterminismLevel</code> enum — <code>Strict</code> (WASM sandbox, no I/O), <code>Seeded</code>
+        (deterministic given an explicit seed parameter), and <code>Opaque</code> (self-declared, optionally verified by
+        double-compute spot checks). Third, inherently non-deterministic results (API responses, scraped data) should be stored
+        as leaf data and referenced as inputs to downstream recipes, keeping the DAG valid. The non-determinism is pushed to the
+        edges of the system, where it belongs.
+    </div>
+
+    <h2 id="recomputation-latency">8.2 Recomputation Latency</h2>
+
+    <div class="problem-statement">
+        <strong>The Constraint:</strong> On a cache miss, a <code>get()</code> call must execute the recipe's function before
+        returning data. For expensive computations (model training, large-scale aggregation, complex image processing), this
+        can take seconds, minutes, or even hours. Deriva is not suitable for latency-sensitive workloads where every read must
+        complete within a fixed time bound.
+    </div>
+
+    <p>
+        This is an inherent tradeoff of lazy materialization. The system trades storage space for computation time — it stores
+        less data but may need to compute more on read. For workloads where most reads hit the cache (because the working set
+        fits in cache), this tradeoff is favorable. For workloads with poor cache locality or very expensive computations, it
+        can be problematic.
+    </p>
+
+    <div class="solution-statement">
+        <strong>Mitigation:</strong> Three mechanisms address this. (1) A <strong>Pin API</strong> allows clients to mark critical
+        CAddrs as non-evictable, guaranteeing cache hits for latency-sensitive data. (2) <strong>Predictive pre-warming</strong>
+        tracks access patterns and proactively materializes data that is likely to be requested soon. (3) <strong>Async
+        materialization with progress</strong> returns a <code>Computing</code> status with an ETA and progress stream on cache
+        miss, allowing clients to show progress indicators rather than blocking indefinitely.
+    </div>
+
+    <h2 id="complexity">8.3 System Complexity</h2>
+
+    <div class="problem-statement">
+        <strong>The Constraint:</strong> Deriva is significantly more complex than a traditional file system. The DAG store,
+        function registry, cost estimator, deterministic executor, and cache scorer are all components that do not exist in
+        conventional storage. This complexity increases the surface area for bugs, makes the system harder to operate, and
+        raises the barrier to contribution.
+    </div>
+
+    <p>
+        Complexity is the tax paid for capability. Every feature that distinguishes Deriva from a traditional blob store —
+        provenance, safe eviction, cost-aware caching — requires machinery that a simpler system does not need. The question
+        is whether the complexity is managed well enough that the benefits outweigh the costs.
+    </p>
+
+    <div class="solution-statement">
+        <strong>Mitigation:</strong> Deriva manages complexity through strict layering. The <code>deriva-core</code> crate is
+        a pure library with zero I/O — all logic can be unit-tested without a running system. Each crate has a focused
+        responsibility and communicates with others through trait interfaces, not concrete types. The 244-test suite provides
+        a safety net for refactoring. Additionally, a planned <code>SimpleMode</code> configuration will disable the compute
+        engine entirely, making Deriva behave as a plain content-addressed blob store. Users can adopt computation-addressing
+        incrementally — start with leaf storage, add recipes when ready.
+    </div>
+
+    <h2 id="function-versioning">8.4 Function Versioning</h2>
+
+    <div class="problem-statement">
+        <strong>The Constraint:</strong> If a compute function's implementation changes (bug fix, algorithm improvement), all
+        existing CAddrs computed with the old version are potentially stale — the recipe hasn't changed, but the function it
+        references now produces different output. The system needs a versioning and migration strategy.
+    </div>
+
+    <div class="solution-statement">
+        <strong>Mitigation:</strong> The <code>FunctionId</code> includes an explicit version string, and recipes always bind
+        to a specific version. When a new version is registered, existing CAddrs remain valid (they reference the old version,
+        which is retained in the registry). A planned <code>migrate</code> command will find all recipes using version N, create
+        new recipes with version N+1, and optionally invalidate old cached materializations. Breaking changes produce new major
+        versions and new CAddrs. Bug fixes produce new minor versions with opt-in migration.
+    </div>
+
+    <h2 id="cold-start">8.5 Cold Start Penalty</h2>
+
+    <div class="problem-statement">
+        <strong>The Constraint:</strong> A fresh node with an empty cache must recompute everything on first access. In a
+        distributed setting, this means new nodes are slow until their cache warms up, potentially creating hotspots on
+        existing nodes that serve as fallbacks.
+    </div>
+
+    <div class="solution-statement">
+        <strong>Mitigation:</strong> Three planned mechanisms address cold start. (1) <strong>Cache transfer:</strong> new nodes
+        pull hot cached materializations from existing nodes rather than recomputing. (2) <strong>Warm-up profile:</strong> the
+        cluster maintains a global access-frequency ranking, and new nodes pre-warm the top-N items. (3) <strong>Read-through
+        routing:</strong> during warm-up, the new node proxies cache misses to nodes that have the data cached, serving the
+        client immediately while asynchronously populating its own cache.
+    </div>
+
+    <h2 id="trust-boundary">8.6 Trust Boundary</h2>
+
+    <div class="problem-statement">
+        <strong>The Constraint:</strong> Executing arbitrary computation functions on behalf of clients is a security surface.
+        A malicious or buggy function could consume unbounded resources, corrupt memory, or attempt to access data it shouldn't.
+    </div>
+
+    <div class="solution-statement">
+        <strong>Mitigation:</strong> Deriva plans two execution tiers. (1) <strong>Sandboxed (WASM):</strong> the default for
+        user-registered functions, running in Wasmtime with strict resource limits (memory cap, CPU time cap, no I/O).
+        Determinism is guaranteed by the sandbox. (2) <strong>Trusted (native):</strong> for built-in functions and
+        operator-approved plugins that run without sandbox overhead but require code review and signing. Even trusted functions
+        operate under a capability system that restricts access to only their declared inputs.
+    </div>
 </div>

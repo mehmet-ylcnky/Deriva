@@ -1,3 +1,65 @@
 <div class="section-content">
-    <p class="loading">Content coming soon...</p>
+    <h1 id="introduction">1. Introduction</h1>
+
+    <p>
+        Every distributed file system in widespread use today — HDFS, Ceph, GlusterFS, MinIO, Amazon S3 — operates on the same
+        fundamental abstraction: store bytes, retrieve bytes. A file is a sequence of bytes identified by a path or an opaque key.
+        The storage system knows nothing about <em>how</em> those bytes were produced, <em>what</em> they were produced from, or
+        <em>whether</em> they could be produced again. To the storage layer, a 500-gigabyte intermediate dataset produced by a
+        Spark job is indistinguishable from a 500-gigabyte collection of user-uploaded photographs. Both consume the same storage,
+        receive the same replication, and require the same manual lifecycle management.
+    </p>
+
+    <p>
+        This paper introduces <strong>Deriva</strong>, a distributed file system built on a different premise: that the storage
+        layer should understand computation. In Deriva, data comes in two forms. <em>Leaf data</em> is raw, externally provided
+        bytes — user uploads, sensor readings, log streams — addressed by the SHA-256 hash of their content, much like Git objects
+        or IPFS blocks. <em>Derived data</em> is the output of a deterministic function applied to other data. Instead of storing
+        the output bytes as the primary artifact, Deriva stores a <em>recipe</em>: a compact descriptor containing the function
+        identifier, the addresses of its inputs, and any parameters. The address of derived data is the hash of this recipe, not
+        the hash of the output bytes. We call this <strong>computation addressing</strong>.
+    </p>
+
+    <p>
+        This seemingly simple shift in addressing has profound consequences. Because the system knows the recipe behind every
+        piece of derived data, it can treat materialized results as a <em>cache</em> rather than as primary storage. Cached
+        materializations can be evicted under storage pressure with the guarantee that they are always recoverable — the recipe
+        is never lost, and the function is always available to recompute. Because recipes form a directed acyclic graph (DAG) of
+        dependencies, the system has built-in provenance: "how was this data produced?" is answered by a single lookup, not by
+        querying an external lineage tracker. Because the DAG encodes which outputs depend on which inputs, invalidation cascades
+        automatically when an input changes. And because the system knows both the cost of recomputation and the frequency of
+        access for every cached result, it can make eviction decisions that no external tool can make — evicting cheap-to-recompute,
+        rarely-accessed, large results first, while preserving expensive, frequently-accessed, small results.
+    </p>
+
+    <div class="insight-box">
+        <strong>Key Insight:</strong> If the storage system understands that <code>output = f(inputs)</code>, it can make decisions
+        that no external tool can make — because it has simultaneous visibility into data provenance, cache state, storage pressure,
+        and compute cost. No external lineage tracker can trigger eviction. No orchestrator knows what's cached where. No storage
+        system knows what's safe to delete. Deriva knows all of these because they are unified.
+    </div>
+
+    <p>
+        Deriva is implemented in Rust, organized as a workspace of six composable crates. The choice of Rust is deliberate:
+        the system operates at the storage layer where performance, memory safety, and concurrency correctness are non-negotiable.
+        Rust's ownership model, zero-cost abstractions, and mature async ecosystem (via Tokio) provide the foundation for a system
+        that must handle concurrent reads, writes, and computations without data races or memory corruption.
+    </p>
+
+    <p>
+        This paper serves as an introduction to the Deriva project. We describe the motivation behind computation-addressed storage
+        (Section 2), survey related work and position Deriva within the landscape (Section 3), define the core abstractions — computation
+        addresses, recipes, materialization, and cost-aware eviction (Section 4), present the system architecture (Section 5), detail
+        the Phase 1 implementation including code examples from the working system (Section 6), evaluate the current state with metrics
+        and comparisons (Section 7), discuss tradeoffs and limitations honestly (Section 8), outline the roadmap for distribution and
+        advanced features (Section 9), and conclude with a summary of contributions (Section 10).
+    </p>
+
+    <p>
+        It is important to state clearly what Deriva is <em>not</em>. It is not a workflow orchestrator — it does not schedule
+        pipelines or manage job dependencies. It is not a database — there is no query language, no transactions, no schema enforcement.
+        It is not a build system — there are no build targets, no toolchain management, no dependency resolution beyond the data DAG.
+        Deriva is a <strong>general-purpose storage system</strong> that happens to understand computation. It is complementary to
+        orchestrators, databases, and build systems, not a replacement for any of them.
+    </p>
 </div>

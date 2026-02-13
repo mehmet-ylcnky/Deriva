@@ -1,3 +1,98 @@
 <div class="section-content">
-    <p class="loading">Content coming soon...</p>
+    <h1 id="future-work">9. Future Work</h1>
+
+    <p>
+        Phase 1 establishes the core abstractions and proves that computation-addressed storage works as a single-node system.
+        The remaining phases extend Deriva along three axes: robustness (making the single-node system production-grade),
+        distribution (scaling to multiple nodes), and advanced features (WASM plugins, FUSE mount, partial reads).
+    </p>
+
+    <h2 id="phase2-robustness">9.1 Phase 2: Robustness</h2>
+
+    <p>
+        Phase 2 focuses on making the single-node system reliable and observable enough for production use. The in-memory DAG
+        store will be backed by sled, ensuring that the dependency graph survives process restarts without requiring a full
+        rebuild from stored recipes. The compute engine will move from synchronous execution to async Tokio tasks, enabling
+        parallel materialization of independent DAG branches — when a recipe has two inputs that both need computation, those
+        computations can proceed concurrently rather than sequentially.
+    </p>
+
+    <p>
+        A verification mode will be introduced for high-assurance workloads. In this mode, the system computes each result
+        twice and compares the hashes. If the hashes differ, the function is flagged as non-deterministic and the result is
+        rejected. This provides a runtime safety net for the determinism contract that the <code>ComputeFunction</code> trait
+        establishes at the type level.
+    </p>
+
+    <p>
+        Observability will be added through the <code>tracing</code> crate for structured logging and Prometheus-compatible
+        metrics export. Key metrics include cache hit rate, materialization latency (broken down by function), storage utilization,
+        DAG depth distribution, and eviction rate. These metrics are essential for operators to understand system behavior and
+        tune configuration parameters (cache size, eviction thresholds).
+    </p>
+
+    <h2 id="phase3-distribution">9.2 Phase 3: Distribution</h2>
+
+    <p>
+        Phase 3 transforms Deriva from a single-node system into a distributed cluster. The distribution layer is built on
+        three components: node discovery, data replication, and compute routing.
+    </p>
+
+    <p>
+        <strong>Node discovery</strong> uses a gossip protocol based on the SWIM (Scalable Weakly-consistent Infection-style
+        Membership) algorithm. Each node periodically probes a random subset of known nodes, detecting failures within a bounded
+        time. The gossip protocol also disseminates metadata about each node's cache contents, storage capacity, and compute
+        availability.
+    </p>
+
+    <p>
+        <strong>Data replication</strong> follows a tiered strategy. Recipes are replicated to all nodes — they are tiny (bytes
+        to kilobytes) and are the system's most critical data (losing a recipe means losing the ability to recompute). Leaf data
+        is replicated with a configurable factor (default 3), using consistent hashing to determine placement. Cached
+        materializations are <em>not</em> replicated — they are recomputable and can be materialized on any node that has the
+        recipe and inputs.
+    </p>
+
+    <p>
+        <strong>Compute routing</strong> is locality-aware. When a node receives a <code>get()</code> request for a derived
+        CAddr that is not in its local cache, it checks the gossip metadata to find which nodes have the inputs cached. The
+        computation is routed to the node that already has the most input bytes, minimizing data transfer. If inputs are split
+        across nodes, the computation is routed to the node with the largest input. This data-locality optimization is a direct
+        consequence of the system's visibility into both the dependency DAG and the distributed cache state — information that
+        no external orchestrator has.
+    </p>
+
+    <h2 id="phase4-advanced">9.3 Phase 4: Advanced Features</h2>
+
+    <p>
+        Phase 4 introduces features that expand Deriva's applicability to new use cases.
+    </p>
+
+    <p>
+        <strong>WASM function plugins</strong> allow users to register custom compute functions as WebAssembly modules. The
+        WASM sandbox (via Wasmtime) provides determinism guarantees, resource limits, and security isolation. Users compile
+        their functions to WASM, register them with the Deriva cluster, and reference them in recipes. The WASM runtime ensures
+        that functions cannot access the network, filesystem, or clock — making non-determinism structurally impossible.
+    </p>
+
+    <p>
+        <strong>FUSE filesystem mount</strong> exposes Deriva as a local filesystem. CAddrs map to file paths (e.g.,
+        <code>/deriva/ab/cd/abcdef01.../</code>), and standard file operations (<code>open</code>, <code>read</code>,
+        <code>stat</code>) translate to Deriva API calls. This enables existing tools that operate on files — text editors,
+        image viewers, data processing scripts — to work with Deriva data without modification.
+    </p>
+
+    <p>
+        <strong>Chunk-level partial reads</strong> address the problem of large derived results where the client needs only a
+        subset. Large outputs are split into fixed-size chunks, each with its own CAddr. A range read resolves to specific
+        chunks, and only those chunks are materialized. This is particularly valuable for large datasets where a client needs
+        only a specific row range or byte range.
+    </p>
+
+    <p>
+        <strong>Mutable references with cascade invalidation</strong> introduce named pointers that can be rebound to new leaf
+        CAddrs. When a mutable reference is rebound, the system uses the DAG's dependents query to identify all downstream
+        derived data and invalidates their cached materializations. This provides a clean model for "the input data changed,
+        update everything downstream" without requiring the client to manually track dependencies.
+    </p>
 </div>

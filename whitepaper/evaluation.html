@@ -1,3 +1,171 @@
 <div class="section-content">
-    <p class="loading">Content coming soon...</p>
+    <h1 id="evaluation">7. Evaluation</h1>
+
+    <h2 id="phase1-metrics">7.1 Phase 1 Metrics</h2>
+
+    <p>
+        Phase 1 of Deriva delivers a fully functional single-node system. The implementation was completed across nine
+        incremental sections, each building on the previous one, with all tests passing and zero clippy warnings at every
+        stage. The following table summarizes the progression:
+    </p>
+
+    <div class="comparison-table">
+        <table>
+            <tr>
+                <th>Section</th>
+                <th>Description</th>
+                <th>Tests Added</th>
+                <th>Cumulative Tests</th>
+            </tr>
+            <tr>
+                <td>1.1</td>
+                <td>Scaffolding — workspace, 6 crates, error types, proto stub</td>
+                <td>8</td>
+                <td>8</td>
+            </tr>
+            <tr>
+                <td>1.2</td>
+                <td>Core Types — CAddr, FunctionId, Value, Recipe, DataRef</td>
+                <td>43</td>
+                <td>51</td>
+            </tr>
+            <tr>
+                <td>1.3</td>
+                <td>DAG Store — cycle detection, topological sort, dependents</td>
+                <td>31</td>
+                <td>82</td>
+            </tr>
+            <tr>
+                <td>1.4</td>
+                <td>Compute Engine — ComputeFunction trait, registry, builtins, executor</td>
+                <td>44</td>
+                <td>126</td>
+            </tr>
+            <tr>
+                <td>1.5</td>
+                <td>Cache — EvictableCache with cost-aware eviction</td>
+                <td>27</td>
+                <td>153</td>
+            </tr>
+            <tr>
+                <td>1.6</td>
+                <td>Storage — SledRecipeStore, BlobStore with sharding, StorageBackend</td>
+                <td>28</td>
+                <td>181</td>
+            </tr>
+            <tr>
+                <td>1.7</td>
+                <td>gRPC Server — 6 RPCs, streaming, ServerState</td>
+                <td>24</td>
+                <td>205</td>
+            </tr>
+            <tr>
+                <td>1.8</td>
+                <td>CLI Client — put, recipe, get, resolve, invalidate, status</td>
+                <td>14</td>
+                <td>219</td>
+            </tr>
+            <tr>
+                <td>1.9</td>
+                <td>Integration Tests — 23 end-to-end scenarios</td>
+                <td>25</td>
+                <td>244</td>
+            </tr>
+        </table>
+    </div>
+
+    <p>
+        The incremental approach — building one layer at a time, testing thoroughly before moving to the next — ensured that
+        each layer was solid before dependent layers were built on top of it. The core types (Section 1.2) have the highest
+        test count because they are the foundation: any bug in CAddr computation or recipe serialization would propagate
+        through the entire system.
+    </p>
+
+    <h2 id="comparison-matrix">7.2 Comparison Matrix</h2>
+
+    <p>
+        The following matrix compares Deriva's Phase 1 capabilities against traditional distributed file systems and
+        content-addressed storage systems across the dimensions that Deriva targets.
+    </p>
+
+    <div class="comparison-table">
+        <table>
+            <tr>
+                <th>Capability</th>
+                <th>Traditional DFS</th>
+                <th>Content-Addressed (IPFS/Git)</th>
+                <th>Deriva (Phase 1)</th>
+            </tr>
+            <tr>
+                <td>Addressing</td>
+                <td>Path / object ID</td>
+                <td>Content hash</td>
+                <td>Content hash (leaf) or recipe hash (derived)</td>
+            </tr>
+            <tr>
+                <td>Derived data awareness</td>
+                <td class="cross">None</td>
+                <td class="cross">None</td>
+                <td class="check">First-class concept</td>
+            </tr>
+            <tr>
+                <td>Built-in provenance</td>
+                <td class="cross">External tools required</td>
+                <td class="cross">Hash of output only</td>
+                <td class="check">Full DAG (recipe → inputs)</td>
+            </tr>
+            <tr>
+                <td>Safe eviction</td>
+                <td class="cross">Data loss on delete</td>
+                <td class="cross">Data loss on GC</td>
+                <td class="check">Recomputable from recipe</td>
+            </tr>
+            <tr>
+                <td>Cost-aware caching</td>
+                <td class="cross">No caching concept</td>
+                <td class="cross">Simple pinning</td>
+                <td class="check">Score = cost × freq / size</td>
+            </tr>
+            <tr>
+                <td>Invalidation cascade</td>
+                <td class="cross">Manual</td>
+                <td class="cross">Not applicable</td>
+                <td class="check">Automatic via DAG dependents</td>
+            </tr>
+            <tr>
+                <td>Lazy materialization</td>
+                <td class="cross">Must store bytes to have address</td>
+                <td class="cross">Must store bytes to have CID</td>
+                <td class="check">Address exists before bytes do</td>
+            </tr>
+            <tr>
+                <td>Streaming retrieval</td>
+                <td class="check">Yes</td>
+                <td class="check">Yes</td>
+                <td class="check">Yes (gRPC server-streaming)</td>
+            </tr>
+            <tr>
+                <td>Distribution</td>
+                <td class="check">Yes</td>
+                <td class="check">Yes</td>
+                <td class="partial">Planned (Phase 3)</td>
+            </tr>
+        </table>
+    </div>
+
+    <p>
+        The comparison highlights Deriva's unique position: it is the only system in this comparison that treats derived data
+        as a first-class concept, provides built-in provenance through the dependency DAG, enables safe eviction through
+        recomputation, and supports cost-aware caching that considers the expense of regenerating each cached item. The primary
+        gap is distribution, which is planned for Phase 3.
+    </p>
+
+    <div class="highlight-box">
+        <strong>Key Observation:</strong> The features that distinguish Deriva — provenance, safe eviction, cost-aware caching,
+        invalidation cascade — are not independent additions bolted onto a traditional storage system. They are emergent
+        consequences of a single design decision: addressing data by its recipe rather than its content. Once the system knows
+        the recipe, provenance is free (it <em>is</em> the recipe), safe eviction is free (recompute from the recipe), and
+        invalidation is free (walk the DAG that recipes define). The recipe-based addressing model is the load-bearing
+        abstraction from which all other capabilities follow.
+    </div>
 </div>

@@ -1,3 +1,176 @@
 <div class="section-content">
-    <p class="loading">Content coming soon...</p>
+    <h1 id="prior-art">3. Prior Art & Related Work</h1>
+
+    <p>
+        Several existing systems have explored parts of the design space that Deriva occupies. None of them combine all of the
+        properties that Deriva targets — general-purpose distributed storage with native understanding of computation — but each
+        contributes ideas that inform Deriva's design. This section surveys the most relevant prior work and positions Deriva
+        within the landscape.
+    </p>
+
+    <h2 id="build-systems">3.1 Build Systems</h2>
+
+    <p>
+        Build systems are the closest conceptual relatives to Deriva. Google's <strong>Bazel</strong> and Meta's <strong>Buck2</strong>
+        use content-addressed caching: the output hash of a build rule is determined by the hash of the rule definition and the hashes
+        of all inputs. If the computed hash matches a cached artifact in the remote cache, the build step is skipped entirely. This is
+        precisely the same principle as Deriva's recipe-based addressing — <code>output_addr = hash(function, input_addrs, params)</code>.
+        However, build systems are scoped to build artifacts (source code → binaries), use simple LRU eviction for their remote caches,
+        and are not designed as general-purpose storage systems. Deriva generalizes the content-addressed caching model from build
+        artifacts to arbitrary data and adds cost-aware eviction that considers recomputation expense.
+    </p>
+
+    <p>
+        The <strong>Nix</strong> package manager takes this further. Nix addresses packages by
+        <code>hash(build_recipe + all_transitive_inputs)</code>, creating a content-addressed store where every package is identified
+        by its complete build closure. The Nix store is, in essence, a single-node computation-addressed storage system for packages.
+        Deriva extends this concept to general data, adds distribution across multiple nodes, and adds lazy materialization — Nix
+        always eagerly builds, while Deriva materializes on demand.
+    </p>
+
+    <h2 id="content-addressed-storage">3.2 Content-Addressed Storage</h2>
+
+    <p>
+        <strong>IPFS</strong> (InterPlanetary File System) addresses data by content hash (CID — Content Identifier). Any two nodes
+        that store the same bytes will compute the same CID, enabling deduplication and integrity verification without coordination.
+        IPFS provides a distributed hash table for content discovery and a BitSwap protocol for content exchange. However, IPFS has
+        no concept of computation or provenance. A CID tells you <em>what</em> the data is (its hash) but not <em>how</em> it was
+        produced. Deriva extends content-addressing from "hash of bytes" to "hash of recipe," preserving the deduplication and
+        integrity properties while adding provenance and recomputability.
+    </p>
+
+    <p>
+        <strong>Git</strong> is perhaps the most widely used content-addressed storage system. Blobs, trees, and commits are all
+        identified by SHA-1 hashes of their content. Git's object model is a direct inspiration for Deriva's addressing scheme.
+        However, Git has no concept of derived data — every object is a leaf in Deriva's terminology. There is no mechanism to
+        say "this blob is the output of applying function F to blobs A and B."
+    </p>
+
+    <h2 id="lineage-systems">3.3 Data Lineage & Provenance</h2>
+
+    <p>
+        Systems like <strong>Apache Atlas</strong>, <strong>OpenLineage</strong>, and <strong>DataHub</strong> track how data was
+        produced and how it flows through pipelines. These are metadata systems that sit alongside storage — they record lineage
+        information but do not participate in storage decisions. Atlas can tell you that dataset B was produced from dataset A by
+        job J, but it cannot use this information to decide whether B is safe to evict, or to trigger recomputation when A changes.
+        The lineage graph and the storage system are separate concerns managed by separate tools.
+    </p>
+
+    <p>
+        <strong>Pachyderm</strong> is the closest existing system to Deriva in spirit. It combines data versioning, pipeline
+        execution, and provenance tracking into a single platform. Pachyderm versions data using a Git-like commit model and
+        tracks which pipeline stages produced which outputs. However, Pachyderm is a full pipeline platform — it includes an
+        orchestrator, a container runtime, and a Kubernetes-based execution engine. Deriva is purely a storage layer: simpler,
+        more composable, and not opinionated about how pipelines are run or where computation executes.
+    </p>
+
+    <h2 id="memoization">3.4 Memoization & Caching</h2>
+
+    <p>
+        <strong>Dagster's Asset Materialization</strong> model represents data assets as functions of upstream assets. When an
+        asset's inputs haven't changed, Dagster can skip recomputation — this is memoization at the orchestrator level. The
+        limitation is that this memoization is scoped to a single orchestrator. If the same computation is triggered by a different
+        tool, or by a manual script, the memoization cache is not consulted. Deriva pushes memoization into the storage layer so
+        it works regardless of which orchestrator (or none) triggers the computation.
+    </p>
+
+    <p>
+        At the programming language level, tools like Python's <code>functools.lru_cache</code> and <strong>Joblib</strong> provide
+        function-level memoization: cache function results keyed by input hash. These operate within a single process, use simple
+        LRU eviction, and have no concept of distribution or persistence. Deriva applies the same principle — cache results keyed
+        by input hash — but at the distributed storage level, with persistent recipes, cost-aware eviction, and multi-node operation.
+    </p>
+
+    <h2 id="lazy-evaluation">3.5 Functional & Lazy Evaluation</h2>
+
+    <p>
+        <strong>Apache Spark's RDD lineage</strong> is a particularly relevant precedent. Spark's Resilient Distributed Datasets
+        track their lineage — the sequence of transformations from source data. When a partition is lost due to node failure, Spark
+        recomputes it from lineage rather than relying on replication. This is the same principle as Deriva's recomputation-on-eviction,
+        but scoped to a single Spark job's lifetime. When the Spark application terminates, the lineage is lost. Deriva makes lineage
+        persistent and cross-job — the recipe survives indefinitely, and any future access can trigger recomputation.
+    </p>
+
+    <p>
+        <strong>Dask's delayed computation</strong> builds lazy computation graphs that execute on demand. The graph describes what
+        to compute, and materialization happens only when a result is requested. This is conceptually similar to Deriva's lazy
+        materialization, but Dask graphs are ephemeral — they exist within a single Python process and are discarded when the
+        process exits.
+    </p>
+
+    <h2 id="positioning">3.6 Where Deriva Sits</h2>
+
+    <p>
+        The following table summarizes how Deriva relates to existing systems across three key dimensions: whether the system
+        understands computation (not just stores bytes), whether it provides distributed storage (not just local or ephemeral),
+        and whether it handles general-purpose data (not just build artifacts or a specific domain).
+    </p>
+
+    <div class="comparison-table">
+        <table>
+            <tr>
+                <th>System</th>
+                <th>Understands Computation</th>
+                <th>Distributed Storage</th>
+                <th>General-Purpose Data</th>
+            </tr>
+            <tr>
+                <td>Bazel / Nix</td>
+                <td class="check">✓</td>
+                <td class="partial">~ (remote cache)</td>
+                <td class="cross">✗ (build artifacts)</td>
+            </tr>
+            <tr>
+                <td>IPFS</td>
+                <td class="cross">✗</td>
+                <td class="check">✓</td>
+                <td class="check">✓</td>
+            </tr>
+            <tr>
+                <td>HDFS / Ceph / S3</td>
+                <td class="cross">✗</td>
+                <td class="check">✓</td>
+                <td class="check">✓</td>
+            </tr>
+            <tr>
+                <td>Pachyderm</td>
+                <td class="check">✓</td>
+                <td class="check">✓</td>
+                <td class="partial">~ (opinionated platform)</td>
+            </tr>
+            <tr>
+                <td>Spark RDD Lineage</td>
+                <td class="check">✓</td>
+                <td class="cross">✗ (ephemeral)</td>
+                <td class="cross">✗ (single job)</td>
+            </tr>
+            <tr>
+                <td>Atlas / OpenLineage</td>
+                <td class="partial">~ (metadata only)</td>
+                <td class="cross">✗</td>
+                <td class="check">✓</td>
+            </tr>
+            <tr>
+                <td><strong>Deriva</strong></td>
+                <td class="check"><strong>✓</strong></td>
+                <td class="check"><strong>✓</strong> (planned)</td>
+                <td class="check"><strong>✓</strong></td>
+            </tr>
+        </table>
+    </div>
+
+    <p>
+        Deriva occupies the intersection: a general-purpose distributed storage system that natively understands computation,
+        without being an orchestrator, a build system, or a platform. The novelty is not in any single idea — content addressing,
+        memoization, lineage tracking, and lazy evaluation are all well-established — but in unifying them at the storage layer
+        in a way that enables decisions none of the individual components can make alone.
+    </p>
+
+    <div class="highlight-box">
+        <strong>The Novel Contribution:</strong> Existing systems separate storage, lineage, and caching into three independent
+        layers. Deriva collapses them into one. The storage system knows <em>what</em> to compute (recipes), <em>how</em> data
+        was produced (DAG), <em>whether</em> to compute (cache hit/miss), <em>where</em> to compute (data locality), and
+        <em>when</em> to evict (cost-aware scoring). This unification is what makes Deriva's approach qualitatively different
+        from bolting lineage tracking onto existing storage.
+    </div>
 </div>

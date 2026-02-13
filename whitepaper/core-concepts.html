@@ -1,3 +1,239 @@
 <div class="section-content">
-    <p class="loading">Content coming soon...</p>
+    <h1 id="core-concepts">4. Core Concepts</h1>
+
+    <p>
+        Deriva is built on a small number of interlocking abstractions. This section defines each one precisely, explains how
+        they relate to each other, and illustrates their behavior with examples from the working implementation.
+    </p>
+
+    <h2 id="computation-address">4.1 Computation Address (CAddr)</h2>
+
+    <p>
+        The fundamental unit of identity in Deriva is the <strong>Computation Address</strong>, or <code>CAddr</code>. A CAddr
+        is a 32-byte value — a SHA-256 hash — that uniquely identifies a piece of data. Every piece of data in the system, whether
+        raw or derived, has exactly one CAddr. The CAddr is not assigned by the user or generated randomly; it is computed
+        deterministically from the data's definition.
+    </p>
+
+    <p>
+        For <strong>leaf data</strong> (raw bytes with no recipe), the CAddr is the SHA-256 hash of the content itself. This is
+        identical to content-addressing in Git or IPFS: two identical byte sequences always produce the same CAddr, regardless of
+        when or where they are stored.
+    </p>
+
+    <p>
+        For <strong>derived data</strong> (the output of a computation), the CAddr is the SHA-256 hash of the <em>recipe</em> that
+        produces it — not the hash of the output bytes. This is the key distinction from traditional content-addressed storage.
+        The address of derived data is known <em>before</em> the computation executes, because it depends only on the recipe
+        definition, not on the result.
+    </p>
+
+    <p>
+        In the Deriva implementation, <code>CAddr</code> is a newtype wrapper around a 32-byte array with full support for
+        display, parsing, comparison, and hashing:
+    </p>
+
+    <div class="code-block">
+        <pre><span class="rust-keyword">pub struct</span> <span class="rust-type">CAddr</span>([<span class="rust-type">u8</span>; 32]);
+
+<span class="rust-keyword">impl</span> <span class="rust-type">CAddr</span> {
+    <span class="rust-comment">/// Create a CAddr by hashing arbitrary bytes</span>
+    <span class="rust-keyword">pub fn</span> <span class="rust-function">from_data</span>(data: &amp;[<span class="rust-type">u8</span>]) -&gt; <span class="rust-type">Self</span> {
+        <span class="rust-keyword">let</span> hash = Sha256::digest(data);
+        <span class="rust-type">CAddr</span>(hash.into())
+    }
+
+    <span class="rust-comment">/// Create a CAddr from a Recipe's canonical serialization</span>
+    <span class="rust-keyword">pub fn</span> <span class="rust-function">from_recipe</span>(recipe: &amp;<span class="rust-type">Recipe</span>) -&gt; <span class="rust-type">Self</span> {
+        <span class="rust-type">Self</span>::from_data(&amp;recipe.canonical_bytes())
+    }
+}</pre>
+    </div>
+
+    <p>
+        The <code>canonical_bytes()</code> method on <code>Recipe</code> produces a deterministic byte representation. Because
+        parameters are stored in a <code>BTreeMap</code> (which maintains sorted key order), and inputs are stored as an ordered
+        <code>Vec</code>, the same recipe always serializes to the same bytes, guaranteeing that the same computation always
+        produces the same CAddr.
+    </p>
+
+    <h2 id="recipes">4.2 Recipes</h2>
+
+    <p>
+        A <strong>Recipe</strong> is the descriptor that defines how a piece of derived data is produced. It contains three components:
+        a <em>function identifier</em> specifying which computation to execute, a list of <em>input addresses</em> identifying the
+        data to feed into the function, and a map of <em>parameters</em> that configure the function's behavior.
+    </p>
+
+    <div class="code-block">
+        <pre><span class="rust-keyword">pub struct</span> <span class="rust-type">Recipe</span> {
+    <span class="rust-keyword">pub</span> function_id: <span class="rust-type">FunctionId</span>,              <span class="rust-comment">// (name, version) tuple</span>
+    <span class="rust-keyword">pub</span> inputs: <span class="rust-type">Vec</span>&lt;<span class="rust-type">CAddr</span>&gt;,                    <span class="rust-comment">// ordered list of input addresses</span>
+    <span class="rust-keyword">pub</span> params: <span class="rust-type">BTreeMap</span>&lt;<span class="rust-type">String</span>, <span class="rust-type">Value</span>&gt;,      <span class="rust-comment">// deterministic parameter map</span>
+}
+
+<span class="rust-keyword">pub struct</span> <span class="rust-type">FunctionId</span> {
+    <span class="rust-keyword">pub</span> name: <span class="rust-type">String</span>,                          <span class="rust-comment">// e.g., "uppercase", "compress"</span>
+    <span class="rust-keyword">pub</span> version: <span class="rust-type">String</span>,                       <span class="rust-comment">// e.g., "1.0.0"</span>
+}
+
+<span class="rust-keyword">pub enum</span> <span class="rust-type">Value</span> {
+    <span class="rust-type">String</span>(<span class="rust-type">String</span>),
+    <span class="rust-type">Int</span>(<span class="rust-type">i64</span>),
+    <span class="rust-type">Float</span>(<span class="rust-type">f64</span>),
+    <span class="rust-type">Bool</span>(<span class="rust-type">bool</span>),
+    <span class="rust-type">Bytes</span>(<span class="rust-type">Vec</span>&lt;<span class="rust-type">u8</span>&gt;),
+}</pre>
+    </div>
+
+    <p>
+        Recipes are intentionally lightweight. A recipe that describes "apply the uppercase function to a 500MB text file" is
+        only a few hundred bytes — the function name, the 32-byte input address, and an empty parameter map. This asymmetry is
+        central to Deriva's storage model: recipes are tiny and are <em>never evicted</em>, while materialized results can be
+        arbitrarily large and are <em>always evictable</em>.
+    </p>
+
+    <p>
+        The <code>FunctionId</code> includes an explicit version string. This means that a recipe always binds to a specific
+        version of a function. If the function's implementation changes (a bug fix, an algorithm improvement), a new version
+        is registered, and new recipes reference the new version. Existing CAddrs remain valid because they reference the old
+        version, which is retained in the registry. This versioning model ensures that CAddrs are stable and reproducible
+        across function updates.
+    </p>
+
+    <h2 id="materialization">4.3 Materialization</h2>
+
+    <p>
+        <strong>Materialization</strong> is the process of producing the actual bytes described by a recipe. When a client
+        requests data at a derived CAddr, the system first checks whether a cached materialization exists. If it does (a
+        <em>cache hit</em>), the cached bytes are returned immediately. If it does not (a <em>cache miss</em>), the system
+        must materialize the result by executing the recipe.
+    </p>
+
+    <p>
+        Materialization is recursive. If a recipe's inputs are themselves derived (i.e., they have their own recipes), those
+        inputs must be materialized first. The system walks the dependency DAG from the requested CAddr down to the leaves,
+        identifies which intermediate results are cached and which need computation, determines a topological execution order,
+        and executes the necessary functions. The following diagram illustrates this process for a three-level DAG:
+    </p>
+
+    <div class="architecture-diagram">
+Client requests CAddr_D (derived)
+        │
+        ▼
+   ┌──────────┐
+   │ Cache    │──── HIT ──→ Return cached bytes
+   │ Lookup   │
+   └────┬─────┘
+        │ MISS
+        ▼
+   ┌──────────────┐
+   │ Recipe       │  Recipe_D: fn="concat", inputs=[CAddr_B, CAddr_C]
+   │ Lookup       │
+   └──┬───────┬───┘
+      │       │
+      ▼       ▼
+   CAddr_B  CAddr_C
+   (cached)  (not cached)
+      │       │
+      │       ▼
+      │    ┌───────────┐
+      │    │ Recipe    │  Recipe_C: fn="uppercase", inputs=[CAddr_A]
+      │    │ Lookup    │
+      │    └─────┬─────┘
+      │          │
+      │          ▼
+      │       CAddr_A (leaf, always available)
+      │          │
+      │          ▼
+      │    Execute uppercase(bytes_A) → bytes_C
+      │    Cache bytes_C at CAddr_C
+      │          │
+      ▼          ▼
+   Execute concat(bytes_B, bytes_C) → bytes_D
+   Cache bytes_D at CAddr_D
+        │
+        ▼
+   Stream bytes_D to client</div>
+
+    <p>
+        This recursive materialization means that a single <code>get()</code> call can trigger a cascade of computations. The
+        system handles this transparently — the client simply requests data at an address and receives bytes, whether those bytes
+        were cached, computed from cached intermediates, or computed from scratch starting at the leaves.
+    </p>
+
+    <h2 id="the-dag">4.4 The Dependency DAG</h2>
+
+    <p>
+        Every recipe defines edges in a directed acyclic graph: the recipe's CAddr depends on each of its input CAddrs. The
+        <code>DagStore</code> maintains this graph in memory, providing three critical operations.
+    </p>
+
+    <p>
+        <strong>Cycle detection:</strong> When a new recipe is inserted, the DagStore verifies that adding its edges would not
+        create a cycle. A cycle would mean that computing a result requires that same result as an input — an impossible
+        situation. Cycle detection runs at insertion time, rejecting invalid recipes before they enter the system.
+    </p>
+
+    <p>
+        <strong>Topological ordering:</strong> Given a CAddr, the DagStore can produce a topological sort of all CAddrs that
+        must be materialized to produce it. This ordering ensures that inputs are always materialized before the functions that
+        consume them, enabling correct sequential or parallel execution.
+    </p>
+
+    <p>
+        <strong>Dependents query:</strong> Given a CAddr, the DagStore can identify all CAddrs that transitively depend on it.
+        This reverse lookup is essential for invalidation: when a leaf changes or a cached result is evicted, the system can
+        immediately identify all downstream results that are affected.
+    </p>
+
+    <div class="code-block">
+        <pre><span class="rust-keyword">impl</span> <span class="rust-type">DagStore</span> {
+    <span class="rust-keyword">pub fn</span> <span class="rust-function">insert</span>(&amp;<span class="rust-keyword">mut</span> self, addr: <span class="rust-type">CAddr</span>, deps: <span class="rust-type">Vec</span>&lt;<span class="rust-type">CAddr</span>&gt;) -&gt; <span class="rust-type">Result</span>&lt;(), <span class="rust-type">DerivaError</span>&gt;;
+    <span class="rust-keyword">pub fn</span> <span class="rust-function">dependents</span>(&amp;self, addr: &amp;<span class="rust-type">CAddr</span>) -&gt; <span class="rust-type">Vec</span>&lt;<span class="rust-type">CAddr</span>&gt;;
+    <span class="rust-keyword">pub fn</span> <span class="rust-function">topo_sort</span>(&amp;self, addr: &amp;<span class="rust-type">CAddr</span>) -&gt; <span class="rust-type">Vec</span>&lt;<span class="rust-type">CAddr</span>&gt;;
+}</pre>
+    </div>
+
+    <h2 id="eviction-model">4.5 Cost-Aware Eviction</h2>
+
+    <p>
+        Traditional caches use simple eviction policies: LRU (least recently used), LFU (least frequently used), or FIFO.
+        These policies treat all cached items as equally valuable, differing only in access recency or frequency. In Deriva,
+        cached materializations have wildly different properties: some are cheap to recompute (applying <code>uppercase</code>
+        to a small file takes microseconds), while others are expensive (training a machine learning model takes hours). Some
+        are small (a few kilobytes of aggregated metrics), while others are large (gigabytes of transcoded video). A policy
+        that evicts a cheap-to-recompute, rarely-accessed, large result before an expensive-to-recompute, frequently-accessed,
+        small result is strictly better than one that treats them identically.
+    </p>
+
+    <p>
+        Deriva's <code>EvictableCache</code> uses a cost-aware eviction score:
+    </p>
+
+    <div class="architecture-diagram">
+                recompute_cost × access_frequency
+    score  =  ─────────────────────────────────────
+                         size_bytes</div>
+
+    <p>
+        A <em>low</em> score means the item is a good eviction candidate: it is cheap to recompute, rarely accessed, and/or
+        large. A <em>high</em> score means the item should be preserved: it is expensive to recompute, frequently accessed,
+        and/or small. When storage pressure triggers eviction, the cache sorts all entries by score ascending and evicts from
+        the bottom until pressure is relieved.
+    </p>
+
+    <p>
+        The <code>recompute_cost</code> is provided by each compute function via the <code>estimated_cost()</code> method on
+        the <code>ComputeFunction</code> trait. This estimate includes both CPU time and memory usage. In future phases, the
+        system will also track actual computation time on first materialization and use that as a more accurate estimate for
+        subsequent eviction decisions.
+    </p>
+
+    <p>
+        Crucially, eviction in Deriva is <em>safe</em>. Because the recipe is never evicted, any evicted materialization can
+        be recomputed on the next access. This is fundamentally different from eviction in a traditional cache, where eviction
+        means data loss. In Deriva, eviction means <em>dematerialization</em> — the data still exists conceptually (as a recipe),
+        it just doesn't exist physically (as cached bytes) until the next access triggers recomputation.
+    </p>
 </div>

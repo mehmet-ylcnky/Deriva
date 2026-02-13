@@ -1,3 +1,217 @@
 <div class="section-content">
-    <p class="loading">Content coming soon...</p>
+    <h1 id="architecture">5. System Architecture</h1>
+
+    <h2 id="layered-design">5.1 Layered Design</h2>
+
+    <p>
+        Deriva is organized as a layered system where each layer has a well-defined responsibility and communicates with adjacent
+        layers through trait-based interfaces. This layering serves two purposes: it enables independent testing of each component
+        (the core library has zero I/O dependencies and can be tested entirely in memory), and it allows future replacement of
+        individual layers without affecting the rest of the system (e.g., swapping sled for RocksDB, or replacing the gRPC API
+        with a REST interface).
+    </p>
+
+    <div class="architecture-diagram">
+┌─────────────────────────────────────────────────────────────────┐
+│                        Client Layer                             │
+│                   gRPC API  ·  CLI Client                       │
+│         put_leaf · put_recipe · get · resolve · invalidate      │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────────┐
+│                      Service Layer                              │
+│                     DerivaService                               │
+│          Request handling · Streaming · Error mapping           │
+└──────┬───────────────────┬──────────────────────┬───────────────┘
+       │                   │                      │
+┌──────▼──────┐    ┌───────▼───────┐    ┌─────────▼─────────┐
+│  Compute    │    │    State      │    │     Storage       │
+│  Engine     │    │   Manager     │    │     Backend       │
+│             │    │               │    │                   │
+│ Registry    │    │ DAG Store     │    │ SledRecipeStore   │
+│ Executor    │    │ Cache         │    │ BlobStore         │
+│ Builtins    │    │ Coordination  │    │ (sharded files)   │
+└─────────────┘    └───────────────┘    └───────────────────┘
+       │                   │                      │
+┌──────▼───────────────────▼──────────────────────▼───────────────┐
+│                        Core Layer                               │
+│              CAddr · Recipe · Value · FunctionId                │
+│              DagStore · EvictableCache · DerivaError            │
+│                    (zero I/O, pure logic)                       │
+└─────────────────────────────────────────────────────────────────┘</div>
+
+    <p>
+        The <strong>Core Layer</strong> (<code>deriva-core</code>) contains all fundamental types and data structures with no
+        I/O dependencies. The <code>CAddr</code>, <code>Recipe</code>, <code>Value</code>, and <code>FunctionId</code> types
+        live here, along with the in-memory <code>DagStore</code> and <code>EvictableCache</code>. This crate depends only on
+        <code>sha2</code>, <code>serde</code>, and <code>bincode</code> — it can be compiled to WASM and tested without any
+        filesystem or network access.
+    </p>
+
+    <p>
+        The <strong>Compute Engine</strong> (<code>deriva-compute</code>) defines the <code>ComputeFunction</code> trait, the
+        <code>FunctionRegistry</code> for looking up functions by ID, the <code>Executor</code> that walks the DAG and orchestrates
+        materialization, and the built-in functions shipped with Deriva. The compute layer depends on the core layer but not on
+        storage or networking.
+    </p>
+
+    <p>
+        The <strong>Storage Backend</strong> (<code>deriva-storage</code>) provides persistent storage through two complementary
+        stores: <code>SledRecipeStore</code> for recipes (small, structured, frequently queried) and <code>BlobStore</code> for
+        binary data (potentially large, write-once, read-many). The <code>StorageBackend</code> facade unifies both behind a
+        single interface.
+    </p>
+
+    <p>
+        The <strong>Service Layer</strong> (<code>deriva-server</code>) ties everything together. The <code>ServerState</code>
+        struct owns the storage backend, compute engine, DAG store, and cache. The <code>DerivaService</code> implements the
+        gRPC service trait, translating protocol buffer requests into operations on the server state.
+    </p>
+
+    <h2 id="crate-structure">5.2 Crate Structure</h2>
+
+    <p>
+        The Rust workspace contains six crates, reflecting the layered architecture. The dependency graph flows strictly
+        downward — no circular dependencies, no upward references.
+    </p>
+
+    <div class="architecture-diagram">
+                    deriva-cli ──────→ (proto client)
+                        │
+                        ▼
+                  deriva-server
+                   │         │
+                   ▼         ▼
+          deriva-compute  deriva-storage
+                   │         │
+                   ▼         ▼
+                  deriva-core
+                        │
+                        ▼
+                  deriva-network (stub)</div>
+
+    <div class="comparison-table">
+        <table>
+            <tr>
+                <th>Crate</th>
+                <th>Role</th>
+                <th>Key Types</th>
+                <th>Dependencies</th>
+            </tr>
+            <tr>
+                <td><code>deriva-core</code></td>
+                <td>Types, DAG, Cache</td>
+                <td>CAddr, Recipe, DagStore, EvictableCache</td>
+                <td>sha2, serde, bincode</td>
+            </tr>
+            <tr>
+                <td><code>deriva-compute</code></td>
+                <td>Function execution</td>
+                <td>ComputeFunction, Registry, Executor</td>
+                <td>deriva-core, bytes</td>
+            </tr>
+            <tr>
+                <td><code>deriva-storage</code></td>
+                <td>Persistence</td>
+                <td>SledRecipeStore, BlobStore, StorageBackend</td>
+                <td>deriva-core, sled</td>
+            </tr>
+            <tr>
+                <td><code>deriva-server</code></td>
+                <td>gRPC service</td>
+                <td>DerivaService, ServerState</td>
+                <td>all above, tonic, tokio</td>
+            </tr>
+            <tr>
+                <td><code>deriva-cli</code></td>
+                <td>CLI client</td>
+                <td>Args, Client</td>
+                <td>tonic, clap, tokio</td>
+            </tr>
+            <tr>
+                <td><code>deriva-network</code></td>
+                <td>Distribution (stub)</td>
+                <td>—</td>
+                <td>deriva-core</td>
+            </tr>
+        </table>
+    </div>
+
+    <h2 id="data-flow">5.3 Data Flow</h2>
+
+    <p>
+        Understanding how data flows through the system for the three primary operations — storing a leaf, storing a recipe,
+        and retrieving data — clarifies how the layers interact.
+    </p>
+
+    <h3>Storing a Leaf</h3>
+
+    <p>
+        When a client calls <code>put_leaf(bytes)</code>, the server computes the SHA-256 hash of the bytes to produce a CAddr,
+        writes the bytes to the blob store (a sharded filesystem directory), and returns the CAddr to the client. No recipe is
+        created, no DAG edges are added, and no computation occurs. The leaf path is the fast path — it bypasses the compute
+        engine entirely and performs identically to a traditional content-addressed blob store.
+    </p>
+
+    <h3>Storing a Recipe</h3>
+
+    <p>
+        When a client calls <code>put_recipe(function_id, inputs, params)</code>, the server constructs a <code>Recipe</code>
+        struct, computes its CAddr from the canonical serialization, verifies that adding the recipe's edges to the DAG would
+        not create a cycle, persists the recipe to the sled store, adds the edges to the in-memory DAG, and returns the CAddr.
+        At this point, the derived data <em>exists</em> in the system (it has an address and a recipe) but is not yet
+        <em>materialized</em> (no output bytes have been computed or stored).
+    </p>
+
+    <h3>Retrieving Data (Get)</h3>
+
+    <p>
+        When a client calls <code>get(addr)</code>, the server first checks the cache. On a cache hit, the cached bytes are
+        streamed to the client via server-side streaming gRPC. On a cache miss, the server looks up the recipe for the address,
+        recursively resolves all inputs (materializing any that are also cache misses), executes the function, caches the result,
+        and streams the output bytes. For large results, the streaming response sends data in chunks, allowing the client to
+        begin processing before the entire result is available.
+    </p>
+
+    <h2 id="grpc-api">5.4 gRPC API</h2>
+
+    <p>
+        The gRPC service definition exposes six RPCs that cover the complete lifecycle of data in Deriva:
+    </p>
+
+    <div class="code-block">
+        <pre><span class="rust-keyword">service</span> <span class="rust-type">Deriva</span> {
+    <span class="rust-comment">// Store raw bytes, return content address</span>
+    <span class="rust-keyword">rpc</span> <span class="rust-function">PutLeaf</span>(<span class="rust-type">PutLeafRequest</span>) <span class="rust-keyword">returns</span> (<span class="rust-type">PutLeafResponse</span>);
+
+    <span class="rust-comment">// Store a computation recipe, return recipe address</span>
+    <span class="rust-keyword">rpc</span> <span class="rust-function">PutRecipe</span>(<span class="rust-type">PutRecipeRequest</span>) <span class="rust-keyword">returns</span> (<span class="rust-type">PutRecipeResponse</span>);
+
+    <span class="rust-comment">// Retrieve data (materializes on cache miss), server-streaming</span>
+    <span class="rust-keyword">rpc</span> <span class="rust-function">Get</span>(<span class="rust-type">GetRequest</span>) <span class="rust-keyword">returns</span> (<span class="rust-keyword">stream</span> <span class="rust-type">GetResponse</span>);
+
+    <span class="rust-comment">// Return the recipe behind a derived address</span>
+    <span class="rust-keyword">rpc</span> <span class="rust-function">Resolve</span>(<span class="rust-type">ResolveRequest</span>) <span class="rust-keyword">returns</span> (<span class="rust-type">ResolveResponse</span>);
+
+    <span class="rust-comment">// Evict cached result + all dependents</span>
+    <span class="rust-keyword">rpc</span> <span class="rust-function">Invalidate</span>(<span class="rust-type">InvalidateRequest</span>) <span class="rust-keyword">returns</span> (<span class="rust-type">InvalidateResponse</span>);
+
+    <span class="rust-comment">// Cache stats, recipe/blob counts</span>
+    <span class="rust-keyword">rpc</span> <span class="rust-function">Status</span>(<span class="rust-type">StatusRequest</span>) <span class="rust-keyword">returns</span> (<span class="rust-type">StatusResponse</span>);
+}</pre>
+    </div>
+
+    <p>
+        The <code>Get</code> RPC uses server-side streaming to handle arbitrarily large results. The server sends the data in
+        chunks (currently 64KB per message), allowing the client to begin writing to disk or processing data before the entire
+        result has been transmitted. This is essential for derived results that may be hundreds of megabytes or larger — the
+        client should not need to buffer the entire result in memory.
+    </p>
+
+    <p>
+        The <code>Invalidate</code> RPC evicts a cached materialization and, via the DAG's dependents query, cascades the
+        eviction to all downstream cached results. This is the mechanism for handling input changes: when a leaf is updated
+        (by storing new bytes at a new CAddr and rebinding a mutable reference), the old CAddr's dependents are invalidated,
+        ensuring that subsequent reads trigger recomputation with the updated input.
+    </p>
 </div>

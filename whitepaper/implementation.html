@@ -1,3 +1,342 @@
 <div class="section-content">
-    <p class="loading">Content coming soon...</p>
+    <h1 id="implementation">6. Implementation</h1>
+
+    <p>
+        This section describes the Phase 1 implementation of Deriva in detail, including the technology choices, the addressing
+        scheme, the compute engine, the storage backend, the cache layer, and the testing strategy. All code examples are taken
+        from the working implementation as of commit <a href="https://github.com/mehmet-ylcnky/Deriva/commit/1d97098" target="_blank"><code>1d97098</code></a>.
+    </p>
+
+    <h2 id="tech-stack">6.1 Technology Stack</h2>
+
+    <div class="comparison-table">
+        <table>
+            <tr>
+                <th>Component</th>
+                <th>Choice</th>
+                <th>Rationale</th>
+            </tr>
+            <tr>
+                <td>Language</td>
+                <td>Rust</td>
+                <td>Memory safety without GC, zero-cost abstractions, fearless concurrency</td>
+            </tr>
+            <tr>
+                <td>Async Runtime</td>
+                <td>Tokio</td>
+                <td>Industry-standard async runtime, mature ecosystem, work-stealing scheduler</td>
+            </tr>
+            <tr>
+                <td>Hashing</td>
+                <td>SHA-256 (sha2 crate)</td>
+                <td>Widely trusted, hardware-accelerated on modern CPUs, 256-bit collision resistance</td>
+            </tr>
+            <tr>
+                <td>Serialization</td>
+                <td>bincode + serde</td>
+                <td>Compact binary format, deterministic output, fast encode/decode</td>
+            </tr>
+            <tr>
+                <td>Persistent KV Store</td>
+                <td>sled</td>
+                <td>Pure Rust, embedded, crash-safe, zero external dependencies</td>
+            </tr>
+            <tr>
+                <td>RPC Framework</td>
+                <td>tonic (gRPC)</td>
+                <td>HTTP/2 streaming, protobuf codegen, bidirectional streaming support</td>
+            </tr>
+            <tr>
+                <td>CLI Framework</td>
+                <td>clap</td>
+                <td>Derive-based argument parsing, shell completions, help generation</td>
+            </tr>
+        </table>
+    </div>
+
+    <p>
+        The choice of Rust deserves elaboration. A storage system that executes arbitrary computation on behalf of clients
+        operates in a threat model where memory safety bugs can lead to data corruption or security vulnerabilities. Rust's
+        ownership model eliminates entire classes of bugs — use-after-free, double-free, data races — at compile time. The
+        async/await model, combined with Tokio's work-stealing scheduler, enables the server to handle thousands of concurrent
+        requests without the overhead of OS threads. And Rust's trait system provides the polymorphism needed for the
+        <code>ComputeFunction</code> abstraction without runtime dispatch overhead in the common case.
+    </p>
+
+    <h2 id="addressing-scheme">6.2 Addressing Scheme</h2>
+
+    <p>
+        The addressing scheme is the foundation of the entire system. Every piece of data has a unique 32-byte address computed
+        deterministically. For leaves, the address is <code>SHA-256(content)</code>. For derived data, the address is
+        <code>SHA-256(canonical(recipe))</code>.
+    </p>
+
+    <p>
+        The canonical serialization of a recipe must be deterministic — the same recipe must always produce the same bytes,
+        regardless of the order in which fields were set or the platform on which serialization occurs. Deriva achieves this
+        through two mechanisms: parameters are stored in a <code>BTreeMap&lt;String, Value&gt;</code>, which maintains sorted
+        key order, and the serialization uses <code>bincode</code> with a fixed configuration (little-endian, fixed-length
+        integers). The combination guarantees that <code>canonical_bytes()</code> is a pure function of the recipe's logical
+        content.
+    </p>
+
+    <p>
+        CAddrs are displayed as lowercase hexadecimal strings (64 characters) and can be parsed back from this representation.
+        This makes them usable in command-line tools, log messages, and URLs:
+    </p>
+
+    <div class="code-block">
+        <pre><span class="rust-comment">// Display: 64-character hex string</span>
+<span class="rust-keyword">let</span> addr = <span class="rust-type">CAddr</span>::from_data(<span class="rust-string">b"hello world"</span>);
+<span class="rust-function">println!</span>(<span class="rust-string">"{}"</span>, addr);
+<span class="rust-comment">// → "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"</span>
+
+<span class="rust-comment">// Parse: from hex string back to CAddr</span>
+<span class="rust-keyword">let</span> parsed: <span class="rust-type">CAddr</span> = <span class="rust-string">"b94d27b9..."</span>.parse().unwrap();
+<span class="rust-function">assert_eq!</span>(addr, parsed);</pre>
+    </div>
+
+    <h2 id="compute-engine">6.3 Compute Engine</h2>
+
+    <p>
+        The compute engine is responsible for executing functions and managing the function registry. At its core is the
+        <code>ComputeFunction</code> trait, which every function — built-in or user-defined — must implement:
+    </p>
+
+    <div class="code-block">
+        <pre><span class="rust-keyword">pub trait</span> <span class="rust-type">ComputeFunction</span>: <span class="rust-type">Send</span> + <span class="rust-type">Sync</span> {
+    <span class="rust-comment">/// Unique identifier: (name, version)</span>
+    <span class="rust-keyword">fn</span> <span class="rust-function">id</span>(&amp;self) -&gt; <span class="rust-type">FunctionId</span>;
+
+    <span class="rust-comment">/// Execute the function on the given inputs with the given parameters.</span>
+    <span class="rust-comment">/// MUST be deterministic: same inputs + params → identical bytes, always.</span>
+    <span class="rust-keyword">fn</span> <span class="rust-function">execute</span>(
+        &amp;self,
+        inputs: &amp;[<span class="rust-type">Bytes</span>],
+        params: &amp;<span class="rust-type">BTreeMap</span>&lt;<span class="rust-type">String</span>, <span class="rust-type">Value</span>&gt;,
+    ) -&gt; <span class="rust-type">Result</span>&lt;<span class="rust-type">Bytes</span>, <span class="rust-type">ComputeError</span>&gt;;
+
+    <span class="rust-comment">/// Estimate the cost of executing this function on inputs of the given sizes.</span>
+    <span class="rust-comment">/// Used by the cache eviction scorer.</span>
+    <span class="rust-keyword">fn</span> <span class="rust-function">estimated_cost</span>(&amp;self, input_sizes: &amp;[<span class="rust-type">u64</span>]) -&gt; <span class="rust-type">ComputeCost</span>;
+}</pre>
+    </div>
+
+    <p>
+        The <code>Send + Sync</code> bounds ensure that function implementations can be shared across threads safely — a
+        requirement for concurrent request handling. The <code>estimated_cost</code> method returns a <code>ComputeCost</code>
+        struct containing estimated CPU time (in milliseconds) and memory usage (in bytes), which the cache uses for eviction
+        scoring.
+    </p>
+
+    <p>
+        Phase 1 ships with four built-in functions that serve as both useful primitives and test fixtures:
+    </p>
+
+    <div class="comparison-table">
+        <table>
+            <tr>
+                <th>Function</th>
+                <th>Inputs</th>
+                <th>Parameters</th>
+                <th>Behavior</th>
+            </tr>
+            <tr>
+                <td><code>identity/1.0.0</code></td>
+                <td>1</td>
+                <td>none</td>
+                <td>Returns input bytes unchanged</td>
+            </tr>
+            <tr>
+                <td><code>uppercase/1.0.0</code></td>
+                <td>1</td>
+                <td>none</td>
+                <td>Converts UTF-8 input to uppercase</td>
+            </tr>
+            <tr>
+                <td><code>concat/1.0.0</code></td>
+                <td>2+</td>
+                <td>none</td>
+                <td>Concatenates all inputs in order</td>
+            </tr>
+            <tr>
+                <td><code>repeat/1.0.0</code></td>
+                <td>1</td>
+                <td><code>count: Int|String</code></td>
+                <td>Repeats input bytes <em>count</em> times</td>
+            </tr>
+        </table>
+    </div>
+
+    <p>
+        The <code>Executor</code> orchestrates materialization. Given a CAddr, it walks the DAG to identify all dependencies,
+        checks which are already cached, computes a topological execution order for the uncached nodes, and executes each
+        function in order. The executor interacts with the cache through the <code>MaterializationCache</code> trait, which
+        abstracts the cache implementation:
+    </p>
+
+    <div class="code-block">
+        <pre><span class="rust-keyword">pub trait</span> <span class="rust-type">MaterializationCache</span>: <span class="rust-type">Send</span> + <span class="rust-type">Sync</span> {
+    <span class="rust-keyword">fn</span> <span class="rust-function">get_materialized</span>(&amp;self, addr: &amp;<span class="rust-type">CAddr</span>) -&gt; <span class="rust-type">Option</span>&lt;<span class="rust-type">Bytes</span>&gt;;
+    <span class="rust-keyword">fn</span> <span class="rust-function">put_materialized</span>(&amp;self, addr: <span class="rust-type">CAddr</span>, data: <span class="rust-type">Bytes</span>, cost: <span class="rust-type">ComputeCost</span>);
+    <span class="rust-keyword">fn</span> <span class="rust-function">evict</span>(&amp;self, addr: &amp;<span class="rust-type">CAddr</span>) -&gt; <span class="rust-type">bool</span>;
+}</pre>
+    </div>
+
+    <h2 id="storage-backend">6.4 Storage Backend</h2>
+
+    <p>
+        Persistent storage in Deriva is split into two tiers, reflecting the different characteristics of recipes and blobs.
+    </p>
+
+    <p>
+        <strong>SledRecipeStore</strong> uses the <code>sled</code> embedded database for recipe storage. Sled provides
+        crash-safe, atomic writes with a B-tree-based storage engine — ideal for the small, structured recipe records that
+        are frequently queried by CAddr. Recipes are serialized with bincode and stored as key-value pairs where the key is
+        the 32-byte CAddr and the value is the serialized recipe.
+    </p>
+
+    <p>
+        <strong>BlobStore</strong> uses the filesystem directly for binary data, with a two-level hexadecimal sharding scheme
+        to avoid filesystem performance degradation from too many files in a single directory. A blob with CAddr
+        <code>ab cd ef 01 ...</code> is stored at the path <code>blobs/ab/cd/abcdef01...</code>. This sharding distributes
+        files across 65,536 directories (256 × 256), ensuring that even with millions of blobs, no single directory contains
+        more than a manageable number of entries.
+    </p>
+
+    <div class="architecture-diagram">
+storage_root/
+├── recipes.sled/          ← sled database (recipes, metadata)
+│   ├── db
+│   ├── conf
+│   └── ...
+└── blobs/                 ← sharded blob storage
+    ├── ab/
+    │   ├── cd/
+    │   │   └── abcdef0123456789...  ← blob file
+    │   └── ef/
+    │       └── abef7890abcdef12...
+    ├── ff/
+    │   └── 00/
+    │       └── ff00112233445566...
+    └── ...</div>
+
+    <p>
+        The <code>StorageBackend</code> facade unifies both stores behind a single interface, providing methods for storing
+        and retrieving recipes and blobs by CAddr. It handles the mapping between CAddrs and filesystem paths, the creation
+        of shard directories, and error translation from sled and I/O errors into <code>DerivaError</code>.
+    </p>
+
+    <h2 id="cache-layer">6.5 Cache Layer</h2>
+
+    <p>
+        The <code>EvictableCache</code> is a concurrent, cost-aware in-memory cache. It stores materialized bytes keyed by
+        CAddr, along with metadata for each entry: the size in bytes, the estimated recomputation cost, the access count, and
+        the last access timestamp. The cache is thread-safe, using internal synchronization to support concurrent reads and
+        writes from multiple Tokio tasks.
+    </p>
+
+    <p>
+        The cache tracks hit and miss statistics, which are exposed through the <code>Status</code> RPC. These statistics
+        provide operational visibility into cache effectiveness — a high miss rate suggests that the cache is too small or
+        that the eviction policy is suboptimal, while a high hit rate confirms that the cache is providing value.
+    </p>
+
+    <h2 id="testing-strategy">6.6 Testing Strategy</h2>
+
+    <p>
+        Deriva's testing strategy reflects the layered architecture. Each crate has its own test suite that tests the crate's
+        functionality in isolation, and the server crate has integration tests that exercise the full stack end-to-end.
+    </p>
+
+    <div class="metric-grid">
+        <div class="metric-item">
+            <div class="metric-value">244</div>
+            <div class="metric-label">Total Tests Passing</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-value">6</div>
+            <div class="metric-label">Crates Tested</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-value">0</div>
+            <div class="metric-label">Clippy Warnings</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-value">23</div>
+            <div class="metric-label">Integration Tests</div>
+        </div>
+    </div>
+
+    <p>
+        The test distribution across crates reflects the complexity of each layer:
+    </p>
+
+    <div class="comparison-table">
+        <table>
+            <tr>
+                <th>Crate</th>
+                <th>Unit Tests</th>
+                <th>Integration Tests</th>
+                <th>Coverage Focus</th>
+            </tr>
+            <tr>
+                <td><code>deriva-core</code></td>
+                <td>43</td>
+                <td>—</td>
+                <td>Address determinism, DAG cycle detection, cache eviction ordering</td>
+            </tr>
+            <tr>
+                <td><code>deriva-compute</code></td>
+                <td>44</td>
+                <td>—</td>
+                <td>Function execution, registry lookup, executor DAG walking</td>
+            </tr>
+            <tr>
+                <td><code>deriva-storage</code></td>
+                <td>28</td>
+                <td>—</td>
+                <td>Recipe persistence, blob sharding, round-trip serialization</td>
+            </tr>
+            <tr>
+                <td><code>deriva-server</code></td>
+                <td>24</td>
+                <td>23</td>
+                <td>gRPC service methods, streaming, error handling, end-to-end flows</td>
+            </tr>
+            <tr>
+                <td><code>deriva-cli</code></td>
+                <td>14</td>
+                <td>—</td>
+                <td>Argument parsing, client helpers, output formatting</td>
+            </tr>
+        </table>
+    </div>
+
+    <p>
+        The 23 integration tests in <code>deriva-server</code> deserve special attention. These tests exercise the complete
+        system stack — from gRPC request through service logic, compute engine, DAG store, cache, and storage backend — without
+        any mocking. Each test creates a fresh <code>DerivaService</code> backed by a temporary directory, performs a sequence
+        of operations, and verifies the results. The test scenarios cover:
+    </p>
+
+    <ul>
+        <li><strong>Leaf roundtrip:</strong> Store bytes, retrieve them, verify content and address determinism.</li>
+        <li><strong>Single-level derivation:</strong> Store a leaf, create a recipe (uppercase, identity, concat, repeat), retrieve the derived result.</li>
+        <li><strong>Multi-level DAG chains:</strong> 3-deep and 4-deep chains where each level's output is the input to the next.</li>
+        <li><strong>Diamond dependency:</strong> Two branches sharing a common leaf input, merged by a concat at the top.</li>
+        <li><strong>Cache verification:</strong> Confirm that a second <code>get()</code> hits the cache (improved hit rate).</li>
+        <li><strong>Invalidation cascade:</strong> Evict a cached result, verify it's gone, re-retrieve to trigger recomputation.</li>
+        <li><strong>Persistence across restart:</strong> Drop the service (releasing sled locks), create a new service on the same directory, verify that recipes and blobs survive but the cache is cold.</li>
+        <li><strong>Large blob streaming:</strong> 500KB leaf and 300KB derived result, verifying that streaming handles large payloads correctly.</li>
+        <li><strong>Error cases:</strong> Nonexistent address, missing function, malformed address, resolve on nonexistent recipe.</li>
+        <li><strong>Concurrent operations:</strong> 20 parallel puts and 10 parallel gets using <code>futures::future::join_all</code>.</li>
+    </ul>
+
+    <p>
+        A notable testing pattern in Deriva is the use of <strong>in-process gRPC testing</strong>. Rather than starting a TCP
+        listener and connecting a client, the tests call the tonic-generated trait methods directly on the <code>DerivaService</code>
+        instance: <code>Deriva::put_leaf(&amp;svc, Request::new(...))</code>. This avoids port allocation, network overhead, and
+        timing issues, while still exercising the full service implementation including protobuf serialization and deserialization.
+    </p>
 </div>

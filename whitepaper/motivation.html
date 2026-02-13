@@ -1,3 +1,109 @@
 <div class="section-content">
-    <p class="loading">Content coming soon...</p>
+    <h1 id="motivation">2. Motivation: The Derived Data Problem</h1>
+
+    <h2 id="the-storage-landscape">2.1 The Storage Landscape</h2>
+
+    <p>
+        In a typical data-intensive organization — whether it operates in analytics, machine learning, media processing, or
+        continuous integration — the composition of stored data follows a remarkably consistent pattern. Roughly 10–20% of total
+        storage is occupied by <em>original data</em>: user uploads, sensor feeds, ingested logs, raw database exports. The
+        remaining 80–90% is <em>derived data</em>: the outputs of transformations, aggregations, model training runs, format
+        conversions, report generation, image transcoding, and cached query results. Every intermediate stage of every data
+        pipeline produces output that is, by definition, a deterministic function of its inputs.
+    </p>
+
+    <p>
+        Yet every existing distributed file system treats all of this data identically. HDFS allocates three replicas for a
+        Parquet file that is the output of a Spark aggregation, just as it would for the raw CSV that was the input. Amazon S3
+        charges the same per-gigabyte rate for a cached model inference result as for the training dataset. Ceph distributes
+        and rebalances a transcoded video file with the same urgency as the original upload. The storage layer has no concept
+        of "this data is reproducible" versus "this data is irreplaceable." To the storage system, bytes are bytes.
+    </p>
+
+    <p>
+        This fundamental blindness leads to four interconnected problems that grow worse as organizations scale.
+    </p>
+
+    <h2 id="four-symptoms">2.2 Four Symptoms of a Missing Abstraction</h2>
+
+    <h3>Storage Bloat</h3>
+
+    <p>
+        Organizations routinely store 5–10× more data than they strictly need to. Every intermediate pipeline stage, every
+        experiment variant, every format conversion, every cached aggregation is a full materialized copy. A machine learning
+        team that trains 50 model variants on the same dataset stores 50 copies of the model weights, 50 copies of the evaluation
+        metrics, and 50 copies of the preprocessed features — even though all of these are deterministic functions of the same
+        raw data plus different hyperparameters. A media processing pipeline that transcodes a video into six resolutions stores
+        seven copies of essentially the same content. The storage system cannot distinguish between "data I must keep" and "data
+        I could regenerate," so it keeps everything.
+    </p>
+
+    <h3>Stale Data Without Provenance</h3>
+
+    <p>
+        When an input dataset is corrected — a bug in the ingestion pipeline is fixed, a sensor is recalibrated, a data quality
+        issue is resolved — every downstream derived dataset becomes potentially stale. But the storage system has no concept of
+        "downstream." The knowledge of which outputs depend on which inputs lives in external orchestrators (Airflow DAGs, Prefect
+        flows), in pipeline code (Spark job definitions), or nowhere at all (ad-hoc scripts that were run once and forgotten).
+        Answering the question "which outputs need to be regenerated because this input changed?" requires reconstructing the
+        dependency graph from scattered sources — a process that is manual, error-prone, and often incomplete.
+    </p>
+
+    <h3>Manual Lifecycle Management</h3>
+
+    <p>
+        Because the storage system cannot distinguish reproducible data from irreplaceable data, lifecycle management falls to
+        humans. Teams write ad-hoc cleanup scripts with hardcoded paths and arbitrary retention periods. Administrators set
+        S3 lifecycle policies that delete objects older than 90 days, regardless of whether those objects are actively used or
+        trivially reproducible. Nobody deletes derived data proactively because nobody is confident about what is safe to delete.
+        The cost of accidentally deleting an expensive-to-recompute result is high, and the storage system provides no safety net.
+        The result is that storage grows monotonically, bounded only by budget.
+    </p>
+
+    <h3>Lost Reproducibility</h3>
+
+    <p>
+        "How was this file produced?" is one of the most common questions in data engineering, and one of the hardest to answer.
+        The provenance of a derived dataset is scattered across pipeline logs (which may have been rotated), Git history (which
+        tracks code but not data), orchestrator metadata (which tracks job runs but not byte-level lineage), and tribal knowledge
+        (which is lost when team members leave). Reproducing a result from six months ago requires not just the input data but
+        the exact version of the code, the exact configuration, and the exact execution environment — none of which the storage
+        system records. In regulated industries, this lack of reproducibility is not just inconvenient but a compliance risk.
+    </p>
+
+    <h2 id="why-now">2.3 Why Now</h2>
+
+    <p>
+        The problems described above are not new. What has changed is the economic and technological context that makes a
+        computation-addressed storage system both feasible and timely.
+    </p>
+
+    <p>
+        <strong>Compute is cheap and elastic.</strong> Cloud computing has made CPU cycles a commodity. Spot instances, serverless
+        functions, and autoscaling groups mean that computation can be provisioned on demand at a fraction of the cost of persistent
+        storage. For many workloads, it is now cheaper to recompute a result than to store it for a month. This inverts the
+        traditional assumption that storage is cheap and compute is expensive — an assumption that underpins the "store everything"
+        approach of existing file systems.
+    </p>
+
+    <p>
+        <strong>Content-addressed storage has proven viable at scale.</strong> Git, IPFS, the Nix store, and Docker's content-addressable
+        image layers have demonstrated that hash-based addressing works in production systems handling billions of objects. The
+        tooling, algorithms, and operational practices for content-addressed systems are mature. Deriva extends this proven model
+        from content hashes (hash of bytes) to computation hashes (hash of recipe).
+    </p>
+
+    <p>
+        <strong>WebAssembly provides a portable deterministic sandbox.</strong> The requirement that compute functions be deterministic
+        is Deriva's hardest constraint. WASM provides a practical solution: a portable, sandboxed execution environment where
+        functions have no access to the clock, the network, or the filesystem — making non-determinism structurally impossible.
+        The WASM ecosystem (Wasmtime, Wasmer, WasmEdge) is now mature enough for production use, with performance within 10–20%
+        of native execution for compute-bound workloads.
+    </p>
+
+    <p>
+        <strong>Storage costs dominate data infrastructure budgets.</strong> As organizations accumulate years of derived data,
+        storage becomes the largest and fastest-growing line item in their cloud bills. A system that can reduce storage by an
+        order of magnitude for derived-heavy workloads addresses a real and growing economic pain point.
+    </p>
 </div>

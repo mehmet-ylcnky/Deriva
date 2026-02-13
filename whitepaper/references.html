@@ -1,3 +1,97 @@
 <div class="section-content">
-    <p class="loading">Content coming soon...</p>
+    <h1 id="references">11. References</h1>
+
+    <ul>
+        <li>
+            <strong>[1]</strong> Ghemawat, S., Gobioff, H., & Leung, S.-T. (2003).
+            <em>The Google File System.</em> SOSP '03. — The foundational distributed file system paper.
+            Treats all data as opaque bytes with path-based addressing.
+        </li>
+        <li>
+            <strong>[2]</strong> Shvachko, K., Kuang, H., Radia, S., & Chansler, R. (2010).
+            <em>The Hadoop Distributed File System.</em> MSST '10. — Open-source implementation of GFS principles.
+            No concept of derived data or computation.
+        </li>
+        <li>
+            <strong>[3]</strong> Benet, J. (2014).
+            <em>IPFS - Content Addressed, Versioned, P2P File System.</em> arXiv:1407.3561. — Content-addressed
+            distributed storage using Merkle DAGs. Addresses data by content hash but has no computation model.
+        </li>
+        <li>
+            <strong>[4]</strong> Dolstra, E., de Jonge, M., & Visser, E. (2004).
+            <em>Nix: A Safe and Policy-Free System for Software Deployment.</em> LISA '04. — Computation-addressed
+            package management. Packages are addressed by hash(build_recipe + all_inputs). Single-node, eager evaluation.
+        </li>
+        <li>
+            <strong>[5]</strong> Zaharia, M., Chowdhury, M., Das, T., Dave, A., Ma, J., McCauley, M., Franklin, M. J.,
+            Shenker, S., & Stoica, I. (2012).
+            <em>Resilient Distributed Datasets: A Fault-Tolerant Abstraction for In-Memory Cluster Computing.</em>
+            NSDI '12. — RDD lineage for fault tolerance via recomputation. Ephemeral, scoped to a single Spark job.
+        </li>
+        <li>
+            <strong>[6]</strong> Mokhtar, S. A. & Vlassov, V. (2019).
+            <em>A Survey on Content-Addressable Storage.</em> — Comprehensive survey of CAS systems, deduplication
+            techniques, and hash-based addressing schemes.
+        </li>
+        <li>
+            <strong>[7]</strong> Bazel Build System. Google.
+            <a href="https://bazel.build/" target="_blank">https://bazel.build/</a> — Content-addressed build caching
+            with remote cache support. Scoped to build artifacts.
+        </li>
+        <li>
+            <strong>[8]</strong> Buck2 Build System. Meta.
+            <a href="https://buck2.build/" target="_blank">https://buck2.build/</a> — Next-generation build system
+            with content-addressed outputs and remote execution.
+        </li>
+        <li>
+            <strong>[9]</strong> Pachyderm.
+            <a href="https://www.pachyderm.com/" target="_blank">https://www.pachyderm.com/</a> — Data versioning and
+            pipeline platform with provenance tracking. Full platform, not a pure storage layer.
+        </li>
+        <li>
+            <strong>[10]</strong> Apache Atlas.
+            <a href="https://atlas.apache.org/" target="_blank">https://atlas.apache.org/</a> — Data governance and
+            metadata management framework. Lineage as external metadata, not integrated with storage.
+        </li>
+        <li>
+            <strong>[11]</strong> OpenLineage.
+            <a href="https://openlineage.io/" target="_blank">https://openlineage.io/</a> — Open standard for data
+            lineage collection. Metadata-only, no storage integration.
+        </li>
+        <li>
+            <strong>[12]</strong> Dagster.
+            <a href="https://dagster.io/" target="_blank">https://dagster.io/</a> — Data orchestrator with asset
+            materialization model. Memoization at the orchestrator level.
+        </li>
+        <li>
+            <strong>[13]</strong> Tonic — gRPC for Rust.
+            <a href="https://github.com/hyperium/tonic" target="_blank">https://github.com/hyperium/tonic</a> —
+            The gRPC framework used by Deriva's server and client.
+        </li>
+        <li>
+            <strong>[14]</strong> Sled — Embedded Database.
+            <a href="https://github.com/spacejam/sled" target="_blank">https://github.com/spacejam/sled</a> —
+            Pure Rust embedded database used for recipe storage.
+        </li>
+        <li>
+            <strong>[15]</strong> Tokio — Async Runtime for Rust.
+            <a href="https://tokio.rs/" target="_blank">https://tokio.rs/</a> — The async runtime powering
+            Deriva's server.
+        </li>
+        <li>
+            <strong>[16]</strong> Wasmtime — WebAssembly Runtime.
+            <a href="https://wasmtime.dev/" target="_blank">https://wasmtime.dev/</a> — Planned WASM sandbox
+            for user-defined compute functions in Phase 4.
+        </li>
+        <li>
+            <strong>[17]</strong> Das, A., Gupta, I., & Motivala, A. (2002).
+            <em>SWIM: Scalable Weakly-consistent Infection-style Process Group Membership Protocol.</em>
+            DSN '02. — The gossip protocol planned for Deriva's Phase 3 node discovery.
+        </li>
+        <li>
+            <strong>[18]</strong> Deriva Source Code.
+            <a href="https://github.com/mehmet-ylcnky/Deriva" target="_blank">https://github.com/mehmet-ylcnky/Deriva</a> —
+            The complete implementation described in this paper.
+        </li>
+    </ul>
 </div>

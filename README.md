@@ -2,7 +2,7 @@
   <img src="logo2.png" width="200" alt="Deriva logo">
 </p>
 
-<h1 align="center">Deriva</h1>
+<!-- <h1 align="center">Deriva</h1> -->
 
 <p align="center">A computation-addressed distributed file system built in Rust.</p>
 

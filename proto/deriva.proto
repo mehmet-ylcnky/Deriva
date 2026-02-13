@@ -1,0 +1,12 @@
+syntax = "proto3";
+package deriva;
+
+// Full service definition in section 1.7
+service Deriva {
+    rpc Ping (PingRequest) returns (PingResponse);
+}
+
+message PingRequest {}
+message PingResponse {
+    string version = 1;
+}

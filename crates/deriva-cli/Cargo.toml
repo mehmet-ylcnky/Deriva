@@ -1,0 +1,10 @@
+[package]
+name = "deriva-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tonic = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }

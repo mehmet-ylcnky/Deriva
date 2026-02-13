@@ -5,4 +5,11 @@ edition = "2021"
 
 [dependencies]
 deriva-core = { path = "../deriva-core" }
+deriva-compute = { path = "../deriva-compute" }
+sled = { workspace = true }
+bincode = { workspace = true }
+bytes = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

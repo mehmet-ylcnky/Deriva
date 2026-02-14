@@ -11,6 +11,3 @@
 # OS
 .DS_Store
 Thumbs.db
-
-# Docs (implementation plans — not for repo)
-/docs/

@@ -380,3 +380,112 @@ async fn concurrent_gets_same_addr() {
         assert_eq!(r, b"SHARED");
     }
 }
+
+// --- Phase 2.2 Integration Tests ---
+
+#[tokio::test]
+async fn test_async_get_rpc_concurrent() {
+    let h = TestHarness::new();
+    
+    // Put 5 different leaves + recipes
+    let mut addrs = Vec::new();
+    for i in 0..5 {
+        let data = format!("data{}", i);
+        let leaf = put_leaf(h.svc(), data.as_bytes()).await;
+        let recipe = put_recipe(h.svc(), "identity", "1.0.0", vec![leaf], Default::default()).await;
+        addrs.push((recipe, data));
+    }
+    
+    // Spawn 5 concurrent Get requests using join_all (no spawn needed)
+    let start = std::time::Instant::now();
+    let mut handles = Vec::new();
+    for (addr, expected) in &addrs {
+        handles.push(async {
+            let result = get_all(h.svc(), addr).await;
+            (result, expected.clone())
+        });
+    }
+    let results = futures::future::join_all(handles).await;
+    let elapsed = start.elapsed();
+    
+    // Verify all results
+    for (result, expected) in results {
+        assert_eq!(result, expected.as_bytes());
+    }
+    
+    println!("5 concurrent Gets completed in {:?}", elapsed);
+}
+
+#[tokio::test]
+async fn test_async_get_rpc_during_put() {
+    let h = TestHarness::new();
+    
+    // Create initial recipe
+    let leaf1 = put_leaf(h.svc(), b"initial").await;
+    let recipe1 = put_recipe(h.svc(), "identity", "1.0.0", vec![leaf1], Default::default()).await;
+    
+    // Execute Get and Put concurrently using join
+    let get_fut = get_all(h.svc(), &recipe1);
+    let put_fut = async {
+        let leaf2 = put_leaf(h.svc(), b"concurrent").await;
+        put_recipe(h.svc(), "uppercase", "1.0.0", vec![leaf2], Default::default()).await
+    };
+    
+    let (result, _) = tokio::join!(get_fut, put_fut);
+    assert_eq!(result, b"initial");
+}
+
+#[tokio::test]
+async fn test_async_invalidate_during_get() {
+    let h = TestHarness::new();
+    
+    // Put leaf + recipe, materialize once (cached)
+    let leaf = put_leaf(h.svc(), b"cached").await;
+    let recipe = put_recipe(h.svc(), "identity", "1.0.0", vec![leaf], Default::default()).await;
+    let _ = get_all(h.svc(), &recipe).await; // Prime cache
+    
+    // Execute Get and Invalidate concurrently
+    let get_fut = get_all(h.svc(), &recipe);
+    let inv_fut = async {
+        Deriva::invalidate(h.svc(), Request::new(InvalidateRequest { addr: recipe.clone() }))
+            .await
+            .unwrap()
+    };
+    
+    let (result, _) = tokio::join!(get_fut, inv_fut);
+    assert_eq!(result, b"cached");
+}
+
+#[tokio::test]
+async fn test_async_status_during_heavy_load() {
+    let h = TestHarness::new();
+    
+    // Put 20 recipes
+    let mut addrs = Vec::new();
+    for i in 0..20 {
+        let data = format!("load{}", i);
+        let leaf = put_leaf(h.svc(), data.as_bytes()).await;
+        let recipe = put_recipe(h.svc(), "identity", "1.0.0", vec![leaf], Default::default()).await;
+        addrs.push(recipe);
+    }
+    
+    // Execute 10 Gets and 5 Status calls concurrently
+    let get_futs: Vec<_> = addrs[..10].iter().map(|addr| get_all(h.svc(), addr)).collect();
+    let status_futs: Vec<_> = (0..5).map(|_| status(h.svc())).collect();
+    
+    // Run all concurrently
+    let (get_results, status_results) = tokio::join!(
+        futures::future::join_all(get_futs),
+        futures::future::join_all(status_futs)
+    );
+    
+    // Verify Gets succeeded
+    assert_eq!(get_results.len(), 10);
+    
+    // Verify Status calls returned valid counts
+    assert_eq!(status_results.len(), 5);
+    for resp in status_results {
+        assert!(resp.recipe_count >= 20);
+    }
+}
+

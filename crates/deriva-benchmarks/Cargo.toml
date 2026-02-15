@@ -1,0 +1,16 @@
+[package]
+name = "deriva-benchmarks"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+deriva-core = { path = "../deriva-core" }
+deriva-compute = { path = "../deriva-compute" }
+deriva-storage = { path = "../deriva-storage" }
+bytes.workspace = true
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+
+[[bench]]
+name = "phase1_baseline"
+harness = false

@@ -1,0 +1,193 @@
+   Compiling deriva-benchmarks v0.1.0 (/home/a524573/computation-addressed-dfs/crates/deriva-benchmarks)
+    Finished `bench` profile [optimized] target(s) in 2.19s
+     Running benches/phase1_baseline.rs (target/release/deps/phase1_baseline-d8561785576e4b6c)
+Gnuplot not found, using plotters backend
+Benchmarking caddr_computation/64
+Benchmarking caddr_computation/64: Warming up for 3.0000 s
+Benchmarking caddr_computation/64: Collecting 100 samples in estimated 5.0001 s (53M iterations)
+Benchmarking caddr_computation/64: Analyzing
+caddr_computation/64    time:   [75.761 ns 78.451 ns 81.658 ns]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking caddr_computation/256
+Benchmarking caddr_computation/256: Warming up for 3.0000 s
+Benchmarking caddr_computation/256: Collecting 100 samples in estimated 5.0000 s (19M iterations)
+Benchmarking caddr_computation/256: Analyzing
+caddr_computation/256   time:   [305.11 ns 311.53 ns 318.28 ns]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+Benchmarking caddr_computation/1024
+Benchmarking caddr_computation/1024: Warming up for 3.0000 s
+Benchmarking caddr_computation/1024: Collecting 100 samples in estimated 5.0025 s (4.4M iterations)
+Benchmarking caddr_computation/1024: Analyzing
+caddr_computation/1024  time:   [1.1093 µs 1.1421 µs 1.1764 µs]
+Found 12 outliers among 100 measurements (12.00%)
+  1 (1.00%) low mild
+  7 (7.00%) high mild
+  4 (4.00%) high severe
+Benchmarking caddr_computation/4096
+Benchmarking caddr_computation/4096: Warming up for 3.0000 s
+Benchmarking caddr_computation/4096: Collecting 100 samples in estimated 5.0052 s (3.4M iterations)
+Benchmarking caddr_computation/4096: Analyzing
+caddr_computation/4096  time:   [1.3604 µs 1.4104 µs 1.4687 µs]
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking caddr_computation/16384
+Benchmarking caddr_computation/16384: Warming up for 3.0000 s
+Benchmarking caddr_computation/16384: Collecting 100 samples in estimated 5.0143 s (1.3M iterations)
+Benchmarking caddr_computation/16384: Analyzing
+caddr_computation/16384 time:   [4.5585 µs 4.6498 µs 4.7477 µs]
+Found 17 outliers among 100 measurements (17.00%)
+  9 (9.00%) low mild
+  8 (8.00%) high mild
+Benchmarking caddr_computation/65536
+Benchmarking caddr_computation/65536: Warming up for 3.0000 s
+Benchmarking caddr_computation/65536: Collecting 100 samples in estimated 5.0601 s (303k iterations)
+Benchmarking caddr_computation/65536: Analyzing
+caddr_computation/65536 time:   [17.711 µs 18.249 µs 18.896 µs]
+Found 12 outliers among 100 measurements (12.00%)
+  7 (7.00%) high mild
+  5 (5.00%) high severe
+Benchmarking caddr_computation/262144
+Benchmarking caddr_computation/262144: Warming up for 3.0000 s
+Benchmarking caddr_computation/262144: Collecting 100 samples in estimated 5.3604 s (71k iterations)
+Benchmarking caddr_computation/262144: Analyzing
+caddr_computation/262144
+                        time:   [73.913 µs 75.799 µs 77.825 µs]
+Found 6 outliers among 100 measurements (6.00%)
+  5 (5.00%) high mild
+  1 (1.00%) high severe
+Benchmarking caddr_computation/1048576
+Benchmarking caddr_computation/1048576: Warming up for 3.0000 s
+Benchmarking caddr_computation/1048576: Collecting 100 samples in estimated 6.1960 s (20k iterations)
+Benchmarking caddr_computation/1048576: Analyzing
+caddr_computation/1048576
+                        time:   [240.69 µs 246.91 µs 253.31 µs]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+
+Benchmarking recipe_store_insert/10
+Benchmarking recipe_store_insert/10: Warming up for 3.0000 s
+Benchmarking recipe_store_insert/10: Collecting 100 samples in estimated 5.7666 s (600 iterations)
+Benchmarking recipe_store_insert/10: Analyzing
+recipe_store_insert/10  time:   [11.709 ms 12.040 ms 12.372 ms]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking recipe_store_insert/50
+Benchmarking recipe_store_insert/50: Warming up for 3.0000 s
+Benchmarking recipe_store_insert/50: Collecting 100 samples in estimated 5.8038 s (600 iterations)
+Benchmarking recipe_store_insert/50: Analyzing
+recipe_store_insert/50  time:   [13.129 ms 13.471 ms 13.823 ms]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+Benchmarking recipe_store_insert/100
+Benchmarking recipe_store_insert/100: Warming up for 3.0000 s
+Benchmarking recipe_store_insert/100: Collecting 100 samples in estimated 5.4270 s (500 iterations)
+Benchmarking recipe_store_insert/100: Analyzing
+recipe_store_insert/100 time:   [14.301 ms 15.097 ms 16.392 ms]
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking recipe_store_insert/500
+Benchmarking recipe_store_insert/500: Warming up for 3.0000 s
+Benchmarking recipe_store_insert/500: Collecting 100 samples in estimated 5.4355 s (400 iterations)
+Benchmarking recipe_store_insert/500: Analyzing
+recipe_store_insert/500 time:   [14.850 ms 15.139 ms 15.437 ms]
+Found 10 outliers among 100 measurements (10.00%)
+  1 (1.00%) low mild
+  8 (8.00%) high mild
+  1 (1.00%) high severe
+Benchmarking recipe_store_insert/1000
+Benchmarking recipe_store_insert/1000: Warming up for 3.0000 s
+Benchmarking recipe_store_insert/1000: Collecting 100 samples in estimated 5.7547 s (400 iterations)
+Benchmarking recipe_store_insert/1000: Analyzing
+recipe_store_insert/1000
+                        time:   [15.885 ms 19.739 ms 26.366 ms]
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+Benchmarking recipe_store_insert/5000
+Benchmarking recipe_store_insert/5000: Warming up for 3.0000 s
+Benchmarking recipe_store_insert/5000: Collecting 100 samples in estimated 5.7242 s (200 iterations)
+Benchmarking recipe_store_insert/5000: Analyzing
+recipe_store_insert/5000
+                        time:   [25.731 ms 26.322 ms 26.946 ms]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+
+Benchmarking recipe_store_get/10
+Benchmarking recipe_store_get/10: Warming up for 3.0000 s
+Benchmarking recipe_store_get/10: Collecting 100 samples in estimated 5.1755 s (600 iterations)
+Benchmarking recipe_store_get/10: Analyzing
+recipe_store_get/10     time:   [12.242 ms 12.535 ms 12.834 ms]
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking recipe_store_get/50
+Benchmarking recipe_store_get/50: Warming up for 3.0000 s
+Benchmarking recipe_store_get/50: Collecting 100 samples in estimated 5.0198 s (500 iterations)
+Benchmarking recipe_store_get/50: Analyzing
+recipe_store_get/50     time:   [13.029 ms 13.291 ms 13.559 ms]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking recipe_store_get/100
+Benchmarking recipe_store_get/100: Warming up for 3.0000 s
+Benchmarking recipe_store_get/100: Collecting 100 samples in estimated 5.4804 s (500 iterations)
+Benchmarking recipe_store_get/100: Analyzing
+recipe_store_get/100    time:   [13.017 ms 13.306 ms 13.602 ms]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking recipe_store_get/500
+Benchmarking recipe_store_get/500: Warming up for 3.0000 s
+Benchmarking recipe_store_get/500: Collecting 100 samples in estimated 5.1269 s (400 iterations)
+Benchmarking recipe_store_get/500: Analyzing
+recipe_store_get/500    time:   [11.076 ms 11.328 ms 11.589 ms]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking recipe_store_get/1000
+Benchmarking recipe_store_get/1000: Warming up for 3.0000 s
+Benchmarking recipe_store_get/1000: Collecting 100 samples in estimated 6.2524 s (400 iterations)
+Benchmarking recipe_store_get/1000: Analyzing
+recipe_store_get/1000   time:   [10.230 ms 10.446 ms 10.674 ms]
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) high mild
+Benchmarking recipe_store_get/5000
+Benchmarking recipe_store_get/5000: Warming up for 3.0000 s
+Benchmarking recipe_store_get/5000: Collecting 100 samples in estimated 6.6820 s (200 iterations)
+Benchmarking recipe_store_get/5000: Analyzing
+recipe_store_get/5000   time:   [12.012 ms 12.385 ms 12.836 ms]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+
+Benchmarking recipe_store_contains/100
+Benchmarking recipe_store_contains/100: Warming up for 3.0000 s
+Benchmarking recipe_store_contains/100: Collecting 100 samples in estimated 5.4086 s (500 iterations)
+Benchmarking recipe_store_contains/100: Analyzing
+recipe_store_contains/100
+                        time:   [12.872 ms 13.152 ms 13.441 ms]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking recipe_store_contains/1000
+Benchmarking recipe_store_contains/1000: Warming up for 3.0000 s
+Benchmarking recipe_store_contains/1000: Collecting 100 samples in estimated 5.8846 s (400 iterations)
+Benchmarking recipe_store_contains/1000: Analyzing
+recipe_store_contains/1000
+                        time:   [9.8909 ms 10.136 ms 10.388 ms]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking recipe_store_contains/5000
+Benchmarking recipe_store_contains/5000: Warming up for 3.0000 s
+Benchmarking recipe_store_contains/5000: Collecting 100 samples in estimated 5.4782 s (200 iterations)
+Benchmarking recipe_store_contains/5000: Analyzing
+recipe_store_contains/5000
+                        time:   [11.069 ms 11.399 ms 11.748 ms]
+Found 5 outliers among 100 measurements (5.00%)
+  5 (5.00%) high mild
+
+Benchmarking blob_store_put/64
+Benchmarking blob_store_put/64: Warming up for 3.0000 s
+Benchmarking blob_store_put/64: Collecting 100 samples in estimated 5.2866 s (10k iterations)

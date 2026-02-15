@@ -20,9 +20,8 @@ fn put_recipe_and_rebuild_dag() {
     let recipe = Recipe::new(FunctionId::new("compress", "1.0.0"), vec![leaf_addr], BTreeMap::new());
     let recipe_addr = backend.put_recipe(&recipe).unwrap();
 
-    let dag = backend.rebuild_dag().unwrap();
-    assert!(dag.contains(&recipe_addr));
-    assert_eq!(dag.get_recipe(&recipe_addr), Some(&recipe));
+    assert!(backend.dag.contains(&recipe_addr));
+    assert_eq!(backend.recipes.get(&recipe_addr).unwrap(), Some(recipe));
 }
 
 #[test]
@@ -50,7 +49,6 @@ fn full_roundtrip_survives_reopen() {
         let backend = StorageBackend::open(&root).unwrap();
         assert_eq!(backend.blobs.get(&leaf_addr).unwrap(), Some(bytes::Bytes::from("persistent data")));
         assert_eq!(backend.recipes.get(&recipe_addr).unwrap(), Some(recipe));
-        let dag = backend.rebuild_dag().unwrap();
-        assert!(dag.contains(&recipe_addr));
+        assert!(backend.dag.contains(&recipe_addr));
     }
 }

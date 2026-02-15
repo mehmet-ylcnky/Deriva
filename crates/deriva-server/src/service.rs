@@ -1,5 +1,4 @@
 use crate::state::ServerState;
-use deriva_compute::executor::Executor;
 use deriva_core::address::*;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -77,15 +76,6 @@ impl Deriva for DerivaService {
             .storage
             .put_recipe(&recipe)
             .map_err(|e| Status::internal(e.to_string()))?;
-        {
-            let mut dag = self
-                .state
-                .dag
-                .write()
-                .map_err(|_| Status::internal("dag lock poisoned"))?;
-            dag.insert(recipe)
-                .map_err(|e| Status::internal(e.to_string()))?;
-        }
         Ok(Response::new(PutRecipeResponse {
             addr: addr.as_bytes().to_vec(),
         }))
@@ -102,13 +92,7 @@ impl Deriva for DerivaService {
         let (tx, rx) = mpsc::channel(16);
 
         tokio::spawn(async move {
-            let result = {
-                let dag = state.dag.read().unwrap();
-                let mut cache = state.cache.write().unwrap();
-                let mut executor =
-                    Executor::new(&dag, &state.registry, &mut *cache, &state.storage.blobs);
-                executor.materialize(&addr)
-            };
+            let result = state.executor.materialize(addr).await;
             match result {
                 Ok(data) => {
                     for chunk in data.chunks(CHUNK_SIZE) {
@@ -137,12 +121,8 @@ impl Deriva for DerivaService {
         request: Request<ResolveRequest>,
     ) -> Result<Response<ResolveResponse>, Status> {
         let addr = parse_addr(&request.get_ref().addr)?;
-        let dag = self
-            .state
-            .dag
-            .read()
-            .map_err(|_| Status::internal("dag lock poisoned"))?;
-        match dag.get_recipe(&addr) {
+        match self.state.recipes.get(&addr)
+            .map_err(|e| Status::internal(e.to_string()))? {
             Some(recipe) => Ok(Response::new(ResolveResponse {
                 found: true,
                 function_name: recipe.function_id.name.clone(),
@@ -163,14 +143,7 @@ impl Deriva for DerivaService {
         request: Request<InvalidateRequest>,
     ) -> Result<Response<InvalidateResponse>, Status> {
         let addr = parse_addr(&request.get_ref().addr)?;
-        let was_cached = {
-            let mut cache = self
-                .state
-                .cache
-                .write()
-                .map_err(|_| Status::internal("cache lock poisoned"))?;
-            cache.remove(&addr).is_some()
-        };
+        let was_cached = self.state.cache.remove(&addr).await.is_some();
         Ok(Response::new(InvalidateResponse { was_cached }))
     }
 
@@ -178,22 +151,12 @@ impl Deriva for DerivaService {
         &self,
         _request: Request<StatusRequest>,
     ) -> Result<Response<StatusResponse>, Status> {
-        let dag = self
-            .state
-            .dag
-            .read()
-            .map_err(|_| Status::internal("dag lock poisoned"))?;
-        let cache = self
-            .state
-            .cache
-            .read()
-            .map_err(|_| Status::internal("cache lock poisoned"))?;
         Ok(Response::new(StatusResponse {
-            recipe_count: dag.len() as u64,
+            recipe_count: self.state.dag.len() as u64,
             blob_count: 0,
-            cache_entries: cache.entry_count() as u64,
-            cache_size_bytes: cache.current_size(),
-            cache_hit_rate: cache.hit_rate(),
+            cache_entries: self.state.cache.entry_count().await as u64,
+            cache_size_bytes: self.state.cache.current_size().await,
+            cache_hit_rate: self.state.cache.hit_rate().await,
         }))
     }
 }

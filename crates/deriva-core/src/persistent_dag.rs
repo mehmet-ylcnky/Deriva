@@ -4,6 +4,7 @@ use sled::{Db, Tree, Transactional};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Sled-backed DAG with persistent adjacency lists.
+#[derive(Clone)]
 pub struct PersistentDag {
     forward: Tree,   // addr → Vec<CAddr> (inputs)
     reverse: Tree,   // addr → Vec<CAddr> (dependents)

@@ -5,6 +5,7 @@ use deriva_core::error::{DerivaError, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone)]
 pub struct BlobStore {
     root: PathBuf,
 }

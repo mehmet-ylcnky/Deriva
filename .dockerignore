@@ -1,0 +1,11 @@
+# Docker build artifacts
+target/
+Dockerfile.dockerignore
+
+# Data directories
+data/
+*.db
+*.sled
+
+# Logs
+*.log

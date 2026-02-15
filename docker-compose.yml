@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  # Node 1 - Seed node
+  node1:
+    build: .
+    container_name: deriva-node1
+    hostname: node1
+    ports:
+      - "50051:50051"  # gRPC
+      - "9091:9090"    # Metrics/admin
+    environment:
+      - NODE_ID=node1
+      - GRPC_PORT=50051
+      - ADMIN_PORT=9090
+      - DATA_DIR=/data
+      - SEED_NODES=node1:50051
+      - RUST_LOG=info
+    volumes:
+      - node1-data:/data
+    networks:
+      - deriva-net
+
+  # Node 2
+  node2:
+    build: .
+    container_name: deriva-node2
+    hostname: node2
+    ports:
+      - "50052:50051"
+      - "9092:9090"
+    environment:
+      - NODE_ID=node2
+      - GRPC_PORT=50051
+      - ADMIN_PORT=9090
+      - DATA_DIR=/data
+      - SEED_NODES=node1:50051
+      - RUST_LOG=info
+    volumes:
+      - node2-data:/data
+    networks:
+      - deriva-net
+    depends_on:
+      - node1
+
+  # Node 3
+  node3:
+    build: .
+    container_name: deriva-node3
+    hostname: node3
+    ports:
+      - "50053:50051"
+      - "9093:9090"
+    environment:
+      - NODE_ID=node3
+      - GRPC_PORT=50051
+      - ADMIN_PORT=9090
+      - DATA_DIR=/data
+      - SEED_NODES=node1:50051
+      - RUST_LOG=info
+    volumes:
+      - node3-data:/data
+    networks:
+      - deriva-net
+    depends_on:
+      - node1
+
+networks:
+  deriva-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:

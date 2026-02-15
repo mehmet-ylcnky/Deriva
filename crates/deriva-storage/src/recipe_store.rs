@@ -1,10 +1,17 @@
 use deriva_core::address::{CAddr, Recipe};
 use deriva_core::dag::DagStore;
 use deriva_core::error::{DerivaError, Result};
+use deriva_core::recipe_store::RecipeStore;
 use sled::Db;
 
 pub struct SledRecipeStore {
     db: Db,
+}
+
+impl RecipeStore for SledRecipeStore {
+    fn get(&self, addr: &CAddr) -> Result<Option<Recipe>> {
+        SledRecipeStore::get(self, addr)
+    }
 }
 
 impl SledRecipeStore {

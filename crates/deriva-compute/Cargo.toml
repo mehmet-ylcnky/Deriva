@@ -8,3 +8,6 @@ deriva-core = { path = "../deriva-core" }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }

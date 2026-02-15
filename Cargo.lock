@@ -493,9 +493,12 @@ dependencies = [
 name = "deriva-compute"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bytes",
  "deriva-core",
+ "futures",
  "thiserror",
+ "tokio",
  "tracing",
 ]
 

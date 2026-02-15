@@ -508,6 +508,8 @@ dependencies = [
  "bytes",
  "proptest",
  "serde",
+ "sled",
+ "tempfile",
  "thiserror",
 ]
 

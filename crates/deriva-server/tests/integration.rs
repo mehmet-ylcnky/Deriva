@@ -664,3 +664,175 @@ async fn test_async_interleaved_operations() {
     assert_eq!(results.len(), 5);
 }
 
+// ============================================================================
+// PARALLEL MATERIALIZATION INTEGRATION TESTS
+// ============================================================================
+
+#[tokio::test]
+async fn test_parallel_get_rpc_fan_in() {
+    use std::time::Instant;
+    
+    let h = TestHarness::new();
+    
+    // Create 4 leaves
+    let mut leaves = vec![];
+    for i in 0..4 {
+        leaves.push(put_leaf(h.svc(), &[i]).await);
+    }
+    
+    // Create fan-in recipe
+    let recipe = put_recipe(h.svc(), "concat", "1.0.0", leaves, Default::default()).await;
+    
+    // Measure parallel execution time
+    let start = Instant::now();
+    let result = get_all(h.svc(), &recipe).await;
+    let elapsed = start.elapsed();
+    
+    assert_eq!(result, vec![0, 1, 2, 3]);
+    // Should be fast (parallel execution)
+    assert!(elapsed.as_millis() < 500);
+}
+
+#[tokio::test]
+async fn test_parallel_multiple_clients() {
+    let h = TestHarness::new();
+    
+    let leaf = put_leaf(h.svc(), b"data").await;
+    let recipe = put_recipe(h.svc(), "uppercase", "1.0.0", vec![leaf], Default::default()).await;
+    
+    // 5 concurrent clients requesting same recipe
+    let futs: Vec<_> = (0..5).map(|_| get_all(h.svc(), &recipe)).collect();
+    let results = futures::future::join_all(futs).await;
+    
+    // All should get same result
+    for result in results {
+        assert_eq!(result, b"DATA");
+    }
+}
+
+#[tokio::test]
+async fn test_parallel_diamond_dag_rpc() {
+    let h = TestHarness::new();
+    
+    let root = put_leaf(h.svc(), b"root").await;
+    
+    // Two branches from root
+    let branch1 = put_recipe(h.svc(), "uppercase", "1.0.0", vec![root.clone()], Default::default()).await;
+    let branch2 = put_recipe(h.svc(), "identity", "1.0.0", vec![root.clone()], Default::default()).await;
+    
+    // Merge branches
+    let merge = put_recipe(h.svc(), "concat", "1.0.0", vec![branch1, branch2], Default::default()).await;
+    
+    let result = get_all(h.svc(), &merge).await;
+    assert_eq!(result, b"ROOTroot");
+}
+
+#[tokio::test]
+async fn test_parallel_dedup_across_clients() {
+    let h = TestHarness::new();
+    
+    let leaf = put_leaf(h.svc(), b"shared").await;
+    let recipe = put_recipe(h.svc(), "identity", "1.0.0", vec![leaf], Default::default()).await;
+    
+    // 10 concurrent clients requesting same address
+    let futs: Vec<_> = (0..10).map(|_| get_all(h.svc(), &recipe)).collect();
+    let results = futures::future::join_all(futs).await;
+    
+    // All should succeed with same result
+    for result in results {
+        assert_eq!(result, b"shared");
+    }
+}
+
+#[tokio::test]
+async fn test_parallel_wide_fan_in_rpc() {
+    let h = TestHarness::new();
+    
+    // Create 16 leaves
+    let mut leaves = vec![];
+    for i in 0..16u8 {
+        leaves.push(put_leaf(h.svc(), &[i]).await);
+    }
+    
+    // Create wide fan-in
+    let recipe = put_recipe(h.svc(), "concat", "1.0.0", leaves, Default::default()).await;
+    
+    let result = get_all(h.svc(), &recipe).await;
+    assert_eq!(result, (0..16u8).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn test_parallel_error_propagation_rpc() {
+    let h = TestHarness::new();
+    
+    let valid = put_leaf(h.svc(), b"valid").await;
+    let invalid = vec![0u8; 32]; // Non-existent address
+    
+    // Recipe with missing input
+    let recipe = put_recipe(h.svc(), "concat", "1.0.0", vec![valid, invalid], Default::default()).await;
+    
+    // Should fail gracefully
+    let mut stream = Deriva::get(h.svc(), Request::new(GetRequest { addr: recipe }))
+        .await
+        .unwrap()
+        .into_inner();
+    
+    let result = stream.next().await;
+    assert!(result.is_some());
+    assert!(result.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn test_parallel_cache_effectiveness_rpc() {
+    let h = TestHarness::new();
+    
+    let leaf = put_leaf(h.svc(), b"data").await;
+    let recipe = put_recipe(h.svc(), "uppercase", "1.0.0", vec![leaf], Default::default()).await;
+    
+    // First call - computes
+    let result1 = get_all(h.svc(), &recipe).await;
+    
+    // Second call - should hit cache
+    let start = std::time::Instant::now();
+    let result2 = get_all(h.svc(), &recipe).await;
+    let elapsed = start.elapsed();
+    
+    assert_eq!(result1, result2);
+    assert_eq!(result1, b"DATA");
+    // Cache hit should be very fast
+    assert!(elapsed.as_millis() < 50);
+}
+
+#[tokio::test]
+async fn test_parallel_stress_concurrent_recipes() {
+    let h = TestHarness::new();
+    
+    // Create 20 different recipes
+    let mut recipe_addrs = vec![];
+    for i in 0..20u8 {
+        let leaf = put_leaf(h.svc(), &[i]).await;
+        let recipe = put_recipe(h.svc(), "identity", "1.0.0", vec![leaf], Default::default()).await;
+        recipe_addrs.push((recipe, i));
+    }
+    
+    // Materialize all concurrently
+    let svc = h.svc();
+    let futs: Vec<_> = recipe_addrs.iter()
+        .map(|(addr, expected)| {
+            let addr = addr.clone();
+            let expected = *expected;
+            async move {
+                let result = get_all(svc, &addr).await;
+                (result, expected)
+            }
+        })
+        .collect();
+    
+    let results = futures::future::join_all(futs).await;
+    
+    // Verify all results
+    for (result, expected) in results {
+        assert_eq!(result, vec![expected]);
+    }
+}
+

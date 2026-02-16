@@ -69,7 +69,7 @@ pub struct AsyncExecutor<C, L, D> {
     registry: Arc<FunctionRegistry>,
     semaphore: Arc<Semaphore>,
     in_flight: Arc<Mutex<HashMap<CAddr, broadcast::Sender<Result<Bytes>>>>>,
-    config: ExecutorConfig,
+    pub config: ExecutorConfig,
 }
 
 impl<C, L, D> Clone for AsyncExecutor<C, L, D> {

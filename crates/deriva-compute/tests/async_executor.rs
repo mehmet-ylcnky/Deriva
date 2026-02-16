@@ -826,3 +826,94 @@ async fn test_29_broadcast_error_propagation() {
         assert!(matches!(result.unwrap_err(), DerivaError::NotFound(_)));
     }
 }
+
+
+// ============================================================================
+// PARALLEL EXECUTION TESTS
+// ============================================================================
+
+#[tokio::test]
+async fn test_30_parallel_fan_in_faster_than_sequential() {
+    let (dag, _base_registry, cache, leaves) = setup();
+    
+    // Create local mutable registry with slow function
+    let mut registry = FunctionRegistry::new();
+    builtins::register_all(&mut registry);
+    registry.register(Arc::new(SlowFunction::new(100)));
+    let registry = Arc::new(registry);
+    
+    // Create 4 leaves
+    let mut leaf_addrs = vec![];
+    for i in 0..4 {
+        let addr = leaf(&[i]);
+        leaves.leaves.lock().unwrap().insert(addr, Bytes::from(vec![i]));
+        leaf_addrs.push(addr);
+    }
+    
+    // Create recipe with 4 slow inputs
+    let mut slow_addrs = vec![];
+    for addr in &leaf_addrs {
+        let recipe = Recipe {
+            inputs: vec![*addr],
+            function_id: FunctionId { name: "slow".to_string(), version: "1".to_string() },
+            params: BTreeMap::new(),
+        };
+        let recipe_addr = recipe.addr();
+        dag.recipes.lock().unwrap().insert(recipe_addr, recipe);
+        slow_addrs.push(recipe_addr);
+    }
+    
+    // Final merge
+    let final_recipe = recipe(slow_addrs, "concat");
+    let final_addr = final_recipe.addr();
+    dag.recipes.lock().unwrap().insert(final_addr, final_recipe);
+    
+    let executor = AsyncExecutor::new(dag, registry, cache, leaves);
+    
+    let start = Instant::now();
+    executor.materialize(final_addr).await.unwrap();
+    let elapsed = start.elapsed();
+    
+    // Parallel: ~100ms, Sequential would be ~400ms
+    assert!(elapsed.as_millis() < 300, "Expected <300ms, got {}ms", elapsed.as_millis());
+}
+
+#[tokio::test]
+async fn test_31_dedup_concurrent_same_addr() {
+    let (dag, _base_registry, cache, leaves) = setup();
+    
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut registry = FunctionRegistry::new();
+    builtins::register_all(&mut registry);
+    registry.register(Arc::new(CountingFunction::new(Arc::clone(&count))));
+    let registry = Arc::new(registry);
+    
+    let leaf_addr = leaf(b"data");
+    leaves.leaves.lock().unwrap().insert(leaf_addr, Bytes::from("data"));
+    
+    let recipe = Recipe {
+        inputs: vec![leaf_addr],
+        function_id: FunctionId { name: "counting".to_string(), version: "1".to_string() },
+        params: BTreeMap::new(),
+    };
+    let recipe_addr = recipe.addr();
+    dag.recipes.lock().unwrap().insert(recipe_addr, recipe);
+    
+    let executor = Arc::new(AsyncExecutor::new(dag, registry, cache, leaves));
+    
+    // 10 concurrent materializations of same address
+    let mut handles = vec![];
+    for _ in 0..10 {
+        let exec = Arc::clone(&executor);
+        handles.push(tokio::spawn(async move {
+            exec.materialize(recipe_addr).await.unwrap()
+        }));
+    }
+    
+    for h in handles {
+        h.await.unwrap();
+    }
+    
+    // Should execute only once due to deduplication
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}

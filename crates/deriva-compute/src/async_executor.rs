@@ -142,8 +142,13 @@ where
                 if let Some(tx) = in_flight.get(&addr) {
                     let mut rx = tx.subscribe();
                     drop(in_flight);
-                    return rx.recv().await
-                        .map_err(|_| DerivaError::ComputeFailed("broadcast channel closed".into()))?;
+                    // Handle broadcast errors: RecvError means sender dropped (computation failed/cancelled)
+                    return match rx.recv().await {
+                        Ok(result) => result,
+                        Err(_) => Err(DerivaError::ComputeFailed(
+                            "producer task failed or was cancelled".into()
+                        )),
+                    };
                 }
             }
 
@@ -155,24 +160,63 @@ where
             }
 
             // 5. Recipe lookup
-            let recipe = self.dag.get_recipe(&addr)?
-                .ok_or_else(|| DerivaError::NotFound(addr.to_string()))?;
+            let recipe = match self.dag.get_recipe(&addr) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    let err = Err(DerivaError::NotFound(addr.to_string()));
+                    let _ = tx.send(err.clone());
+                    let mut in_flight = self.in_flight.lock().await;
+                    in_flight.remove(&addr);
+                    return err;
+                }
+                Err(e) => {
+                    let err = Err(e);
+                    let _ = tx.send(err.clone());
+                    let mut in_flight = self.in_flight.lock().await;
+                    in_flight.remove(&addr);
+                    return err;
+                }
+            };
 
-            // 6. Parallel input resolution
+            // 6. Parallel input resolution - try_join_all cancels all on first error
             let futures: Vec<_> = recipe.inputs.iter()
                 .map(|input_addr| self.materialize(*input_addr))
                 .collect();
-            let input_bytes = futures::future::try_join_all(futures).await?;
+            let input_bytes = match futures::future::try_join_all(futures).await {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    // Broadcast error to waiting subscribers
+                    let err = Err(e);
+                    let _ = tx.send(err.clone());
+                    let mut in_flight = self.in_flight.lock().await;
+                    in_flight.remove(&addr);
+                    return err;
+                }
+            };
 
             // 7. Acquire semaphore ONLY for compute step (prevent deadlock)
-            let _permit = self.semaphore.acquire().await
-                .map_err(|e| DerivaError::ComputeFailed(format!("semaphore error: {}", e)))?;
+            let _permit = match self.semaphore.acquire().await {
+                Ok(p) => p,
+                Err(e) => {
+                    let err = Err(DerivaError::ComputeFailed(format!("semaphore error: {}", e)));
+                    let _ = tx.send(err.clone());
+                    let mut in_flight = self.in_flight.lock().await;
+                    in_flight.remove(&addr);
+                    return err;
+                }
+            };
 
             // 8. Execute compute function
-            let func = self.registry.get(&recipe.function_id)
-                .ok_or_else(|| DerivaError::FunctionNotFound(
-                    recipe.function_id.to_string()
-                ))?;
+            let func = match self.registry.get(&recipe.function_id) {
+                Some(f) => f,
+                None => {
+                    let err = Err(DerivaError::FunctionNotFound(recipe.function_id.to_string()));
+                    let _ = tx.send(err.clone());
+                    let mut in_flight = self.in_flight.lock().await;
+                    in_flight.remove(&addr);
+                    return err;
+                }
+            };
 
             let result = {
                 let params = recipe.params.clone();
@@ -182,11 +226,11 @@ where
                 .await
                 .map_err(|e| DerivaError::ComputeFailed(
                     format!("task join error: {}", e)
-                ))?
-                .map_err(|e| DerivaError::ComputeFailed(e.to_string()))
+                ))
+                .and_then(|r| r.map_err(|e| DerivaError::ComputeFailed(e.to_string())))
             };
 
-            // 9. Broadcast result to waiting tasks
+            // 9. Broadcast result to waiting tasks (ignore send errors - no subscribers is ok)
             let _ = tx.send(result.clone());
 
             // 10. Clean up in_flight entry

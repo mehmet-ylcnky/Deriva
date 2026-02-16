@@ -7,7 +7,7 @@ use deriva_compute::registry::FunctionRegistry;
 use deriva_compute::builtins;
 use deriva_core::address::{CAddr, FunctionId, Recipe, Value};
 use deriva_core::cache::EvictableCache;
-use deriva_core::error::Result;
+use deriva_core::error::{DerivaError, Result};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -693,5 +693,58 @@ async fn test_27_concurrent_materialize_shared_inputs() {
     for h in handles {
         let result = h.await.unwrap().unwrap();
         assert_eq!(result, Bytes::from("shared"));
+    }
+}
+
+#[tokio::test]
+async fn test_28_parallel_cancellation_on_error() {
+    // Test that try_join_all cancels remaining futures when one fails
+    let (dag, registry, cache, leaves) = setup();
+    
+    // Create one valid leaf and one missing leaf
+    let valid_addr = leaf(b"valid");
+    leaves.leaves.lock().unwrap().insert(valid_addr, Bytes::from("valid"));
+    let missing_addr = leaf(b"missing"); // Not inserted - will fail
+    
+    // Create recipe with both inputs (one will fail)
+    let recipe = recipe(vec![valid_addr, missing_addr], "concat");
+    let recipe_addr = recipe.addr();
+    dag.recipes.lock().unwrap().insert(recipe_addr, recipe);
+    
+    let executor = AsyncExecutor::new(dag, registry, cache, leaves);
+    
+    // Should fail with NotFound error
+    let result = executor.materialize(recipe_addr).await;
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), DerivaError::NotFound(_)));
+}
+
+#[tokio::test]
+async fn test_29_broadcast_error_propagation() {
+    // Test that errors are broadcast to waiting subscribers
+    let (dag, registry, cache, leaves) = setup();
+    
+    // Create recipe with missing input
+    let missing_addr = leaf(b"missing");
+    let recipe = recipe(vec![missing_addr], "identity");
+    let recipe_addr = recipe.addr();
+    dag.recipes.lock().unwrap().insert(recipe_addr, recipe);
+    
+    let executor = Arc::new(AsyncExecutor::new(dag, registry, cache, leaves));
+    
+    // Start multiple concurrent materializations
+    let mut handles = vec![];
+    for _ in 0..3 {
+        let exec = Arc::clone(&executor);
+        handles.push(tokio::spawn(async move {
+            exec.materialize(recipe_addr).await
+        }));
+    }
+    
+    // All should receive the same error
+    for h in handles {
+        let result = h.await.unwrap();
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DerivaError::NotFound(_)));
     }
 }

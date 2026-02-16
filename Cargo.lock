@@ -496,6 +496,7 @@ name = "deriva-compute"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "bytes",
  "deriva-core",
  "futures",

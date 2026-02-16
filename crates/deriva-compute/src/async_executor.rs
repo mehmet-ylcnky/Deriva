@@ -231,6 +231,75 @@ where
         }
     }
 
+    /// Execute compute function with optional verification
+    async fn execute_verified(
+        &self,
+        addr: &CAddr,
+        func: Arc<dyn crate::function::ComputeFunction>,
+        input_bytes: Vec<Bytes>,
+        params: &std::collections::BTreeMap<String, deriva_core::address::Value>,
+    ) -> Result<Bytes> {
+        let should_verify = match self.config.verification {
+            VerificationMode::Off => false,
+            VerificationMode::DualCompute => true,
+            VerificationMode::Sampled { rate } => {
+                let sample = (addr.as_bytes()[0] as f64) / 255.0;
+                sample < rate
+            }
+        };
+
+        if !should_verify {
+            // Off mode: single execution
+            let func_clone = Arc::clone(&func);
+            let input_clone = input_bytes.clone();
+            let params_clone = params.clone();
+            return tokio::task::spawn_blocking(move || {
+                func_clone.execute(input_clone, &params_clone)
+            })
+            .await
+            .map_err(|e| DerivaError::ComputeFailed(e.to_string()))?
+            .map_err(|e| DerivaError::ComputeFailed(e.to_string()));
+        }
+
+        // DualCompute or Sampled mode: parallel dual execution
+        let func1 = Arc::clone(&func);
+        let func2 = Arc::clone(&func);
+        let input1 = input_bytes.clone();
+        let input2 = input_bytes;
+        let params1 = params.clone();
+        let params2 = params.clone();
+
+        let (result1, result2) = tokio::join!(
+            tokio::task::spawn_blocking(move || func1.execute(input1, &params1)),
+            tokio::task::spawn_blocking(move || func2.execute(input2, &params2))
+        );
+
+        let output1 = result1
+            .map_err(|e| DerivaError::ComputeFailed(e.to_string()))?
+            .map_err(|e| DerivaError::ComputeFailed(e.to_string()))?;
+        let output2 = result2
+            .map_err(|e| DerivaError::ComputeFailed(e.to_string()))?
+            .map_err(|e| DerivaError::ComputeFailed(e.to_string()))?;
+
+        if output1 == output2 {
+            self.verification_stats.record_pass();
+            Ok(output1)
+        } else {
+            let hash1 = blake3::hash(&output1);
+            let hash2 = blake3::hash(&output2);
+            let error = DerivaError::DeterminismViolation {
+                addr: format!("{:?}", addr),
+                function_id: func.id().to_string(),
+                output_1_hash: hash1.to_hex().to_string(),
+                output_2_hash: hash2.to_hex().to_string(),
+                output_1_len: output1.len(),
+                output_2_len: output2.len(),
+            };
+            self.verification_stats.record_fail(error.clone()).await;
+            Err(error)
+        }
+    }
+
     /// Materialize a CAddr - resolves recursively through the DAG
     ///
     /// # Parallel Materialization Algorithm
@@ -358,17 +427,7 @@ where
                 }
             };
 
-            let result = {
-                let params = recipe.params.clone();
-                tokio::task::spawn_blocking(move || {
-                    func.execute(input_bytes, &params)
-                })
-                .await
-                .map_err(|e| DerivaError::ComputeFailed(
-                    format!("task join error: {}", e)
-                ))
-                .and_then(|r| r.map_err(|e| DerivaError::ComputeFailed(e.to_string())))
-            };
+            let result = self.execute_verified(&addr, func, input_bytes, &recipe.params).await;
 
             // 9. Broadcast result to all waiting subscribers
             // Deduplication payoff: All tasks waiting for this address receive the result

@@ -14,9 +14,13 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 async-trait.workspace = true
 
 [[bench]]
-name = "phase1_baseline"
+name = "storage_primitives"
 harness = false
 
 [[bench]]
 name = "parallel_materialization"
+harness = false
+
+[[bench]]
+name = "verification_overhead"
 harness = false

@@ -48,6 +48,7 @@ use deriva_core::PersistentDag;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{broadcast, Mutex, Semaphore};
 
 /// Trait for DAG access - abstracts over DagStore and PersistentDag
@@ -97,6 +98,51 @@ pub enum VerificationMode {
 impl Default for VerificationMode {
     fn default() -> Self {
         Self::Off
+    }
+}
+
+/// Statistics for verification operations
+pub struct VerificationStats {
+    pub total_verified: AtomicU64,
+    pub total_passed: AtomicU64,
+    pub total_failed: AtomicU64,
+    pub last_failure: tokio::sync::Mutex<Option<DerivaError>>,
+}
+
+impl VerificationStats {
+    pub fn new() -> Self {
+        Self {
+            total_verified: AtomicU64::new(0),
+            total_passed: AtomicU64::new(0),
+            total_failed: AtomicU64::new(0),
+            last_failure: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    pub fn record_pass(&self) {
+        self.total_verified.fetch_add(1, Ordering::Relaxed);
+        self.total_passed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub async fn record_fail(&self, error: DerivaError) {
+        self.total_verified.fetch_add(1, Ordering::Relaxed);
+        self.total_failed.fetch_add(1, Ordering::Relaxed);
+        *self.last_failure.lock().await = Some(error);
+    }
+
+    pub fn failure_rate(&self) -> f64 {
+        let verified = self.total_verified.load(Ordering::Relaxed);
+        if verified == 0 {
+            return 0.0;
+        }
+        let failed = self.total_failed.load(Ordering::Relaxed);
+        failed as f64 / verified as f64
+    }
+}
+
+impl Default for VerificationStats {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

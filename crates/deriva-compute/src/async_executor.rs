@@ -8,7 +8,9 @@ use deriva_core::error::{DerivaError, Result};
 use deriva_core::recipe_store::RecipeStore;
 use deriva_core::PersistentDag;
 use futures::future::BoxFuture;
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::{broadcast, Mutex, Semaphore};
 
 /// Trait for DAG access - abstracts over DagStore and PersistentDag
 pub trait DagReader: Send + Sync {
@@ -43,11 +45,31 @@ impl<R: RecipeStore> DagReader for CombinedDagReader<R> {
     }
 }
 
+/// Configuration for AsyncExecutor
+pub struct ExecutorConfig {
+    /// Max concurrent materialization tasks (default: num_cpus * 2)
+    pub max_concurrency: usize,
+    /// Broadcast channel capacity for dedup (default: 16)
+    pub dedup_channel_capacity: usize,
+}
+
+impl Default for ExecutorConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrency: num_cpus::get() * 2,
+            dedup_channel_capacity: 16,
+        }
+    }
+}
+
 pub struct AsyncExecutor<C, L, D> {
     cache: Arc<C>,
     leaf_store: Arc<L>,
     dag: Arc<D>,
     registry: Arc<FunctionRegistry>,
+    semaphore: Arc<Semaphore>,
+    in_flight: Arc<Mutex<HashMap<CAddr, broadcast::Sender<Result<Bytes>>>>>,
+    config: ExecutorConfig,
 }
 
 impl<C, L, D> Clone for AsyncExecutor<C, L, D> {
@@ -57,6 +79,12 @@ impl<C, L, D> Clone for AsyncExecutor<C, L, D> {
             leaf_store: Arc::clone(&self.leaf_store),
             dag: Arc::clone(&self.dag),
             registry: Arc::clone(&self.registry),
+            semaphore: Arc::clone(&self.semaphore),
+            in_flight: Arc::clone(&self.in_flight),
+            config: ExecutorConfig {
+                max_concurrency: self.config.max_concurrency,
+                dedup_channel_capacity: self.config.dedup_channel_capacity,
+            },
         }
     }
 }
@@ -73,7 +101,26 @@ where
         cache: Arc<C>,
         leaf_store: Arc<L>,
     ) -> Self {
-        Self { cache, leaf_store, dag, registry }
+        Self::with_config(dag, registry, cache, leaf_store, ExecutorConfig::default())
+    }
+
+    pub fn with_config(
+        dag: Arc<D>,
+        registry: Arc<FunctionRegistry>,
+        cache: Arc<C>,
+        leaf_store: Arc<L>,
+        config: ExecutorConfig,
+    ) -> Self {
+        let semaphore = Arc::new(Semaphore::new(config.max_concurrency));
+        Self {
+            cache,
+            leaf_store,
+            dag,
+            registry,
+            semaphore,
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
+            config,
+        }
     }
 
     /// Materialize a CAddr - resolves recursively through the DAG

@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum DerivaError {
     #[error("cycle detected in DAG: {0}")]
     CycleDetected(String),

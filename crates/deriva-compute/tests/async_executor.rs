@@ -879,7 +879,278 @@ async fn test_30_parallel_fan_in_faster_than_sequential() {
 }
 
 #[tokio::test]
-async fn test_31_dedup_concurrent_same_addr() {
+async fn test_31_parallel_linear_chain_no_speedup() {
+    let (dag, _base_registry, cache, leaves) = setup();
+    
+    let mut registry = FunctionRegistry::new();
+    builtins::register_all(&mut registry);
+    registry.register(Arc::new(SlowFunction::new(100)));
+    let registry = Arc::new(registry);
+    
+    let leaf_addr = leaf(b"start");
+    leaves.leaves.lock().unwrap().insert(leaf_addr, Bytes::from("start"));
+    
+    let mut prev = leaf_addr;
+    for _ in 0..3 {
+        let recipe = Recipe {
+            inputs: vec![prev],
+            function_id: FunctionId { name: "slow".to_string(), version: "1".to_string() },
+            params: BTreeMap::new(),
+        };
+        let addr = recipe.addr();
+        dag.recipes.lock().unwrap().insert(addr, recipe);
+        prev = addr;
+    }
+    
+    let executor = AsyncExecutor::new(dag, registry, cache, leaves);
+    
+    let start = Instant::now();
+    executor.materialize(prev).await.unwrap();
+    let elapsed = start.elapsed();
+    
+    // Linear chain: no parallelism, ~300ms
+    assert!(elapsed.as_millis() >= 250, "Expected >=250ms, got {}ms", elapsed.as_millis());
+}
+
+#[tokio::test]
+async fn test_32_parallel_diamond_dag() {
+    let (dag, _base_registry, cache, leaves) = setup();
+    
+    let mut registry = FunctionRegistry::new();
+    builtins::register_all(&mut registry);
+    registry.register(Arc::new(SlowFunction::new(100)));
+    let registry = Arc::new(registry);
+    
+    let leaf_addr = leaf(b"root");
+    leaves.leaves.lock().unwrap().insert(leaf_addr, Bytes::from("root"));
+    
+    let mut branch_addrs = vec![];
+    for _ in 0..2 {
+        let recipe = Recipe {
+            inputs: vec![leaf_addr],
+            function_id: FunctionId { name: "slow".to_string(), version: "1".to_string() },
+            params: BTreeMap::new(),
+        };
+        let addr = recipe.addr();
+        dag.recipes.lock().unwrap().insert(addr, recipe);
+        branch_addrs.push(addr);
+    }
+    
+    let merge = recipe(branch_addrs, "concat");
+    let merge_addr = merge.addr();
+    dag.recipes.lock().unwrap().insert(merge_addr, merge);
+    
+    let executor = AsyncExecutor::new(dag, registry, cache, leaves);
+    
+    let start = Instant::now();
+    executor.materialize(merge_addr).await.unwrap();
+    let elapsed = start.elapsed();
+    
+    // Parallel: ~100ms (both branches run concurrently)
+    assert!(elapsed.as_millis() < 200, "Expected <200ms, got {}ms", elapsed.as_millis());
+}
+
+#[tokio::test]
+async fn test_33_parallel_wide_fan_in_16_inputs() {
+    let (dag, _base_registry, cache, leaves) = setup();
+    
+    let mut registry = FunctionRegistry::new();
+    builtins::register_all(&mut registry);
+    registry.register(Arc::new(SlowFunction::new(50)));
+    let registry = Arc::new(registry);
+    
+    let mut slow_addrs = vec![];
+    for i in 0..16 {
+        let leaf_addr = leaf(&[i]);
+        leaves.leaves.lock().unwrap().insert(leaf_addr, Bytes::from(vec![i]));
+        
+        let recipe = Recipe {
+            inputs: vec![leaf_addr],
+            function_id: FunctionId { name: "slow".to_string(), version: "1".to_string() },
+            params: BTreeMap::new(),
+        };
+        let addr = recipe.addr();
+        dag.recipes.lock().unwrap().insert(addr, recipe);
+        slow_addrs.push(addr);
+    }
+    
+    let final_recipe = recipe(slow_addrs, "concat");
+    let final_addr = final_recipe.addr();
+    dag.recipes.lock().unwrap().insert(final_addr, final_recipe);
+    
+    let executor = AsyncExecutor::new(dag, registry, cache, leaves);
+    
+    let start = Instant::now();
+    executor.materialize(final_addr).await.unwrap();
+    let elapsed = start.elapsed();
+    
+    // Parallel: ~50ms, Sequential would be ~800ms
+    assert!(elapsed.as_millis() < 400, "Expected <400ms, got {}ms", elapsed.as_millis());
+}
+
+#[tokio::test]
+async fn test_34_parallel_preserves_input_order() {
+    let (dag, registry, cache, leaves) = setup();
+    
+    let mut leaf_addrs = vec![];
+    for i in 0..4u8 {
+        let addr = leaf(&[i]);
+        leaves.leaves.lock().unwrap().insert(addr, Bytes::from(vec![i]));
+        leaf_addrs.push(addr);
+    }
+    
+    let concat_recipe = recipe(leaf_addrs, "concat");
+    let concat_addr = concat_recipe.addr();
+    dag.recipes.lock().unwrap().insert(concat_addr, concat_recipe);
+    
+    let executor = AsyncExecutor::new(dag, registry, cache, leaves);
+    let result = executor.materialize(concat_addr).await.unwrap();
+    
+    // Verify order: [0, 1, 2, 3]
+    assert_eq!(result, Bytes::from(vec![0, 1, 2, 3]));
+}
+
+#[tokio::test]
+async fn test_35_parallel_single_input_no_overhead() {
+    let (dag, registry, cache, leaves) = setup();
+    
+    let leaf_addr = leaf(b"single");
+    leaves.leaves.lock().unwrap().insert(leaf_addr, Bytes::from("single"));
+    
+    let recipe = recipe(vec![leaf_addr], "identity");
+    let recipe_addr = recipe.addr();
+    dag.recipes.lock().unwrap().insert(recipe_addr, recipe);
+    
+    let executor = AsyncExecutor::new(dag, registry, cache, leaves);
+    let result = executor.materialize(recipe_addr).await.unwrap();
+    
+    assert_eq!(result, Bytes::from("single"));
+}
+
+#[tokio::test]
+async fn test_36_parallel_zero_inputs_recipe() {
+    let (dag, registry, cache, leaves) = setup();
+    
+    let recipe = recipe(vec![], "concat"); // concat works with 0 inputs
+    let recipe_addr = recipe.addr();
+    dag.recipes.lock().unwrap().insert(recipe_addr, recipe);
+    
+    let executor = AsyncExecutor::new(dag, registry, cache, leaves);
+    let result = executor.materialize(recipe_addr).await.unwrap();
+    
+    // Concat with no inputs returns empty
+    assert_eq!(result, Bytes::new());
+}
+
+// ============================================================================
+// SEMAPHORE TESTS
+// ============================================================================
+
+#[tokio::test]
+async fn test_37_semaphore_limits_concurrency() {
+    use deriva_compute::async_executor::ExecutorConfig;
+    
+    let (dag, _base_registry, cache, leaves) = setup();
+    
+    let mut registry = FunctionRegistry::new();
+    builtins::register_all(&mut registry);
+    registry.register(Arc::new(SlowFunction::new(100)));
+    let registry = Arc::new(registry);
+    
+    let mut slow_addrs = vec![];
+    for i in 0..4 {
+        let leaf_addr = leaf(&[i]);
+        leaves.leaves.lock().unwrap().insert(leaf_addr, Bytes::from(vec![i]));
+        
+        let recipe = Recipe {
+            inputs: vec![leaf_addr],
+            function_id: FunctionId { name: "slow".to_string(), version: "1".to_string() },
+            params: BTreeMap::new(),
+        };
+        let addr = recipe.addr();
+        dag.recipes.lock().unwrap().insert(addr, recipe);
+        slow_addrs.push(addr);
+    }
+    
+    let final_recipe = recipe(slow_addrs, "concat");
+    let final_addr = final_recipe.addr();
+    dag.recipes.lock().unwrap().insert(final_addr, final_recipe);
+    
+    let config = ExecutorConfig {
+        max_concurrency: 2,
+        dedup_channel_capacity: 16,
+    };
+    let executor = AsyncExecutor::with_config(dag, registry, cache, leaves, config);
+    
+    let start = Instant::now();
+    executor.materialize(final_addr).await.unwrap();
+    let elapsed = start.elapsed();
+    
+    // With limit=2: 2 batches of 100ms = ~200ms
+    assert!(elapsed.as_millis() >= 150, "Expected >=150ms with batching, got {}ms", elapsed.as_millis());
+}
+
+#[tokio::test]
+async fn test_38_executor_config_custom() {
+    use deriva_compute::async_executor::ExecutorConfig;
+    
+    let (dag, registry, cache, leaves) = setup();
+    
+    let config = ExecutorConfig {
+        max_concurrency: 4,
+        dedup_channel_capacity: 32,
+    };
+    
+    let executor = AsyncExecutor::with_config(dag, registry, cache, leaves, config);
+    assert_eq!(executor.config.max_concurrency, 4);
+    assert_eq!(executor.config.dedup_channel_capacity, 32);
+}
+
+// ============================================================================
+// DEDUPLICATION TESTS
+// ============================================================================
+
+#[tokio::test]
+async fn test_39_dedup_shared_input() {
+    let (dag, _base_registry, cache, leaves) = setup();
+    
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut registry = FunctionRegistry::new();
+    builtins::register_all(&mut registry);
+    registry.register(Arc::new(CountingFunction::new(Arc::clone(&count))));
+    let registry = Arc::new(registry);
+    
+    let leaf_addr = leaf(b"shared");
+    leaves.leaves.lock().unwrap().insert(leaf_addr, Bytes::from("shared"));
+    
+    let counting_recipe = Recipe {
+        inputs: vec![leaf_addr],
+        function_id: FunctionId { name: "counting".to_string(), version: "1".to_string() },
+        params: BTreeMap::new(),
+    };
+    let counting_addr = counting_recipe.addr();
+    dag.recipes.lock().unwrap().insert(counting_addr, counting_recipe);
+    
+    let mut consumer_addrs = vec![];
+    for _ in 0..3 {
+        let recipe = recipe(vec![counting_addr], "identity");
+        let addr = recipe.addr();
+        dag.recipes.lock().unwrap().insert(addr, recipe);
+        consumer_addrs.push(addr);
+    }
+    
+    let executor = Arc::new(AsyncExecutor::new(dag, registry, cache, leaves));
+    
+    for addr in consumer_addrs {
+        executor.materialize(addr).await.unwrap();
+    }
+    
+    // Counting function should execute only once (shared input)
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_40_dedup_concurrent_same_addr() {
     let (dag, _base_registry, cache, leaves) = setup();
     
     let count = Arc::new(AtomicUsize::new(0));
@@ -916,4 +1187,143 @@ async fn test_31_dedup_concurrent_same_addr() {
     
     // Should execute only once due to deduplication
     assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+// ============================================================================
+// ERROR HANDLING TESTS
+// ============================================================================
+
+#[tokio::test]
+async fn test_41_parallel_error_cancels_siblings() {
+    let (dag, registry, cache, leaves) = setup();
+    
+    let valid_addr = leaf(b"valid");
+    leaves.leaves.lock().unwrap().insert(valid_addr, Bytes::from("valid"));
+    let missing_addr = leaf(b"missing");
+    
+    let recipe = recipe(vec![valid_addr, missing_addr], "concat");
+    let recipe_addr = recipe.addr();
+    dag.recipes.lock().unwrap().insert(recipe_addr, recipe);
+    
+    let executor = AsyncExecutor::new(dag, registry, cache, leaves);
+    let result = executor.materialize(recipe_addr).await;
+    
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), DerivaError::NotFound(_)));
+}
+
+#[tokio::test]
+async fn test_42_parallel_error_in_deep_branch() {
+    let (dag, registry, cache, leaves) = setup();
+    
+    let valid_addr = leaf(b"valid");
+    leaves.leaves.lock().unwrap().insert(valid_addr, Bytes::from("valid"));
+    let branch1 = recipe(vec![valid_addr], "identity");
+    let branch1_addr = branch1.addr();
+    dag.recipes.lock().unwrap().insert(branch1_addr, branch1);
+    
+    let missing_addr = leaf(b"missing");
+    let branch2 = recipe(vec![missing_addr], "identity");
+    let branch2_addr = branch2.addr();
+    dag.recipes.lock().unwrap().insert(branch2_addr, branch2);
+    
+    let merge = recipe(vec![branch1_addr, branch2_addr], "concat");
+    let merge_addr = merge.addr();
+    dag.recipes.lock().unwrap().insert(merge_addr, merge);
+    
+    let executor = AsyncExecutor::new(dag, registry, cache, leaves);
+    let result = executor.materialize(merge_addr).await;
+    
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// CACHING TESTS
+// ============================================================================
+
+#[tokio::test]
+async fn test_43_parallel_cache_populated_for_intermediates() {
+    let (dag, registry, cache, leaves) = setup();
+    
+    let leaf_addr = leaf(b"data");
+    leaves.leaves.lock().unwrap().insert(leaf_addr, Bytes::from("data"));
+    
+    let id1 = recipe(vec![leaf_addr], "identity");
+    let id1_addr = id1.addr();
+    dag.recipes.lock().unwrap().insert(id1_addr, id1);
+    
+    let id2 = recipe(vec![id1_addr], "identity");
+    let id2_addr = id2.addr();
+    dag.recipes.lock().unwrap().insert(id2_addr, id2);
+    
+    let executor = AsyncExecutor::new(dag, registry, Arc::clone(&cache), leaves);
+    executor.materialize(id2_addr).await.unwrap();
+    
+    // Both intermediates should be cached
+    assert!(cache.get(&id1_addr).await.is_some());
+    assert!(cache.get(&id2_addr).await.is_some());
+}
+
+#[tokio::test]
+async fn test_44_parallel_cached_inputs_skip_compute() {
+    let (dag, _base_registry, cache, leaves) = setup();
+    
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut registry = FunctionRegistry::new();
+    builtins::register_all(&mut registry);
+    registry.register(Arc::new(CountingFunction::new(Arc::clone(&count))));
+    let registry = Arc::new(registry);
+    
+    let leaf_addr = leaf(b"data");
+    leaves.leaves.lock().unwrap().insert(leaf_addr, Bytes::from("data"));
+    
+    let recipe = Recipe {
+        inputs: vec![leaf_addr],
+        function_id: FunctionId { name: "counting".to_string(), version: "1".to_string() },
+        params: BTreeMap::new(),
+    };
+    let recipe_addr = recipe.addr();
+    dag.recipes.lock().unwrap().insert(recipe_addr, recipe);
+    
+    let executor = AsyncExecutor::new(dag, registry, cache, leaves);
+    
+    executor.materialize(recipe_addr).await.unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    
+    executor.materialize(recipe_addr).await.unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 1); // Still 1, not recomputed
+}
+
+// ============================================================================
+// STRESS TESTS
+// ============================================================================
+
+#[tokio::test]
+async fn test_45_parallel_stress_100_concurrent() {
+    let (dag, registry, cache, leaves) = setup();
+    
+    let mut leaf_addrs = vec![];
+    for i in 0..100u8 {
+        let addr = leaf(&[i]);
+        leaves.leaves.lock().unwrap().insert(addr, Bytes::from(vec![i]));
+        
+        let recipe = recipe(vec![addr], "identity");
+        let recipe_addr = recipe.addr();
+        dag.recipes.lock().unwrap().insert(recipe_addr, recipe);
+        leaf_addrs.push(recipe_addr);
+    }
+    
+    let executor = Arc::new(AsyncExecutor::new(dag, registry, cache, leaves));
+    
+    let mut handles = vec![];
+    for addr in leaf_addrs {
+        let exec = Arc::clone(&executor);
+        handles.push(tokio::spawn(async move {
+            exec.materialize(addr).await
+        }));
+    }
+    
+    for h in handles {
+        h.await.unwrap().unwrap();
+    }
 }

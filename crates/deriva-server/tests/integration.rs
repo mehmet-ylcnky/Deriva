@@ -836,3 +836,74 @@ async fn test_parallel_stress_concurrent_recipes() {
     }
 }
 
+// Test 43: Server starts with --verification dual flag
+#[tokio::test]
+async fn test_verification_mode_server_flag() {
+    use deriva_compute::async_executor::VerificationMode;
+    
+    let dir = tempfile::tempdir().unwrap();
+    let storage = StorageBackend::open(dir.path()).unwrap();
+    let mut registry = FunctionRegistry::new();
+    builtins::register_all(&mut registry);
+    
+    let state = Arc::new(ServerState::with_verification(
+        storage,
+        registry,
+        VerificationMode::DualCompute,
+    ).unwrap());
+    
+    let svc = DerivaService::new(state);
+    let resp = Deriva::status(&svc, Request::new(StatusRequest {})).await.unwrap().into_inner();
+    
+    assert_eq!(resp.verification_mode, "dual");
+}
+
+// Test 44: Verification mode rejects non-deterministic function
+#[tokio::test]
+async fn test_verification_mode_rejects_nondeterministic() {
+    use deriva_compute::async_executor::VerificationMode;
+    use deriva_compute::{ComputeFunction, ComputeCost, ComputeError};
+    use deriva_core::address::{FunctionId, Value, CAddr, Recipe};
+    use bytes::Bytes;
+    use std::collections::BTreeMap;
+    
+    struct NonDeterministic;
+    impl ComputeFunction for NonDeterministic {
+        fn id(&self) -> FunctionId { 
+            FunctionId { name: "nondeterministic".into(), version: "1".into() }
+        }
+        fn execute(&self, _inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+            Ok(Bytes::from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos().to_string()))
+        }
+        fn estimated_cost(&self, _input_sizes: &[u64]) -> ComputeCost {
+            ComputeCost { cpu_ms: 1, memory_bytes: 1024 }
+        }
+    }
+    
+    let dir = tempfile::tempdir().unwrap();
+    let storage = StorageBackend::open(dir.path()).unwrap();
+    let mut registry = FunctionRegistry::new();
+    registry.register(Arc::new(NonDeterministic));
+    
+    let state = Arc::new(ServerState::with_verification(
+        storage,
+        registry,
+        VerificationMode::DualCompute,
+    ).unwrap());
+    
+    let leaf_data = Bytes::from("input");
+    let leaf_addr = CAddr::from_bytes(&leaf_data);
+    state.storage.put_leaf(&leaf_data).unwrap();
+    
+    let recipe = Recipe::new(
+        FunctionId::new("nondeterministic", "1"),
+        vec![leaf_addr],
+        BTreeMap::new(),
+    );
+    let recipe_addr = state.storage.put_recipe(&recipe).unwrap();
+    
+    let result = state.executor.materialize(recipe_addr).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("determinism violation"));
+}
+

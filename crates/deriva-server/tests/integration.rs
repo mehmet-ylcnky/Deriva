@@ -5,6 +5,7 @@ use ::deriva_server::service::proto::*;
 use ::deriva_server::service::DerivaService;
 use ::deriva_server::state::ServerState;
 use ::deriva_storage::StorageBackend;
+use futures::FutureExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -487,5 +488,179 @@ async fn test_async_status_during_heavy_load() {
     for resp in status_results {
         assert!(resp.recipe_count >= 20);
     }
+}
+
+#[tokio::test]
+async fn test_async_concurrent_resolve() {
+    let h = TestHarness::new();
+    
+    // Put 10 recipes
+    let mut addrs = Vec::new();
+    for i in 0..10 {
+        let leaf = put_leaf(h.svc(), format!("data{}", i).as_bytes()).await;
+        let recipe = put_recipe(h.svc(), "identity", "1.0.0", vec![leaf], Default::default()).await;
+        addrs.push(recipe);
+    }
+    
+    // Resolve all concurrently
+    let resolve_futs: Vec<_> = addrs.iter().map(|addr| async {
+        Deriva::resolve(h.svc(), Request::new(ResolveRequest { addr: addr.clone() }))
+            .await
+            .unwrap()
+            .into_inner()
+    }).collect();
+    
+    let results = futures::future::join_all(resolve_futs).await;
+    
+    // All should be found
+    for resp in results {
+        assert!(resp.found);
+        assert_eq!(resp.function_name, "identity");
+    }
+}
+
+#[tokio::test]
+async fn test_async_put_recipe_during_get() {
+    let h = TestHarness::new();
+    
+    // Put initial recipe
+    let leaf1 = put_leaf(h.svc(), b"initial").await;
+    let recipe1 = put_recipe(h.svc(), "identity", "1.0.0", vec![leaf1], Default::default()).await;
+    
+    // Concurrent Get and PutRecipe
+    let get_fut = get_all(h.svc(), &recipe1);
+    let put_fut = async {
+        let leaf2 = put_leaf(h.svc(), b"concurrent").await;
+        put_recipe(h.svc(), "uppercase", "1.0.0", vec![leaf2], Default::default()).await
+    };
+    
+    let (result, new_recipe) = tokio::join!(get_fut, put_fut);
+    
+    assert_eq!(result, b"initial");
+    assert_eq!(new_recipe.len(), 32);
+}
+
+#[tokio::test]
+async fn test_async_multiple_invalidations() {
+    let h = TestHarness::new();
+    
+    // Put and cache 5 recipes
+    let mut addrs = Vec::new();
+    for i in 0..5 {
+        let leaf = put_leaf(h.svc(), format!("data{}", i).as_bytes()).await;
+        let recipe = put_recipe(h.svc(), "identity", "1.0.0", vec![leaf], Default::default()).await;
+        let _ = get_all(h.svc(), &recipe).await; // Cache it
+        addrs.push(recipe);
+    }
+    
+    // Invalidate all concurrently
+    let inv_futs: Vec<_> = addrs.iter().map(|addr| async {
+        Deriva::invalidate(h.svc(), Request::new(InvalidateRequest { addr: addr.clone() }))
+            .await
+            .unwrap()
+            .into_inner()
+    }).collect();
+    
+    let results = futures::future::join_all(inv_futs).await;
+    
+    // All should have been cached
+    for resp in results {
+        assert!(resp.was_cached);
+    }
+}
+
+#[tokio::test]
+async fn test_async_get_chain_concurrent() {
+    let h = TestHarness::new();
+    
+    // Build chain: leaf -> r1 -> r2 -> r3
+    let leaf = put_leaf(h.svc(), b"chain").await;
+    let r1 = put_recipe(h.svc(), "identity", "1.0.0", vec![leaf.clone()], Default::default()).await;
+    let r2 = put_recipe(h.svc(), "identity", "1.0.0", vec![r1.clone()], Default::default()).await;
+    let r3 = put_recipe(h.svc(), "identity", "1.0.0", vec![r2.clone()], Default::default()).await;
+    
+    // Get all levels concurrently
+    let futs = vec![
+        get_all(h.svc(), &leaf),
+        get_all(h.svc(), &r1),
+        get_all(h.svc(), &r2),
+        get_all(h.svc(), &r3),
+    ];
+    
+    let results = futures::future::join_all(futs).await;
+    
+    // All should return same data
+    for result in results {
+        assert_eq!(result, b"chain");
+    }
+}
+
+#[tokio::test]
+async fn test_async_status_consistency() {
+    let h = TestHarness::new();
+    
+    // Initial status
+    let s1 = status(h.svc()).await;
+    assert_eq!(s1.recipe_count, 0);
+    
+    // Add recipes
+    for i in 0..10 {
+        let leaf = put_leaf(h.svc(), format!("data{}", i).as_bytes()).await;
+        put_recipe(h.svc(), "identity", "1.0.0", vec![leaf], Default::default()).await;
+    }
+    
+    // Status should reflect additions
+    let s2 = status(h.svc()).await;
+    assert_eq!(s2.recipe_count, 10);
+    
+    // Cache some
+    for i in 0..5 {
+        let leaf = put_leaf(h.svc(), format!("data{}", i).as_bytes()).await;
+        let recipe = put_recipe(h.svc(), "identity", "1.0.0", vec![leaf], Default::default()).await;
+        get_all(h.svc(), &recipe).await;
+    }
+    
+    let s3 = status(h.svc()).await;
+    assert!(s3.cache_entries > 0);
+}
+
+#[tokio::test]
+async fn test_async_concurrent_diamond_materialization() {
+    let h = TestHarness::new();
+    
+    // Build diamond: a,b -> r1(concat), a -> r2(identity), r1,r2 -> r3(concat)
+    let a = put_leaf(h.svc(), b"a").await;
+    let b = put_leaf(h.svc(), b"b").await;
+    let r1 = put_recipe(h.svc(), "concat", "1.0.0", vec![a.clone(), b], Default::default()).await;
+    let r2 = put_recipe(h.svc(), "identity", "1.0.0", vec![a], Default::default()).await;
+    let r3 = put_recipe(h.svc(), "concat", "1.0.0", vec![r1, r2], Default::default()).await;
+    
+    // Materialize r3 multiple times concurrently
+    let futs: Vec<_> = (0..5).map(|_| get_all(h.svc(), &r3)).collect();
+    let results = futures::future::join_all(futs).await;
+    
+    // All should return "aba"
+    for result in results {
+        assert_eq!(result, b"aba");
+    }
+}
+
+#[tokio::test]
+async fn test_async_interleaved_operations() {
+    let h = TestHarness::new();
+    
+    // Interleave puts, gets, resolves, and status calls
+    let leaf = put_leaf(h.svc(), b"test").await;
+    
+    let futs = vec![
+        async { put_recipe(h.svc(), "identity", "1.0.0", vec![leaf.clone()], Default::default()).await; 0 }.boxed(),
+        async { status(h.svc()).await; 1 }.boxed(),
+        async { put_recipe(h.svc(), "uppercase", "1.0.0", vec![leaf.clone()], Default::default()).await; 2 }.boxed(),
+        async { get_all(h.svc(), &leaf).await; 3 }.boxed(),
+        async { status(h.svc()).await; 4 }.boxed(),
+    ];
+    
+    let results = futures::future::join_all(futs).await;
+    assert_eq!(results.len(), 5);
 }
 

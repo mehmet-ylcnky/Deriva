@@ -460,3 +460,238 @@ async fn test_12_materialize_diamond() {
     let result = executor.materialize(r3_addr).await.unwrap();
     assert_eq!(result, Bytes::from("aba"));
 }
+
+#[tokio::test]
+async fn test_18_cache_invalidation_during_materialization() {
+    let (mut dag, registry, cache, mut leaves) = setup();
+    let data = Bytes::from("test_data");
+    let addr = leaf(b"test");
+    leaves.leaves.lock().unwrap().insert(addr, data.clone());
+    
+    let recipe = recipe(vec![addr], "identity");
+    let recipe_addr = recipe.addr();
+    dag.recipes.lock().unwrap().insert(recipe_addr, recipe);
+    
+    let executor = Arc::new(AsyncExecutor::new(dag, registry, Arc::clone(&cache), leaves));
+    
+    // First materialization - caches result
+    executor.materialize(recipe_addr).await.unwrap();
+    assert!(cache.contains(&recipe_addr).await);
+    
+    // Invalidate while another task is checking
+    let exec1 = Arc::clone(&executor);
+    let cache1 = Arc::clone(&cache);
+    let h1 = tokio::spawn(async move {
+        cache1.remove(&recipe_addr).await
+    });
+    
+    let exec2 = Arc::clone(&executor);
+    let h2 = tokio::spawn(async move {
+        exec2.materialize(recipe_addr).await
+    });
+    
+    let _ = h1.await.unwrap();
+    let result = h2.await.unwrap().unwrap();
+    assert_eq!(result, data);
+}
+
+#[tokio::test]
+async fn test_19_multiple_cache_operations() {
+    let (_, _, cache, _) = setup();
+    
+    // Put multiple entries
+    for i in 0..20 {
+        let addr = leaf(format!("key{}", i).as_bytes());
+        let data = Bytes::from(format!("value{}", i));
+        cache.put(addr, data).await;
+    }
+    
+    // Concurrent gets
+    let mut handles = vec![];
+    for i in 0..20 {
+        let cache_clone = Arc::clone(&cache);
+        let addr = leaf(format!("key{}", i).as_bytes());
+        handles.push(tokio::spawn(async move {
+            cache_clone.get(&addr).await
+        }));
+    }
+    
+    for (i, h) in handles.into_iter().enumerate() {
+        let result = h.await.unwrap();
+        assert_eq!(result, Some(Bytes::from(format!("value{}", i))));
+    }
+}
+
+#[tokio::test]
+async fn test_20_async_leaf_store_blanket_impl() {
+    let (_, _, _, leaves) = setup();
+    let data = Bytes::from("leaf_data");
+    let addr = leaf(b"test_leaf");
+    leaves.leaves.lock().unwrap().insert(addr, data.clone());
+    
+    // Test blanket impl works
+    let result = leaves.get_leaf(&addr).await;
+    assert_eq!(result, Some(data));
+}
+
+#[tokio::test]
+async fn test_21_materialize_with_empty_inputs() {
+    let (mut dag, registry, cache, leaves) = setup();
+    
+    // Recipe with no inputs - identity function expects 1 input
+    let recipe = recipe(vec![], "identity");
+    let recipe_addr = recipe.addr();
+    dag.recipes.lock().unwrap().insert(recipe_addr, recipe);
+    
+    let executor = AsyncExecutor::new(dag, registry, cache, leaves);
+    let result = executor.materialize(recipe_addr).await;
+    
+    // Should fail - identity requires 1 input
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_22_concurrent_put_same_key() {
+    let (_, _, cache, _) = setup();
+    let addr = leaf(b"same_key");
+    
+    // Spawn 10 concurrent puts to same key
+    let mut handles = vec![];
+    for i in 0..10 {
+        let cache_clone = Arc::clone(&cache);
+        let data = Bytes::from(format!("value{}", i));
+        handles.push(tokio::spawn(async move {
+            cache_clone.put(addr, data).await
+        }));
+    }
+    
+    for h in handles {
+        h.await.unwrap();
+    }
+    
+    // Should have one of the values
+    let result = cache.get(&addr).await;
+    assert!(result.is_some());
+}
+
+#[tokio::test]
+async fn test_23_materialize_wide_fanout() {
+    let (mut dag, registry, cache, mut leaves) = setup();
+    
+    // Create 15 leaf inputs
+    let mut leaf_addrs = vec![];
+    for i in 0..15 {
+        let data = Bytes::from(format!("{}", i));
+        let addr = leaf(format!("leaf{}", i).as_bytes());
+        leaves.leaves.lock().unwrap().insert(addr, data);
+        leaf_addrs.push(addr);
+    }
+    
+    // Recipe that concatenates all 15 inputs
+    let recipe = recipe(leaf_addrs, "concat");
+    let recipe_addr = recipe.addr();
+    dag.recipes.lock().unwrap().insert(recipe_addr, recipe);
+    
+    let executor = AsyncExecutor::new(dag, registry, cache, leaves);
+    let result = executor.materialize(recipe_addr).await.unwrap();
+    
+    // Should be "0123456789101112131415"
+    let expected = (0..15).map(|i| i.to_string()).collect::<String>();
+    assert_eq!(result, Bytes::from(expected));
+}
+
+#[tokio::test]
+async fn test_24_cache_entry_count() {
+    let (_, _, cache, _) = setup();
+    
+    assert_eq!(cache.entry_count().await, 0);
+    
+    for i in 0..5 {
+        let addr = leaf(format!("key{}", i).as_bytes());
+        cache.put(addr, Bytes::from("value")).await;
+    }
+    
+    assert_eq!(cache.entry_count().await, 5);
+}
+
+#[tokio::test]
+async fn test_25_cache_current_size() {
+    let (_, _, cache, _) = setup();
+    
+    let initial_size = cache.current_size().await;
+    
+    let addr = leaf(b"test");
+    let data = Bytes::from("x".repeat(1000));
+    cache.put(addr, data).await;
+    
+    let new_size = cache.current_size().await;
+    assert!(new_size > initial_size);
+}
+
+#[tokio::test]
+async fn test_26_materialize_chain_with_caching() {
+    let (mut dag, registry, cache, mut leaves) = setup();
+    let data = Bytes::from("start");
+    let addr = leaf(b"start");
+    leaves.leaves.lock().unwrap().insert(addr, data);
+    
+    // Build chain: leaf -> r1 -> r2 -> r3
+    let r1 = recipe(vec![addr], "identity");
+    let r1_addr = r1.addr();
+    dag.recipes.lock().unwrap().insert(r1_addr, r1);
+    
+    let r2 = recipe(vec![r1_addr], "identity");
+    let r2_addr = r2.addr();
+    dag.recipes.lock().unwrap().insert(r2_addr, r2);
+    
+    let r3 = recipe(vec![r2_addr], "identity");
+    let r3_addr = r3.addr();
+    dag.recipes.lock().unwrap().insert(r3_addr, r3);
+    
+    let executor = AsyncExecutor::new(dag, registry, Arc::clone(&cache), leaves);
+    
+    // First materialization
+    executor.materialize(r3_addr).await.unwrap();
+    
+    // All intermediate results should be cached
+    assert!(cache.contains(&r1_addr).await);
+    assert!(cache.contains(&r2_addr).await);
+    assert!(cache.contains(&r3_addr).await);
+    
+    // Second materialization should hit cache
+    let result = executor.materialize(r3_addr).await.unwrap();
+    assert_eq!(result, Bytes::from("start"));
+}
+
+#[tokio::test]
+async fn test_27_concurrent_materialize_shared_inputs() {
+    let (mut dag, registry, cache, mut leaves) = setup();
+    let shared_data = Bytes::from("shared");
+    let shared_addr = leaf(b"shared");
+    leaves.leaves.lock().unwrap().insert(shared_addr, shared_data);
+    
+    // Create 5 recipes that all use the same shared input
+    let mut recipe_addrs = vec![];
+    for i in 0..5 {
+        let recipe = recipe(vec![shared_addr], "identity");
+        let recipe_addr = recipe.addr();
+        dag.recipes.lock().unwrap().insert(recipe_addr, recipe);
+        recipe_addrs.push(recipe_addr);
+    }
+    
+    let executor = Arc::new(AsyncExecutor::new(dag, registry, cache, leaves));
+    
+    // Materialize all concurrently
+    let mut handles = vec![];
+    for addr in recipe_addrs {
+        let exec = Arc::clone(&executor);
+        handles.push(tokio::spawn(async move {
+            exec.materialize(addr).await
+        }));
+    }
+    
+    for h in handles {
+        let result = h.await.unwrap().unwrap();
+        assert_eq!(result, Bytes::from("shared"));
+    }
+}

@@ -4,12 +4,15 @@ use deriva_compute::async_executor::{AsyncExecutor, DagReader};
 use deriva_compute::cache::{AsyncMaterializationCache, SharedCache};
 use deriva_compute::leaf_store::AsyncLeafStore;
 use deriva_compute::registry::FunctionRegistry;
+use deriva_compute::function::ComputeFunction;
 use deriva_compute::builtins;
 use deriva_core::address::{CAddr, FunctionId, Recipe, Value};
 use deriva_core::cache::EvictableCache;
 use deriva_core::error::{DerivaError, Result};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 // Test helpers
 struct TestDagReader {
@@ -35,6 +38,81 @@ impl AsyncLeafStore for TestLeafStore {
     async fn get_leaf(&self, addr: &CAddr) -> Option<Bytes> {
         self.leaves.lock().unwrap().get(addr).cloned()
     }
+}
+
+// SlowFunction - sleeps for configurable duration to test parallelism
+struct SlowFunction {
+    duration_ms: u64,
+}
+
+impl SlowFunction {
+    fn new(duration_ms: u64) -> Self {
+        Self { duration_ms }
+    }
+}
+
+impl ComputeFunction for SlowFunction {
+    fn id(&self) -> FunctionId {
+        FunctionId {
+            name: "slow".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> std::result::Result<Bytes, deriva_compute::function::ComputeError> {
+        std::thread::sleep(Duration::from_millis(self.duration_ms));
+        Ok(inputs.into_iter().next().unwrap_or_else(|| Bytes::from("slow")))
+    }
+
+    fn estimated_cost(&self, _input_sizes: &[u64]) -> deriva_compute::function::ComputeCost {
+        deriva_compute::function::ComputeCost {
+            cpu_ms: self.duration_ms,
+            memory_bytes: 1024,
+        }
+    }
+}
+
+// CountingFunction - tracks execution count for deduplication testing
+struct CountingFunction {
+    count: Arc<AtomicUsize>,
+}
+
+impl CountingFunction {
+    fn new(count: Arc<AtomicUsize>) -> Self {
+        Self { count }
+    }
+}
+
+impl ComputeFunction for CountingFunction {
+    fn id(&self) -> FunctionId {
+        FunctionId {
+            name: "counting".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> std::result::Result<Bytes, deriva_compute::function::ComputeError> {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        Ok(inputs.into_iter().next().unwrap_or_else(|| Bytes::from("counted")))
+    }
+
+    fn estimated_cost(&self, _input_sizes: &[u64]) -> deriva_compute::function::ComputeCost {
+        deriva_compute::function::ComputeCost {
+            cpu_ms: 1,
+            memory_bytes: 1024,
+        }
+    }
+}
+
+// Timing utility for measuring parallel speedup
+fn measure_time<F, T>(f: F) -> (T, Duration)
+where
+    F: FnOnce() -> T,
+{
+    let start = Instant::now();
+    let result = f();
+    let elapsed = start.elapsed();
+    (result, elapsed)
 }
 
 fn setup() -> (

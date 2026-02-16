@@ -1,4 +1,4 @@
-use deriva_compute::async_executor::{AsyncExecutor, CombinedDagReader};
+use deriva_compute::async_executor::{AsyncExecutor, CombinedDagReader, ExecutorConfig, VerificationMode};
 use deriva_compute::cache::SharedCache;
 use deriva_compute::registry::FunctionRegistry;
 use deriva_core::cache::EvictableCache;
@@ -17,6 +17,14 @@ pub struct ServerState {
 
 impl ServerState {
     pub fn new(storage: StorageBackend, registry: FunctionRegistry) -> crate::Result<Self> {
+        Self::with_verification(storage, registry, VerificationMode::Off)
+    }
+
+    pub fn with_verification(
+        storage: StorageBackend,
+        registry: FunctionRegistry,
+        verification: VerificationMode,
+    ) -> crate::Result<Self> {
         let cache = Arc::new(SharedCache::new(EvictableCache::new(Default::default())));
         let dag = Arc::new(storage.dag.clone());
         let recipes = Arc::new(storage.recipes.clone());
@@ -28,11 +36,17 @@ impl ServerState {
             recipes: Arc::clone(&recipes),
         });
 
-        let executor = AsyncExecutor::new(
+        let config = ExecutorConfig {
+            verification,
+            ..Default::default()
+        };
+
+        let executor = AsyncExecutor::with_config(
             dag_reader,
             Arc::clone(&registry),
             Arc::clone(&cache),
             blobs,
+            config,
         );
 
         Ok(Self {

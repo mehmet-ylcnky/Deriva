@@ -12,6 +12,7 @@ prost = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = "0.1"
 bytes = { workspace = true }
+clap = { version = "4", features = ["derive"] }
 
 [build-dependencies]
 tonic-build = { workspace = true }

@@ -174,6 +174,7 @@ pub struct AsyncExecutor<C, L, D> {
     semaphore: Arc<Semaphore>,
     in_flight: Arc<Mutex<HashMap<CAddr, broadcast::Sender<Result<Bytes>>>>>,
     pub config: ExecutorConfig,
+    verification_stats: Arc<VerificationStats>,
 }
 
 impl<C, L, D> Clone for AsyncExecutor<C, L, D> {
@@ -190,6 +191,7 @@ impl<C, L, D> Clone for AsyncExecutor<C, L, D> {
                 dedup_channel_capacity: self.config.dedup_channel_capacity,
                 verification: self.config.verification,
             },
+            verification_stats: Arc::clone(&self.verification_stats),
         }
     }
 }
@@ -225,6 +227,7 @@ where
             semaphore,
             in_flight: Arc::new(Mutex::new(HashMap::new())),
             config,
+            verification_stats: Arc::new(VerificationStats::new()),
         }
     }
 

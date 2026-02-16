@@ -136,26 +136,46 @@ where
                 return Ok(bytes);
             }
 
-            // 3. Recipe lookup
+            // 3. Deduplication check - if already computing, subscribe to result
+            {
+                let in_flight = self.in_flight.lock().await;
+                if let Some(tx) = in_flight.get(&addr) {
+                    let mut rx = tx.subscribe();
+                    drop(in_flight);
+                    return rx.recv().await
+                        .map_err(|_| DerivaError::ComputeFailed("broadcast channel closed".into()))?;
+                }
+            }
+
+            // 4. Register as producer
+            let (tx, _rx) = broadcast::channel(self.config.dedup_channel_capacity);
+            {
+                let mut in_flight = self.in_flight.lock().await;
+                in_flight.insert(addr, tx.clone());
+            }
+
+            // 5. Recipe lookup
             let recipe = self.dag.get_recipe(&addr)?
                 .ok_or_else(|| DerivaError::NotFound(addr.to_string()))?;
 
-            // 4. Resolve inputs sequentially (§2.3 makes this parallel)
-            let mut input_bytes = Vec::with_capacity(recipe.inputs.len());
-            for input_addr in &recipe.inputs {
-                let bytes = self.materialize(*input_addr).await?;
-                input_bytes.push(bytes);
-            }
+            // 6. Parallel input resolution
+            let futures: Vec<_> = recipe.inputs.iter()
+                .map(|input_addr| self.materialize(*input_addr))
+                .collect();
+            let input_bytes = futures::future::try_join_all(futures).await?;
 
-            // 5. Execute compute function
+            // 7. Acquire semaphore ONLY for compute step (prevent deadlock)
+            let _permit = self.semaphore.acquire().await
+                .map_err(|e| DerivaError::ComputeFailed(format!("semaphore error: {}", e)))?;
+
+            // 8. Execute compute function
             let func = self.registry.get(&recipe.function_id)
                 .ok_or_else(|| DerivaError::FunctionNotFound(
                     recipe.function_id.to_string()
                 ))?;
 
-            let output = {
+            let result = {
                 let params = recipe.params.clone();
-                // CPU-bound work - run on blocking thread pool
                 tokio::task::spawn_blocking(move || {
                     func.execute(input_bytes, &params)
                 })
@@ -163,13 +183,24 @@ where
                 .map_err(|e| DerivaError::ComputeFailed(
                     format!("task join error: {}", e)
                 ))?
-                .map_err(|e| DerivaError::ComputeFailed(e.to_string()))?
+                .map_err(|e| DerivaError::ComputeFailed(e.to_string()))
             };
 
-            // 6. Cache the result
-            self.cache.put(addr, output.clone()).await;
+            // 9. Broadcast result to waiting tasks
+            let _ = tx.send(result.clone());
 
-            Ok(output)
+            // 10. Clean up in_flight entry
+            {
+                let mut in_flight = self.in_flight.lock().await;
+                in_flight.remove(&addr);
+            }
+
+            // 11. Cache on success
+            if let Ok(ref output) = result {
+                self.cache.put(addr, output.clone()).await;
+            }
+
+            result
         })
     }
 }

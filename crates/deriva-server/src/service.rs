@@ -194,7 +194,7 @@ impl Deriva for DerivaService {
         // Resolve inputs
         let mut input_bytes = Vec::new();
         for input_addr in &recipe.inputs {
-            let bytes = self.state.executor.materialize(input_addr.clone()).await
+            let bytes = self.state.executor.materialize(*input_addr).await
                 .map_err(|e| Status::internal(format!("input resolution failed: {}", e)))?;
             input_bytes.push(bytes);
         }

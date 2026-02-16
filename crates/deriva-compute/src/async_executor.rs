@@ -139,20 +139,15 @@ impl<R: RecipeStore> DagReader for CombinedDagReader<R> {
 ///     ..Default::default()
 /// };
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum VerificationMode {
     /// No verification — single compute (default, production)
+    #[default]
     Off,
     /// Dual compute — execute twice in parallel, compare byte-for-byte
     DualCompute,
     /// Deterministic sampling — verify `rate` fraction of recipes (0.0-1.0)
     Sampled { rate: f64 },
-}
-
-impl Default for VerificationMode {
-    fn default() -> Self {
-        Self::Off
-    }
 }
 
 /// Statistics for verification operations

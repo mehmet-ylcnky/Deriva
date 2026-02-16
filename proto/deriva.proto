@@ -8,6 +8,7 @@ service Deriva {
   rpc Resolve (ResolveRequest) returns (ResolveResponse);
   rpc Invalidate (InvalidateRequest) returns (InvalidateResponse);
   rpc Status (StatusRequest) returns (StatusResponse);
+  rpc Verify (VerifyRequest) returns (VerifyResponse);
 }
 
 message PutLeafRequest { bytes data = 1; }
@@ -48,4 +49,16 @@ message StatusResponse {
   uint64 verification_passed = 8;
   uint64 verification_failed = 9;
   double verification_failure_rate = 10;
+}
+
+message VerifyRequest {
+  bytes addr = 1;
+}
+
+message VerifyResponse {
+  bool deterministic = 1;
+  string output_hash = 2;
+  uint64 output_size = 3;
+  uint64 compute_time_us = 4;
+  string error = 5;
 }

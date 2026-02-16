@@ -173,4 +173,69 @@ impl Deriva for DerivaService {
             verification_failure_rate: stats.failure_rate(),
         }))
     }
+
+    async fn verify(
+        &self,
+        request: Request<VerifyRequest>,
+    ) -> Result<Response<VerifyResponse>, Status> {
+        use std::time::Instant;
+        
+        let addr_bytes = request.into_inner().addr;
+        let addr = parse_addr(&addr_bytes)?;
+
+        // Get recipe and inputs
+        let recipe = self.state.recipes.get(&addr)
+            .map_err(|e| Status::internal(format!("recipe lookup failed: {}", e)))?
+            .ok_or_else(|| Status::not_found("address not found"))?;
+
+        let func = self.state.registry.get(&recipe.function_id)
+            .ok_or_else(|| Status::not_found(format!("function not found: {}", recipe.function_id)))?;
+
+        // Resolve inputs
+        let mut input_bytes = Vec::new();
+        for input_addr in &recipe.inputs {
+            let bytes = self.state.executor.materialize(input_addr.clone()).await
+                .map_err(|e| Status::internal(format!("input resolution failed: {}", e)))?;
+            input_bytes.push(bytes);
+        }
+
+        // Dual compute with timing
+        let start = Instant::now();
+        let func1 = std::sync::Arc::clone(&func);
+        let func2 = std::sync::Arc::clone(&func);
+        let input1 = input_bytes.clone();
+        let input2 = input_bytes;
+        let params1 = recipe.params.clone();
+        let params2 = recipe.params.clone();
+
+        let (result1, result2) = tokio::join!(
+            tokio::task::spawn_blocking(move || func1.execute(input1, &params1)),
+            tokio::task::spawn_blocking(move || func2.execute(input2, &params2))
+        );
+        let elapsed = start.elapsed();
+
+        let output1 = result1
+            .map_err(|e| Status::internal(format!("compute task failed: {}", e)))?
+            .map_err(|e| Status::internal(format!("compute failed: {}", e)))?;
+        let output2 = result2
+            .map_err(|e| Status::internal(format!("compute task failed: {}", e)))?
+            .map_err(|e| Status::internal(format!("compute failed: {}", e)))?;
+
+        let deterministic = output1 == output2;
+        let hash = blake3::hash(&output1);
+
+        Ok(Response::new(VerifyResponse {
+            deterministic,
+            output_hash: hash.to_hex().to_string(),
+            output_size: output1.len() as u64,
+            compute_time_us: elapsed.as_micros() as u64,
+            error: if deterministic {
+                String::new()
+            } else {
+                let hash2 = blake3::hash(&output2);
+                format!("outputs differ: {} bytes (hash {}) vs {} bytes (hash {})",
+                    output1.len(), hash.to_hex(), output2.len(), hash2.to_hex())
+            },
+        }))
+    }
 }

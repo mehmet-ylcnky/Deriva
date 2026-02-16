@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
-use deriva_compute::async_executor::{AsyncExecutor, DagReader};
+use deriva_compute::async_executor::{AsyncExecutor, DagReader, VerificationMode};
 use deriva_compute::cache::{AsyncMaterializationCache, SharedCache};
 use deriva_compute::leaf_store::AsyncLeafStore;
 use deriva_compute::registry::FunctionRegistry;
@@ -1079,6 +1079,7 @@ async fn test_37_semaphore_limits_concurrency() {
     let config = ExecutorConfig {
         max_concurrency: 2,
         dedup_channel_capacity: 16,
+        verification: VerificationMode::Off,
     };
     let executor = AsyncExecutor::with_config(dag, registry, cache, leaves, config);
     
@@ -1099,6 +1100,7 @@ async fn test_38_executor_config_custom() {
     let config = ExecutorConfig {
         max_concurrency: 4,
         dedup_channel_capacity: 32,
+        verification: VerificationMode::Off,
     };
     
     let executor = AsyncExecutor::with_config(dag, registry, cache, leaves, config);

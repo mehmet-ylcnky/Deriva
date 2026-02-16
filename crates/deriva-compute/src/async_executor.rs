@@ -83,12 +83,31 @@ impl<R: RecipeStore> DagReader for CombinedDagReader<R> {
     }
 }
 
+/// Verification mode for determinism checking
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VerificationMode {
+    /// No verification — single compute (default, production)
+    Off,
+    /// Dual compute — execute twice, compare byte-for-byte
+    DualCompute,
+    /// Statistical — verify N% of materializations (sampling)
+    Sampled { rate: f64 },
+}
+
+impl Default for VerificationMode {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
 /// Configuration for AsyncExecutor
 pub struct ExecutorConfig {
     /// Max concurrent materialization tasks (default: num_cpus * 2)
     pub max_concurrency: usize,
     /// Broadcast channel capacity for dedup (default: 16)
     pub dedup_channel_capacity: usize,
+    /// Verification mode for determinism checking (default: Off)
+    pub verification: VerificationMode,
 }
 
 impl Default for ExecutorConfig {
@@ -96,6 +115,7 @@ impl Default for ExecutorConfig {
         Self {
             max_concurrency: num_cpus::get() * 2,
             dedup_channel_capacity: 16,
+            verification: VerificationMode::Off,
         }
     }
 }
@@ -122,6 +142,7 @@ impl<C, L, D> Clone for AsyncExecutor<C, L, D> {
             config: ExecutorConfig {
                 max_concurrency: self.config.max_concurrency,
                 dedup_channel_capacity: self.config.dedup_channel_capacity,
+                verification: self.config.verification,
             },
         }
     }

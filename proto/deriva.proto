@@ -43,4 +43,9 @@ message StatusResponse {
   uint64 cache_entries = 3;
   uint64 cache_size_bytes = 4;
   double cache_hit_rate = 5;
+  string verification_mode = 6;
+  uint64 verification_total = 7;
+  uint64 verification_passed = 8;
+  uint64 verification_failed = 9;
+  double verification_failure_rate = 10;
 }

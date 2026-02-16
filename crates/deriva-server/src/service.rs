@@ -151,12 +151,26 @@ impl Deriva for DerivaService {
         &self,
         _request: Request<StatusRequest>,
     ) -> Result<Response<StatusResponse>, Status> {
+        let stats = &self.state.executor.verification_stats;
+        let verification_mode = match self.state.executor.config.verification {
+            deriva_compute::async_executor::VerificationMode::Off => "off".to_string(),
+            deriva_compute::async_executor::VerificationMode::DualCompute => "dual".to_string(),
+            deriva_compute::async_executor::VerificationMode::Sampled { rate } => {
+                format!("sampled:{}", rate)
+            }
+        };
+
         Ok(Response::new(StatusResponse {
             recipe_count: self.state.dag.len() as u64,
             blob_count: 0,
             cache_entries: self.state.cache.entry_count().await as u64,
             cache_size_bytes: self.state.cache.current_size().await,
             cache_hit_rate: self.state.cache.hit_rate().await,
+            verification_mode,
+            verification_total: stats.total_verified.load(std::sync::atomic::Ordering::Relaxed),
+            verification_passed: stats.total_passed.load(std::sync::atomic::Ordering::Relaxed),
+            verification_failed: stats.total_failed.load(std::sync::atomic::Ordering::Relaxed),
+            verification_failure_rate: stats.failure_rate(),
         }))
     }
 }

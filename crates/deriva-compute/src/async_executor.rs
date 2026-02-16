@@ -174,7 +174,7 @@ pub struct AsyncExecutor<C, L, D> {
     semaphore: Arc<Semaphore>,
     in_flight: Arc<Mutex<HashMap<CAddr, broadcast::Sender<Result<Bytes>>>>>,
     pub config: ExecutorConfig,
-    verification_stats: Arc<VerificationStats>,
+    pub verification_stats: Arc<VerificationStats>,
 }
 
 impl<C, L, D> Clone for AsyncExecutor<C, L, D> {

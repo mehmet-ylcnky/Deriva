@@ -1,3 +1,41 @@
+//! # Async Executor with Parallel Materialization
+//!
+//! This module implements concurrent materialization of computation-addressed values
+//! with three key features:
+//!
+//! ## 1. Parallel Input Resolution
+//! Independent recipe inputs are materialized concurrently using `try_join_all`,
+//! enabling significant speedup for fan-in patterns (e.g., 4 inputs with 100ms each
+//! complete in ~100ms instead of 400ms sequentially).
+//!
+//! ## 2. Deduplication via Broadcast Channels
+//! When multiple tasks request the same address concurrently, only one computation
+//! executes while others subscribe to a broadcast channel for the result. This is
+//! implemented using an `in_flight` map that tracks ongoing computations.
+//!
+//! **Mechanism:**
+//! - First task to request an address becomes the "producer" and creates a broadcast channel
+//! - Subsequent tasks become "subscribers" and wait for the result
+//! - Producer broadcasts result (success or error) to all subscribers
+//! - Channel is removed from `in_flight` map after completion
+//!
+//! ## 3. Semaphore-Based Concurrency Control
+//! A semaphore limits concurrent compute operations to prevent resource exhaustion.
+//! **Critical for deadlock prevention:** The semaphore is acquired ONLY at the compute
+//! step, NOT during input resolution. This ensures tasks waiting for inputs don't hold
+//! semaphore permits, preventing deadlock in deep DAGs.
+//!
+//! **Deadlock Prevention Strategy:**
+//! ```text
+//! ❌ WRONG (deadlock risk):
+//!    acquire_semaphore() → resolve_inputs() → compute()
+//!    (holds permit while waiting for inputs)
+//!
+//! ✅ CORRECT (deadlock-free):
+//!    resolve_inputs() → acquire_semaphore() → compute()
+//!    (only holds permit during actual computation)
+//! ```
+
 use crate::cache::AsyncMaterializationCache;
 use crate::leaf_store::AsyncLeafStore;
 use crate::registry::FunctionRegistry;
@@ -124,6 +162,32 @@ where
     }
 
     /// Materialize a CAddr - resolves recursively through the DAG
+    ///
+    /// # Parallel Materialization Algorithm
+    ///
+    /// This method implements concurrent materialization with deduplication:
+    ///
+    /// 1. **Cache Check**: Return immediately if already computed
+    /// 2. **Leaf Check**: Return immediately if it's a leaf value
+    /// 3. **Deduplication Check**: If another task is computing this address,
+    ///    subscribe to its broadcast channel and wait for the result
+    /// 4. **Register as Producer**: Create broadcast channel and register in `in_flight` map
+    /// 5. **Recipe Lookup**: Get the recipe from DAG (broadcast errors on failure)
+    /// 6. **Parallel Input Resolution**: Use `try_join_all` to materialize all inputs
+    ///    concurrently. This is the key parallelism point - independent branches
+    ///    execute simultaneously.
+    /// 7. **Acquire Semaphore**: CRITICAL - acquire permit ONLY before compute step,
+    ///    not during input resolution. This prevents deadlock in deep DAGs.
+    /// 8. **Execute Compute**: Run the function in blocking thread pool
+    /// 9. **Broadcast Result**: Send result (success or error) to all waiting subscribers
+    /// 10. **Cleanup**: Remove from `in_flight` map
+    /// 11. **Cache on Success**: Store result in cache for future requests
+    ///
+    /// # Deadlock Prevention
+    ///
+    /// The semaphore is acquired at step 7 (after input resolution) rather than
+    /// at the beginning. This ensures tasks waiting for inputs don't hold permits,
+    /// preventing circular wait conditions in deep DAGs.
     pub fn materialize(&self, addr: CAddr) -> BoxFuture<'_, Result<Bytes>> {
         Box::pin(async move {
             // 1. Cache check
@@ -178,14 +242,16 @@ where
                 }
             };
 
-            // 6. Parallel input resolution - try_join_all cancels all on first error
+            // 6. Parallel input resolution - CRITICAL: try_join_all enables concurrent execution
+            // All independent inputs materialize simultaneously, providing significant speedup
+            // for fan-in patterns (e.g., 4 inputs complete in ~100ms instead of 400ms)
             let futures: Vec<_> = recipe.inputs.iter()
                 .map(|input_addr| self.materialize(*input_addr))
                 .collect();
             let input_bytes = match futures::future::try_join_all(futures).await {
                 Ok(bytes) => bytes,
                 Err(e) => {
-                    // Broadcast error to waiting subscribers
+                    // Broadcast error to waiting subscribers before cleanup
                     let err = Err(e);
                     let _ = tx.send(err.clone());
                     let mut in_flight = self.in_flight.lock().await;
@@ -194,7 +260,11 @@ where
                 }
             };
 
-            // 7. Acquire semaphore ONLY for compute step (prevent deadlock)
+            // 7. Acquire semaphore ONLY for compute step - DEADLOCK PREVENTION
+            // By acquiring the permit AFTER input resolution, we ensure tasks waiting
+            // for inputs don't hold permits. This prevents circular wait in deep DAGs.
+            // Example: With limit=2 and 4 inputs, first 2 compute while others wait,
+            // then next 2 compute - batched execution without deadlock.
             let _permit = match self.semaphore.acquire().await {
                 Ok(p) => p,
                 Err(e) => {
@@ -206,7 +276,7 @@ where
                 }
             };
 
-            // 8. Execute compute function
+            // 8. Execute compute function in blocking thread pool
             let func = match self.registry.get(&recipe.function_id) {
                 Some(f) => f,
                 None => {
@@ -230,16 +300,18 @@ where
                 .and_then(|r| r.map_err(|e| DerivaError::ComputeFailed(e.to_string())))
             };
 
-            // 9. Broadcast result to waiting tasks (ignore send errors - no subscribers is ok)
+            // 9. Broadcast result to all waiting subscribers
+            // Deduplication payoff: All tasks waiting for this address receive the result
+            // without recomputing. Ignore send errors (no subscribers is ok).
             let _ = tx.send(result.clone());
 
-            // 10. Clean up in_flight entry
+            // 10. Clean up in_flight entry - computation complete
             {
                 let mut in_flight = self.in_flight.lock().await;
                 in_flight.remove(&addr);
             }
 
-            // 11. Cache on success
+            // 11. Cache on success for future requests
             if let Ok(ref output) = result {
                 self.cache.put(addr, output.clone()).await;
             }

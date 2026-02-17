@@ -12,33 +12,8 @@
     </p>
 
     <div class="architecture-diagram">
-┌─────────────────────────────────────────────────────────────────┐
-│                        Client Layer                             │
-│                   gRPC API  ·  CLI Client                       │
-│         put_leaf · put_recipe · get · resolve · invalidate      │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────────┐
-│                      Service Layer                              │
-│                     DerivaService                               │
-│          Request handling · Streaming · Error mapping           │
-└──────┬───────────────────┬──────────────────────┬───────────────┘
-       │                   │                      │
-┌──────▼──────┐    ┌───────▼───────┐    ┌─────────▼─────────┐
-│  Compute    │    │    State      │    │     Storage       │
-│  Engine     │    │   Manager     │    │     Backend       │
-│             │    │               │    │                   │
-│ Registry    │    │ DAG Store     │    │ SledRecipeStore   │
-│ Executor    │    │ Cache         │    │ BlobStore         │
-│ Builtins    │    │ Coordination  │    │ (sharded files)   │
-└─────────────┘    └───────────────┘    └───────────────────┘
-       │                   │                      │
-┌──────▼───────────────────▼──────────────────────▼───────────────┐
-│                        Core Layer                               │
-│              CAddr · Recipe · Value · FunctionId                │
-│              DagStore · EvictableCache · DerivaError            │
-│                    (zero I/O, pure logic)                       │
-└─────────────────────────────────────────────────────────────────┘</div>
+        <img src="deriva2.png" alt="System architecture layers" style="max-width: 100%; height: auto;">
+    </div>
 
     <p>
         The <strong>Core Layer</strong> (<code>deriva-core</code>) contains all fundamental types and data structures with no
@@ -76,19 +51,8 @@
     </p>
 
     <div class="architecture-diagram">
-                    deriva-cli ──────→ (proto client)
-                        │
-                        ▼
-                  deriva-server
-                   │         │
-                   ▼         ▼
-          deriva-compute  deriva-storage
-                   │         │
-                   ▼         ▼
-                  deriva-core
-                        │
-                        ▼
-                  deriva-network (stub)</div>
+        <img src="deriva3.png" alt="Crate dependency graph" style="max-width: 100%; height: auto;">
+    </div>
 
     <div class="comparison-table">
         <table>

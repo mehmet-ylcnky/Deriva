@@ -118,43 +118,8 @@
     </p>
 
     <div class="architecture-diagram">
-Client requests CAddr_D (derived)
-        │
-        ▼
-   ┌──────────┐
-   │ Cache    │──── HIT ──→ Return cached bytes
-   │ Lookup   │
-   └────┬─────┘
-        │ MISS
-        ▼
-   ┌──────────────┐
-   │ Recipe       │  Recipe_D: fn="concat", inputs=[CAddr_B, CAddr_C]
-   │ Lookup       │
-   └──┬───────┬───┘
-      │       │
-      ▼       ▼
-   CAddr_B  CAddr_C
-   (cached)  (not cached)
-      │       │
-      │       ▼
-      │    ┌───────────┐
-      │    │ Recipe    │  Recipe_C: fn="uppercase", inputs=[CAddr_A]
-      │    │ Lookup    │
-      │    └─────┬─────┘
-      │          │
-      │          ▼
-      │       CAddr_A (leaf, always available)
-      │          │
-      │          ▼
-      │    Execute uppercase(bytes_A) → bytes_C
-      │    Cache bytes_C at CAddr_C
-      │          │
-      ▼          ▼
-   Execute concat(bytes_B, bytes_C) → bytes_D
-   Cache bytes_D at CAddr_D
-        │
-        ▼
-   Stream bytes_D to client</div>
+        <img src="deriva1.png" alt="Materialization flow diagram" style="max-width: 100%; height: auto;">
+    </div>
 
     <p>
         This recursive materialization means that a single <code>get()</code> call can trigger a cascade of computations. The

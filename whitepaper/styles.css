@@ -207,8 +207,7 @@ code {
 .partial { color: #f39c12; font-weight: bold; }
 
 .architecture-diagram {
-    background: var(--code-bg); border: 1px solid var(--border-color);
-    border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0;
+    margin: 1.5rem 0;
     font-family: 'Consolas', monospace; font-size: 0.85rem;
     line-height: 1.3; overflow-x: auto; white-space: pre;
 }

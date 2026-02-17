@@ -125,8 +125,8 @@ li { margin-bottom: 0.5rem; }
 }
 
 .problem-statement {
-    background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%);
-    border: 1px solid #f5c6cb; border-radius: 6px; padding: 1rem; margin: 1rem 0;
+    background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%);
+    border: 1px solid #ffeaa7; border-radius: 6px; padding: 1rem; margin: 1rem 0;
 }
 
 .solution-statement {

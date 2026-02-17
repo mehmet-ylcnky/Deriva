@@ -10,17 +10,17 @@
     </p>
 
     <p>
-        We described the motivation for computation-addressed storage — the derived data problem that causes storage bloat,
-        stale data, manual lifecycle management, and lost reproducibility in data-intensive organizations. We surveyed related
+        The motivation for computation-addressed storage has been described — the derived data problem that causes storage bloat,
+        stale data, manual lifecycle management, and lost reproducibility in data-intensive organizations. Related
         work across build systems, content-addressed storage, lineage trackers, memoization systems, and lazy evaluation
-        frameworks, positioning Deriva as the intersection of general-purpose distributed storage and native computation
-        understanding. We defined the core abstractions — computation addresses, recipes, materialization, the dependency DAG,
-        and cost-aware eviction — and showed how they interlock to produce emergent capabilities that no single abstraction
+        frameworks has been surveyed, positioning Deriva as the intersection of general-purpose distributed storage and native computation
+        understanding. The core abstractions have been defined — computation addresses, recipes, materialization, the dependency DAG,
+        and cost-aware eviction — and it has been shown how they interlock to produce emergent capabilities that no single abstraction
         provides alone.
     </p>
 
     <p>
-        We presented the Phase 1 implementation: a fully functional single-node system written in Rust, organized as six
+        The Phase 1 implementation has been presented: a fully functional single-node system written in Rust, organized as six
         composable crates, with a complete gRPC API (six RPCs including server-streaming retrieval), a command-line client,
         and 244 passing tests covering leaf storage, recipe-based derivation, multi-level DAG resolution, diamond dependencies,
         cache behavior, persistence across restarts, large blob streaming, error handling, and concurrent operations. The
@@ -29,10 +29,10 @@
     </p>
 
     <p>
-        We discussed the tradeoffs honestly: the determinism requirement constrains which computations can be addressed, the
+        The tradeoffs have been discussed honestly: the determinism requirement constrains which computations can be addressed, the
         recomputation latency on cache miss makes the system unsuitable for strict-latency workloads, the system complexity
         exceeds that of a traditional blob store, and function versioning requires careful management. For each limitation,
-        we described concrete mitigation strategies — some already implemented, others planned for future phases.
+        concrete mitigation strategies have been described — some already implemented, others planned for future phases.
     </p>
 
     <p>

@@ -17,7 +17,7 @@
         or IPFS blocks. <em>Derived data</em> is the output of a deterministic function applied to other data. Instead of storing
         the output bytes as the primary artifact, Deriva stores a <em>recipe</em>: a compact descriptor containing the function
         identifier, the addresses of its inputs, and any parameters. The address of derived data is the hash of this recipe, not
-        the hash of the output bytes. We call this <strong>computation addressing</strong>.
+        the hash of the output bytes. This is called <strong>computation addressing</strong>.
     </p>
 
     <p>
@@ -47,12 +47,12 @@
     </p>
 
     <p>
-        This paper serves as an introduction to the Deriva project. We describe the motivation behind computation-addressed storage
-        (Section 2), survey related work and position Deriva within the landscape (Section 3), define the core abstractions — computation
-        addresses, recipes, materialization, and cost-aware eviction (Section 4), present the system architecture (Section 5), detail
-        the Phase 1 implementation including code examples from the working system (Section 6), evaluate the current state with metrics
-        and comparisons (Section 7), discuss tradeoffs and limitations honestly (Section 8), outline the roadmap for distribution and
-        advanced features (Section 9), and conclude with a summary of contributions (Section 10).
+        This paper serves as an introduction to the Deriva project. The motivation behind computation-addressed storage
+        is described (Section 2), related work is surveyed and Deriva is positioned within the landscape (Section 3), the core abstractions are defined — computation
+        addresses, recipes, materialization, and cost-aware eviction (Section 4), the system architecture is presented (Section 5), the Phase 1 implementation is detailed
+        including code examples from the working system (Section 6), the current state is evaluated with metrics
+        and comparisons (Section 7), tradeoffs and limitations are discussed honestly (Section 8), the roadmap for distribution and
+        advanced features is outlined (Section 9), and a summary of contributions concludes the paper (Section 10).
     </p>
 
     <p>

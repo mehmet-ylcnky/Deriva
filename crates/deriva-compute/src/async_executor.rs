@@ -59,6 +59,7 @@
 
 use crate::cache::AsyncMaterializationCache;
 use crate::leaf_store::AsyncLeafStore;
+use crate::metrics::*;
 use crate::registry::FunctionRegistry;
 use bytes::Bytes;
 use deriva_core::address::{CAddr, Recipe};
@@ -71,6 +72,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{broadcast, Mutex, Semaphore};
+use tracing::Instrument;
 
 /// Trait for DAG access - abstracts over DagStore and PersistentDag
 pub trait DagReader: Send + Sync {
@@ -410,13 +412,29 @@ where
     /// preventing circular wait conditions in deep DAGs.
     pub fn materialize(&self, addr: CAddr) -> BoxFuture<'_, Result<Bytes>> {
         Box::pin(async move {
+            let span = tracing::info_span!("materialize", addr = %addr);
+            async {
+            MAT_ACTIVE.inc();
+            let start = std::time::Instant::now();
+
             // 1. Cache check
             if let Some(bytes) = self.cache.get(&addr).await {
+                CACHE_TOTAL.with_label_values(&["hit"]).inc();
+                MAT_TOTAL.with_label_values(&["cache_hit"]).inc();
+                tracing::debug!("cache hit");
+                MAT_ACTIVE.dec();
+                MAT_DURATION.observe(start.elapsed().as_secs_f64());
                 return Ok(bytes);
             }
+            CACHE_TOTAL.with_label_values(&["miss"]).inc();
+            tracing::debug!("cache miss");
 
             // 2. Leaf check
             if let Some(bytes) = self.leaf_store.get_leaf(&addr).await {
+                MAT_TOTAL.with_label_values(&["leaf"]).inc();
+                tracing::debug!("leaf hit");
+                MAT_ACTIVE.dec();
+                MAT_DURATION.observe(start.elapsed().as_secs_f64());
                 return Ok(bytes);
             }
 
@@ -426,13 +444,15 @@ where
                 if let Some(tx) = in_flight.get(&addr) {
                     let mut rx = tx.subscribe();
                     drop(in_flight);
-                    // Handle broadcast errors: RecvError means sender dropped (computation failed/cancelled)
-                    return match rx.recv().await {
+                    let result = match rx.recv().await {
                         Ok(result) => result,
                         Err(_) => Err(DerivaError::ComputeFailed(
                             "producer task failed or was cancelled".into()
                         )),
                     };
+                    MAT_ACTIVE.dec();
+                    MAT_DURATION.observe(start.elapsed().as_secs_f64());
+                    return result;
                 }
             }
 
@@ -449,84 +469,95 @@ where
                 Ok(None) => {
                     let err = Err(DerivaError::NotFound(addr.to_string()));
                     let _ = tx.send(err.clone());
-                    let mut in_flight = self.in_flight.lock().await;
-                    in_flight.remove(&addr);
+                    self.in_flight.lock().await.remove(&addr);
+                    MAT_ACTIVE.dec();
+                    MAT_DURATION.observe(start.elapsed().as_secs_f64());
                     return err;
                 }
                 Err(e) => {
                     let err = Err(e);
                     let _ = tx.send(err.clone());
-                    let mut in_flight = self.in_flight.lock().await;
-                    in_flight.remove(&addr);
+                    self.in_flight.lock().await.remove(&addr);
+                    MAT_ACTIVE.dec();
+                    MAT_DURATION.observe(start.elapsed().as_secs_f64());
                     return err;
                 }
             };
 
-            // 6. Parallel input resolution - CRITICAL: try_join_all enables concurrent execution
-            // All independent inputs materialize simultaneously, providing significant speedup
-            // for fan-in patterns (e.g., 4 inputs complete in ~100ms instead of 400ms)
+            // 6. Parallel input resolution
             let futures: Vec<_> = recipe.inputs.iter()
                 .map(|input_addr| self.materialize(*input_addr))
                 .collect();
             let input_bytes = match futures::future::try_join_all(futures).await {
                 Ok(bytes) => bytes,
                 Err(e) => {
-                    // Broadcast error to waiting subscribers before cleanup
                     let err = Err(e);
                     let _ = tx.send(err.clone());
-                    let mut in_flight = self.in_flight.lock().await;
-                    in_flight.remove(&addr);
+                    self.in_flight.lock().await.remove(&addr);
+                    MAT_ACTIVE.dec();
+                    MAT_DURATION.observe(start.elapsed().as_secs_f64());
                     return err;
                 }
             };
 
-            // 7. Acquire semaphore ONLY for compute step - DEADLOCK PREVENTION
-            // By acquiring the permit AFTER input resolution, we ensure tasks waiting
-            // for inputs don't hold permits. This prevents circular wait in deep DAGs.
-            // Example: With limit=2 and 4 inputs, first 2 compute while others wait,
-            // then next 2 compute - batched execution without deadlock.
+            // 7. Acquire semaphore ONLY for compute step — deadlock prevention
             let _permit = match self.semaphore.acquire().await {
                 Ok(p) => p,
                 Err(e) => {
                     let err = Err(DerivaError::ComputeFailed(format!("semaphore error: {}", e)));
                     let _ = tx.send(err.clone());
-                    let mut in_flight = self.in_flight.lock().await;
-                    in_flight.remove(&addr);
+                    self.in_flight.lock().await.remove(&addr);
+                    MAT_ACTIVE.dec();
+                    MAT_DURATION.observe(start.elapsed().as_secs_f64());
                     return err;
                 }
             };
 
-            // 8. Execute compute function in blocking thread pool
+            // 8. Execute compute function
             let func = match self.registry.get(&recipe.function_id) {
                 Some(f) => f,
                 None => {
                     let err = Err(DerivaError::FunctionNotFound(recipe.function_id.to_string()));
                     let _ = tx.send(err.clone());
-                    let mut in_flight = self.in_flight.lock().await;
-                    in_flight.remove(&addr);
+                    self.in_flight.lock().await.remove(&addr);
+                    MAT_ACTIVE.dec();
+                    MAT_DURATION.observe(start.elapsed().as_secs_f64());
                     return err;
                 }
             };
 
+            let fn_name = recipe.function_id.to_string();
+            let total_input_bytes: usize = input_bytes.iter().map(|b| b.len()).sum();
+            COMPUTE_INPUT_BYTES.with_label_values(&[&fn_name]).observe(total_input_bytes as f64);
+
+            let compute_start = std::time::Instant::now();
             let result = self.execute_verified(&addr, func, input_bytes, &recipe.params).await;
+            COMPUTE_DURATION.with_label_values(&[&fn_name]).observe(compute_start.elapsed().as_secs_f64());
 
-            // 9. Broadcast result to all waiting subscribers
-            // Deduplication payoff: All tasks waiting for this address receive the result
-            // without recomputing. Ignore send errors (no subscribers is ok).
-            let _ = tx.send(result.clone());
-
-            // 10. Clean up in_flight entry - computation complete
-            {
-                let mut in_flight = self.in_flight.lock().await;
-                in_flight.remove(&addr);
+            if let Ok(ref output) = result {
+                COMPUTE_OUTPUT_BYTES.with_label_values(&[&fn_name]).observe(output.len() as f64);
             }
 
-            // 11. Cache on success for future requests
+            tracing::debug!(function = %recipe.function_id, "compute complete");
+            MAT_TOTAL.with_label_values(&["computed"]).inc();
+
+            // 9. Broadcast result
+            let _ = tx.send(result.clone());
+
+            // 10. Cleanup
+            {
+                self.in_flight.lock().await.remove(&addr);
+            }
+
+            // 11. Cache on success
             if let Ok(ref output) = result {
                 self.cache.put(addr, output.clone()).await;
             }
 
+            MAT_ACTIVE.dec();
+            MAT_DURATION.observe(start.elapsed().as_secs_f64());
             result
+            }.instrument(span).await
         })
     }
 }

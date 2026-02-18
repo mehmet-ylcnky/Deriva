@@ -57,6 +57,10 @@ impl SharedCache {
     pub async fn remove(&self, addr: &CAddr) -> Option<Bytes> {
         self.inner.write().await.remove(addr)
     }
+
+    pub async fn remove_batch(&self, addrs: &[CAddr]) -> (u64, u64, Vec<CAddr>) {
+        self.inner.write().await.remove_batch(addrs)
+    }
 }
 
 #[async_trait]

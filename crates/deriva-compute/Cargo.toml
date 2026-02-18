@@ -13,3 +13,5 @@ futures = { workspace = true }
 tokio = { workspace = true }
 num_cpus = "1"
 blake3 = "1"
+prometheus = { workspace = true }
+lazy_static = { workspace = true }

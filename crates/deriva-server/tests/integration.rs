@@ -220,14 +220,14 @@ async fn invalidate_then_recompute() {
 
     assert_eq!(get_all(h.svc(), &recipe).await, b"DATA");
 
-    let inv = Deriva::invalidate(h.svc(), Request::new(InvalidateRequest { addr: recipe.clone() }))
+    let inv = Deriva::invalidate(h.svc(), Request::new(InvalidateRequest { addr: recipe.clone(), cascade: false }))
         .await
         .unwrap()
         .into_inner();
     assert!(inv.was_cached);
 
     let inv2 =
-        Deriva::invalidate(h.svc(), Request::new(InvalidateRequest { addr: recipe.clone() }))
+        Deriva::invalidate(h.svc(), Request::new(InvalidateRequest { addr: recipe.clone(), cascade: false }))
             .await
             .unwrap()
             .into_inner();
@@ -448,7 +448,7 @@ async fn test_async_invalidate_during_get() {
     // Execute Get and Invalidate concurrently
     let get_fut = get_all(h.svc(), &recipe);
     let inv_fut = async {
-        Deriva::invalidate(h.svc(), Request::new(InvalidateRequest { addr: recipe.clone() }))
+        Deriva::invalidate(h.svc(), Request::new(InvalidateRequest { addr: recipe.clone(), cascade: false }))
             .await
             .unwrap()
     };
@@ -555,7 +555,7 @@ async fn test_async_multiple_invalidations() {
     
     // Invalidate all concurrently
     let inv_futs: Vec<_> = addrs.iter().map(|addr| async {
-        Deriva::invalidate(h.svc(), Request::new(InvalidateRequest { addr: addr.clone() }))
+        Deriva::invalidate(h.svc(), Request::new(InvalidateRequest { addr: addr.clone(), cascade: false }))
             .await
             .unwrap()
             .into_inner()

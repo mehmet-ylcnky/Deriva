@@ -3,8 +3,11 @@ pub mod builtins;
 pub mod cache;
 pub mod executor;
 pub mod function;
+pub mod invalidation;
 pub mod leaf_store;
+pub mod metrics;
 pub mod registry;
+pub mod streaming;
 
 pub use async_executor::AsyncExecutor;
 pub use executor::Executor;

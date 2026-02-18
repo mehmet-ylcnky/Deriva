@@ -48,6 +48,15 @@ pub enum Command {
     Invalidate {
         /// CAddr (hex)
         addr: String,
+        /// Cascade to all transitive dependents
+        #[arg(long)]
+        cascade: bool,
+        /// Dry run: show what would be evicted
+        #[arg(long)]
+        dry_run: bool,
+        /// Show addresses of evicted entries
+        #[arg(long)]
+        detail: bool,
     },
     /// Server status
     Status,

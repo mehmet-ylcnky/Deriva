@@ -24,3 +24,7 @@ harness = false
 [[bench]]
 name = "verification_overhead"
 harness = false
+
+[[bench]]
+name = "cascade_invalidation"
+harness = false

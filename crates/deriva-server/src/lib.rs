@@ -1,3 +1,5 @@
+pub mod metrics;
+pub mod metrics_server;
 pub mod service;
 pub mod state;
 

@@ -5,6 +5,7 @@ use deriva_core::cache::EvictableCache;
 use deriva_core::PersistentDag;
 use deriva_storage::{StorageBackend, SledRecipeStore};
 use std::sync::Arc;
+use std::time::Instant;
 
 pub struct ServerState {
     pub executor: AsyncExecutor<SharedCache, deriva_storage::BlobStore, CombinedDagReader<SledRecipeStore>>,
@@ -13,6 +14,7 @@ pub struct ServerState {
     pub recipes: Arc<SledRecipeStore>,
     pub registry: Arc<FunctionRegistry>,
     pub storage: StorageBackend,
+    pub start_time: Instant,
 }
 
 impl ServerState {
@@ -56,6 +58,7 @@ impl ServerState {
             recipes,
             registry,
             storage,
+            start_time: Instant::now(),
         })
     }
 }

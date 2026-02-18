@@ -7,6 +7,7 @@ service Deriva {
   rpc Get (GetRequest) returns (stream GetResponse);
   rpc Resolve (ResolveRequest) returns (ResolveResponse);
   rpc Invalidate (InvalidateRequest) returns (InvalidateResponse);
+  rpc CascadeInvalidate (CascadeInvalidateRequest) returns (CascadeInvalidateResponse);
   rpc Status (StatusRequest) returns (StatusResponse);
   rpc Verify (VerifyRequest) returns (VerifyResponse);
 }
@@ -34,8 +35,29 @@ message ResolveResponse {
   map<string, string> params = 5;
 }
 
-message InvalidateRequest { bytes addr = 1; }
-message InvalidateResponse { bool was_cached = 1; }
+message InvalidateRequest {
+  bytes addr = 1;
+  bool cascade = 2;
+}
+message InvalidateResponse {
+  bool was_cached = 1;
+  uint64 evicted_count = 2;
+}
+
+message CascadeInvalidateRequest {
+  bytes addr = 1;
+  string policy = 2;
+  bool include_root = 3;
+  bool detail_addrs = 4;
+}
+message CascadeInvalidateResponse {
+  uint64 evicted_count = 1;
+  uint64 traversed_count = 2;
+  uint32 max_depth = 3;
+  uint64 bytes_reclaimed = 4;
+  repeated bytes evicted_addrs = 5;
+  uint64 duration_micros = 6;
+}
 
 message StatusRequest {}
 message StatusResponse {

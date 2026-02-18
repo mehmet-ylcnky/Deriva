@@ -1,10 +1,16 @@
+use crate::metrics::*;
 use crate::state::ServerState;
 use deriva_core::address::*;
+use deriva_core::invalidation::CascadePolicy;
+use deriva_compute::invalidation::CascadeInvalidator;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
+use tracing::Instrument;
+use uuid::Uuid;
 
 pub mod proto {
     tonic::include_proto!("deriva");
@@ -40,26 +46,56 @@ fn parse_params(params: &std::collections::HashMap<String, String>) -> BTreeMap<
         .collect()
 }
 
+fn parse_cascade_policy(s: &str) -> CascadePolicy {
+    match s.to_lowercase().as_str() {
+        "none" => CascadePolicy::None,
+        "dry_run" | "dryrun" => CascadePolicy::DryRun,
+        _ => CascadePolicy::Immediate,
+    }
+}
+
+fn record_rpc(method: &str, start: Instant, ok: bool) {
+    let status = if ok { "ok" } else { "error" };
+    RPC_TOTAL.with_label_values(&[method, status]).inc();
+    RPC_DURATION.with_label_values(&[method]).observe(start.elapsed().as_secs_f64());
+    RPC_ACTIVE.with_label_values(&[method]).dec();
+}
+
+fn begin_rpc(method: &str) -> (Instant, tracing::Span) {
+    RPC_ACTIVE.with_label_values(&[method]).inc();
+    let request_id = Uuid::new_v4().to_string();
+    let span = tracing::info_span!("rpc", method = method, request_id = %request_id);
+    (Instant::now(), span)
+}
+
 #[tonic::async_trait]
 impl Deriva for DerivaService {
     async fn put_leaf(
         &self,
         request: Request<PutLeafRequest>,
     ) -> Result<Response<PutLeafResponse>, Status> {
-        let addr = self
+        let (start, span) = begin_rpc("put_leaf");
+        let _enter = span.enter();
+        let result = self
             .state
             .storage
             .put_leaf(&request.get_ref().data)
-            .map_err(|e| Status::internal(e.to_string()))?;
-        Ok(Response::new(PutLeafResponse {
-            addr: addr.as_bytes().to_vec(),
-        }))
+            .map_err(|e| Status::internal(e.to_string()));
+        let ok = result.is_ok();
+        let resp = result.map(|addr| {
+            DAG_RECIPES.set(self.state.dag.len() as f64);
+            Response::new(PutLeafResponse { addr: addr.as_bytes().to_vec() })
+        });
+        record_rpc("put_leaf", start, ok);
+        resp
     }
 
     async fn put_recipe(
         &self,
         request: Request<PutRecipeRequest>,
     ) -> Result<Response<PutRecipeResponse>, Status> {
+        let (start, span) = begin_rpc("put_recipe");
+        let _enter = span.enter();
         let req = request.get_ref();
         let inputs: Vec<CAddr> = req
             .inputs
@@ -71,14 +107,19 @@ impl Deriva for DerivaService {
             inputs,
             parse_params(&req.params),
         );
-        let addr = self
+        let result = self
             .state
             .storage
             .put_recipe(&recipe)
-            .map_err(|e| Status::internal(e.to_string()))?;
-        Ok(Response::new(PutRecipeResponse {
-            addr: addr.as_bytes().to_vec(),
-        }))
+            .map_err(|e| Status::internal(e.to_string()));
+        let ok = result.is_ok();
+        let resp = result.map(|addr| {
+            DAG_INSERT_DURATION.observe(start.elapsed().as_secs_f64());
+            DAG_RECIPES.set(self.state.dag.len() as f64);
+            Response::new(PutRecipeResponse { addr: addr.as_bytes().to_vec() })
+        });
+        record_rpc("put_recipe", start, ok);
+        resp
     }
 
     type GetStream = ReceiverStream<Result<GetResponse, Status>>;
@@ -87,6 +128,7 @@ impl Deriva for DerivaService {
         &self,
         request: Request<GetRequest>,
     ) -> Result<Response<Self::GetStream>, Status> {
+        let (start, span) = begin_rpc("get");
         let addr = parse_addr(&request.get_ref().addr)?;
         let state = Arc::clone(&self.state);
         let (tx, rx) = mpsc::channel(16);
@@ -106,12 +148,14 @@ impl Deriva for DerivaService {
                             break;
                         }
                     }
+                    record_rpc("get", start, true);
                 }
                 Err(e) => {
                     let _ = tx.send(Err(Status::internal(e.to_string()))).await;
+                    record_rpc("get", start, false);
                 }
             }
-        });
+        }.instrument(span));
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
@@ -120,8 +164,10 @@ impl Deriva for DerivaService {
         &self,
         request: Request<ResolveRequest>,
     ) -> Result<Response<ResolveResponse>, Status> {
+        let (start, span) = begin_rpc("resolve");
+        let _enter = span.enter();
         let addr = parse_addr(&request.get_ref().addr)?;
-        match self.state.recipes.get(&addr)
+        let result = match self.state.recipes.get(&addr)
             .map_err(|e| Status::internal(e.to_string()))? {
             Some(recipe) => Ok(Response::new(ResolveResponse {
                 found: true,
@@ -135,22 +181,88 @@ impl Deriva for DerivaService {
                     .collect(),
             })),
             None => Ok(Response::new(ResolveResponse::default())),
-        }
+        };
+        record_rpc("resolve", start, result.is_ok());
+        result
     }
 
     async fn invalidate(
         &self,
         request: Request<InvalidateRequest>,
     ) -> Result<Response<InvalidateResponse>, Status> {
-        let addr = parse_addr(&request.get_ref().addr)?;
-        let was_cached = self.state.cache.remove(&addr).await.is_some();
-        Ok(Response::new(InvalidateResponse { was_cached }))
+        let (start, span) = begin_rpc("invalidate");
+        let _enter = span.enter();
+        let req = request.get_ref();
+        let addr = parse_addr(&req.addr)?;
+
+        let result = if req.cascade {
+            let result = CascadeInvalidator::invalidate(
+                &self.state.dag, &self.state.cache, &addr,
+                CascadePolicy::Immediate, true, false,
+            ).await;
+            CASCADE_TOTAL.with_label_values(&["immediate"]).inc();
+            CASCADE_EVICTED.observe(result.evicted_count as f64);
+            CASCADE_DEPTH.observe(result.max_depth as f64);
+            CASCADE_DURATION.observe(result.duration.as_secs_f64());
+            Ok(Response::new(InvalidateResponse {
+                was_cached: result.evicted_count > 0,
+                evicted_count: result.evicted_count,
+            }))
+        } else {
+            let was_cached = self.state.cache.remove(&addr).await.is_some();
+            Ok(Response::new(InvalidateResponse {
+                was_cached,
+                evicted_count: if was_cached { 1 } else { 0 },
+            }))
+        };
+        record_rpc("invalidate", start, result.is_ok());
+        result
+    }
+
+    async fn cascade_invalidate(
+        &self,
+        request: Request<CascadeInvalidateRequest>,
+    ) -> Result<Response<CascadeInvalidateResponse>, Status> {
+        let (start, span) = begin_rpc("cascade_invalidate");
+        let _enter = span.enter();
+        let req = request.get_ref();
+        let addr = parse_addr(&req.addr)?;
+        let policy = parse_cascade_policy(&req.policy);
+
+        let policy_label = match policy {
+            CascadePolicy::None => "none",
+            CascadePolicy::Immediate => "immediate",
+            CascadePolicy::DryRun => "dry_run",
+        };
+
+        let result = CascadeInvalidator::invalidate(
+            &self.state.dag, &self.state.cache, &addr,
+            policy, req.include_root, req.detail_addrs,
+        ).await;
+
+        CASCADE_TOTAL.with_label_values(&[policy_label]).inc();
+        CASCADE_EVICTED.observe(result.evicted_count as f64);
+        CASCADE_DEPTH.observe(result.max_depth as f64);
+        CASCADE_DURATION.observe(result.duration.as_secs_f64());
+
+        let resp = Ok(Response::new(CascadeInvalidateResponse {
+            evicted_count: result.evicted_count,
+            traversed_count: result.traversed_count,
+            max_depth: result.max_depth,
+            bytes_reclaimed: result.bytes_reclaimed,
+            evicted_addrs: result.evicted_addrs.iter().map(|a| a.as_bytes().to_vec()).collect(),
+            duration_micros: result.duration.as_micros() as u64,
+        }));
+        record_rpc("cascade_invalidate", start, true);
+        resp
     }
 
     async fn status(
         &self,
         _request: Request<StatusRequest>,
     ) -> Result<Response<StatusResponse>, Status> {
+        let (start, span) = begin_rpc("status");
+        let _enter = span.enter();
         let stats = &self.state.executor.verification_stats;
         let verification_mode = match self.state.executor.config.verification {
             deriva_compute::async_executor::VerificationMode::Off => "off".to_string(),
@@ -160,30 +272,39 @@ impl Deriva for DerivaService {
             }
         };
 
-        Ok(Response::new(StatusResponse {
+        let cache_entries = self.state.cache.entry_count().await as u64;
+        let cache_size = self.state.cache.current_size().await;
+        CACHE_ENTRIES.set(cache_entries as f64);
+        CACHE_SIZE.set(cache_size as f64);
+        CACHE_HIT_RATE.set(self.state.cache.hit_rate().await);
+        DAG_RECIPES.set(self.state.dag.len() as f64);
+        VERIFY_FAILURE_RATE.set(stats.failure_rate());
+
+        let resp = Ok(Response::new(StatusResponse {
             recipe_count: self.state.dag.len() as u64,
             blob_count: 0,
-            cache_entries: self.state.cache.entry_count().await as u64,
-            cache_size_bytes: self.state.cache.current_size().await,
+            cache_entries,
+            cache_size_bytes: cache_size,
             cache_hit_rate: self.state.cache.hit_rate().await,
             verification_mode,
             verification_total: stats.total_verified.load(std::sync::atomic::Ordering::Relaxed),
             verification_passed: stats.total_passed.load(std::sync::atomic::Ordering::Relaxed),
             verification_failed: stats.total_failed.load(std::sync::atomic::Ordering::Relaxed),
             verification_failure_rate: stats.failure_rate(),
-        }))
+        }));
+        record_rpc("status", start, true);
+        resp
     }
 
     async fn verify(
         &self,
         request: Request<VerifyRequest>,
     ) -> Result<Response<VerifyResponse>, Status> {
-        use std::time::Instant;
-        
+        let (start, span) = begin_rpc("verify");
+        let _enter = span.enter();
         let addr_bytes = request.into_inner().addr;
         let addr = parse_addr(&addr_bytes)?;
 
-        // Get recipe and inputs
         let recipe = self.state.recipes.get(&addr)
             .map_err(|e| Status::internal(format!("recipe lookup failed: {}", e)))?
             .ok_or_else(|| Status::not_found("address not found"))?;
@@ -191,7 +312,6 @@ impl Deriva for DerivaService {
         let func = self.state.registry.get(&recipe.function_id)
             .ok_or_else(|| Status::not_found(format!("function not found: {}", recipe.function_id)))?;
 
-        // Resolve inputs
         let mut input_bytes = Vec::new();
         for input_addr in &recipe.inputs {
             let bytes = self.state.executor.materialize(*input_addr).await
@@ -199,8 +319,7 @@ impl Deriva for DerivaService {
             input_bytes.push(bytes);
         }
 
-        // Dual compute with timing
-        let start = Instant::now();
+        let compute_start = Instant::now();
         let func1 = std::sync::Arc::clone(&func);
         let func2 = std::sync::Arc::clone(&func);
         let input1 = input_bytes.clone();
@@ -212,7 +331,7 @@ impl Deriva for DerivaService {
             tokio::task::spawn_blocking(move || func1.execute(input1, &params1)),
             tokio::task::spawn_blocking(move || func2.execute(input2, &params2))
         );
-        let elapsed = start.elapsed();
+        let elapsed = compute_start.elapsed();
 
         let output1 = result1
             .map_err(|e| Status::internal(format!("compute task failed: {}", e)))?
@@ -224,7 +343,10 @@ impl Deriva for DerivaService {
         let deterministic = output1 == output2;
         let hash = blake3::hash(&output1);
 
-        Ok(Response::new(VerifyResponse {
+        let result_label = if deterministic { "pass" } else { "fail" };
+        VERIFY_TOTAL.with_label_values(&[result_label]).inc();
+
+        let resp = Ok(Response::new(VerifyResponse {
             deterministic,
             output_hash: hash.to_hex().to_string(),
             output_size: output1.len() as u64,
@@ -232,10 +354,10 @@ impl Deriva for DerivaService {
             error: if deterministic {
                 String::new()
             } else {
-                let hash2 = blake3::hash(&output2);
-                format!("outputs differ: {} bytes (hash {}) vs {} bytes (hash {})",
-                    output1.len(), hash.to_hex(), output2.len(), hash2.to_hex())
+                "non-deterministic output".to_string()
             },
-        }))
+        }));
+        record_rpc("verify", start, true);
+        resp
     }
 }

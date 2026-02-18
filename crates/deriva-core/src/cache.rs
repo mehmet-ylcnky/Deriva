@@ -120,6 +120,21 @@ impl EvictableCache {
         Some(entry.data)
     }
 
+    pub fn remove_batch(&mut self, addrs: &[CAddr]) -> (u64, u64, Vec<CAddr>) {
+        let mut count = 0u64;
+        let mut bytes = 0u64;
+        let mut removed = Vec::new();
+        for addr in addrs {
+            if let Some(entry) = self.entries.remove(addr) {
+                self.current_size -= entry.size;
+                bytes += entry.size;
+                count += 1;
+                removed.push(*addr);
+            }
+        }
+        (count, bytes, removed)
+    }
+
     pub fn pin(&mut self, addr: &CAddr) -> bool {
         if let Some(entry) = self.entries.get_mut(addr) {
             entry.pinned = true;

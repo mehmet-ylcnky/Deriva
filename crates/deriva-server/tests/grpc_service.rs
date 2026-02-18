@@ -229,7 +229,7 @@ async fn resolve_leaf_not_found() {
 #[tokio::test]
 async fn invalidate_uncached_returns_false() {
     let svc = setup();
-    let resp = Deriva::invalidate(&svc, Request::new(InvalidateRequest { addr: vec![0u8; 32] })).await.unwrap().into_inner();
+    let resp = Deriva::invalidate(&svc, Request::new(InvalidateRequest { addr: vec![0u8; 32], cascade: false })).await.unwrap().into_inner();
     assert!(!resp.was_cached);
 }
 
@@ -244,7 +244,7 @@ async fn invalidate_after_get_returns_true() {
         params: Default::default(),
     })).await.unwrap().into_inner();
     collect_stream(&svc, recipe.addr.clone()).await;
-    let resp = Deriva::invalidate(&svc, Request::new(InvalidateRequest { addr: recipe.addr })).await.unwrap().into_inner();
+    let resp = Deriva::invalidate(&svc, Request::new(InvalidateRequest { addr: recipe.addr, cascade: false })).await.unwrap().into_inner();
     assert!(resp.was_cached);
 }
 
@@ -306,6 +306,88 @@ async fn resolve_bad_addr_length() {
 #[tokio::test]
 async fn invalidate_bad_addr_length() {
     let svc = setup();
-    let result = Deriva::invalidate(&svc, Request::new(InvalidateRequest { addr: vec![0u8; 1] })).await;
+    let result = Deriva::invalidate(&svc, Request::new(InvalidateRequest { addr: vec![0u8; 1], cascade: false })).await;
     assert!(result.is_err());
+}
+
+// --- Cascade Invalidation ---
+
+#[tokio::test]
+async fn cascade_invalidate_end_to_end() {
+    let svc = setup();
+
+    let leaf = Deriva::put_leaf(&svc, Request::new(PutLeafRequest { data: b"hello".to_vec() })).await.unwrap().into_inner();
+    let recipe = Deriva::put_recipe(&svc, Request::new(PutRecipeRequest {
+        function_name: "uppercase".into(),
+        function_version: "1.0.0".into(),
+        inputs: vec![leaf.addr.clone()],
+        params: Default::default(),
+    })).await.unwrap().into_inner();
+
+    // Materialize to populate cache
+    collect_stream(&svc, recipe.addr.clone()).await;
+
+    let resp = Deriva::cascade_invalidate(&svc, Request::new(CascadeInvalidateRequest {
+        addr: leaf.addr,
+        policy: "immediate".into(),
+        include_root: true,
+        detail_addrs: true,
+    })).await.unwrap().into_inner();
+
+    assert!(resp.evicted_count >= 1);
+    assert!(resp.traversed_count >= 1);
+
+    let status = Deriva::status(&svc, Request::new(StatusRequest {})).await.unwrap().into_inner();
+    assert_eq!(status.cache_entries, 0);
+}
+
+#[tokio::test]
+async fn cascade_dry_run_preserves_cache() {
+    let svc = setup();
+
+    let leaf = Deriva::put_leaf(&svc, Request::new(PutLeafRequest { data: b"data".to_vec() })).await.unwrap().into_inner();
+    let recipe = Deriva::put_recipe(&svc, Request::new(PutRecipeRequest {
+        function_name: "uppercase".into(),
+        function_version: "1.0.0".into(),
+        inputs: vec![leaf.addr.clone()],
+        params: Default::default(),
+    })).await.unwrap().into_inner();
+
+    collect_stream(&svc, recipe.addr.clone()).await;
+
+    let resp = Deriva::cascade_invalidate(&svc, Request::new(CascadeInvalidateRequest {
+        addr: leaf.addr,
+        policy: "dry_run".into(),
+        include_root: true,
+        detail_addrs: true,
+    })).await.unwrap().into_inner();
+
+    assert!(resp.evicted_count >= 1);
+
+    // Cache unchanged
+    let status = Deriva::status(&svc, Request::new(StatusRequest {})).await.unwrap().into_inner();
+    assert!(status.cache_entries >= 1);
+}
+
+#[tokio::test]
+async fn backward_compat_invalidate_no_cascade() {
+    let svc = setup();
+
+    let leaf = Deriva::put_leaf(&svc, Request::new(PutLeafRequest { data: b"data".to_vec() })).await.unwrap().into_inner();
+    let recipe = Deriva::put_recipe(&svc, Request::new(PutRecipeRequest {
+        function_name: "uppercase".into(),
+        function_version: "1.0.0".into(),
+        inputs: vec![leaf.addr.clone()],
+        params: Default::default(),
+    })).await.unwrap().into_inner();
+
+    collect_stream(&svc, recipe.addr.clone()).await;
+
+    let resp = Deriva::invalidate(&svc, Request::new(InvalidateRequest {
+        addr: recipe.addr,
+        cascade: false,
+    })).await.unwrap().into_inner();
+
+    assert!(resp.was_cached);
+    assert_eq!(resp.evicted_count, 1);
 }

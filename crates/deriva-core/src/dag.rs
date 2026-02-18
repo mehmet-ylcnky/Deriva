@@ -101,6 +101,31 @@ impl DagStore {
         result
     }
 
+    pub fn transitive_dependents_with_depth(&self, addr: &CAddr) -> (Vec<(CAddr, u32)>, u32) {
+        let mut result = Vec::new();
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        let mut max_depth: u32 = 0;
+
+        for dep in self.direct_dependents(addr) {
+            if visited.insert(dep) {
+                queue.push_back((dep, 1u32));
+            }
+        }
+
+        while let Some((current, depth)) = queue.pop_front() {
+            max_depth = max_depth.max(depth);
+            result.push((current, depth));
+            for dep in self.direct_dependents(&current) {
+                if visited.insert(dep) {
+                    queue.push_back((dep, depth + 1));
+                }
+            }
+        }
+
+        (result, max_depth)
+    }
+
     pub fn resolve_order(&self, addr: &CAddr) -> Vec<CAddr> {
         let mut order = Vec::new();
         let mut visited = HashSet::new();

@@ -72,13 +72,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("param.{}: {}", k, v);
             }
         }
-        Command::Invalidate { addr } => {
+        Command::Invalidate { addr, cascade, dry_run, detail } => {
             let addr_bytes = hex_to_addr(&addr)?;
-            let resp = client
-                .invalidate(InvalidateRequest { addr: addr_bytes })
-                .await?
-                .into_inner();
-            println!("was_cached: {}", resp.was_cached);
+            if cascade || dry_run {
+                let policy = if dry_run { "dry_run" } else { "immediate" }.to_string();
+                let resp = client
+                    .cascade_invalidate(CascadeInvalidateRequest {
+                        addr: addr_bytes,
+                        policy,
+                        include_root: true,
+                        detail_addrs: detail,
+                    })
+                    .await?
+                    .into_inner();
+                println!("evicted:   {}", resp.evicted_count);
+                println!("traversed: {}", resp.traversed_count);
+                println!("max_depth: {}", resp.max_depth);
+                println!("reclaimed: {} bytes", resp.bytes_reclaimed);
+                println!("duration:  {}μs", resp.duration_micros);
+                if detail {
+                    for a in &resp.evicted_addrs {
+                        println!("  - {}", addr_to_hex(a));
+                    }
+                }
+            } else {
+                let resp = client
+                    .invalidate(InvalidateRequest { addr: addr_bytes, cascade: false })
+                    .await?
+                    .into_inner();
+                println!("was_cached: {}", resp.was_cached);
+            }
         }
         Command::Status => {
             let resp = client.status(StatusRequest {}).await?.into_inner();

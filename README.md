@@ -39,20 +39,24 @@ Deriva stores data by its content hash (BLAKE3) and treats computation as a firs
 
 | Crate | Purpose |
 |-------|---------|
-| `deriva-core` | Content-addressed types, DAG store, cache, value types |
-| `deriva-compute` | Function registry, async executor, WASM plugins, versioning |
+| `deriva-core` | Content-addressed types, DAG store, cache, streaming primitives |
+| `deriva-compute` | Function registry, async executor, streaming pipeline, builtins, WASM plugins |
 | `deriva-storage` | Persistent leaf/recipe storage, chunked reads |
 | `deriva-network` | Gossip protocol, hash ring, replication, consistency |
-| `deriva-server` | gRPC service, REST dashboard, FUSE mount |
+| `deriva-server` | gRPC service (batch + streaming), REST dashboard, FUSE mount |
 | `deriva-cli` | Command-line client |
+| `deriva-benchmarks` | Criterion benchmarks for storage, compute, and streaming |
 
 ## Features
 
 - BLAKE3 content-addressed storage
-- DAG-based dependency tracking with automatic invalidation
+- DAG-based dependency tracking with automatic cascade invalidation
 - Async parallel computation with in-flight deduplication
+- **Streaming materialization** — chunked pipeline execution with backpressure
+- 20 built-in streaming functions (transforms, accumulators, combiners, utilities)
 - **Verification mode for determinism checking** (dual-compute, sampling)
 - Cost-aware eviction cache
+- Prometheus metrics for compute, cache, and streaming pipelines
 - WASM plugin system for user-defined compute functions
 - Gossip-based cluster membership (SWIM protocol)
 - Consistent hashing with tunable quorum (N/W/R)
@@ -114,6 +118,38 @@ If you see `determinism violation` errors:
 determinism violation for CAddr(a71479b7...): function my_func/1
 produced different outputs (8 bytes hash=4d067153... vs 8 bytes hash=d63bd9a8...)
 ```
+
+### Streaming Materialization
+
+Deriva can execute recipe pipelines in streaming mode — data flows through stages as 64KB chunks with backpressure, rather than materializing full intermediate results.
+
+```
+Source (leaf data)
+  │ 64KB chunks
+  ▼
+Stage 1 (uppercase)  ──►  Stage 2 (compress)  ──►  Stage 3 (sha256)
+  │                         │                         │
+  └── concurrent ───────────┴── concurrent ───────────┘
+```
+
+The gRPC `get()` RPC automatically chooses streaming vs batch based on whether the root function supports streaming. Streaming functions registered via `FunctionRegistry::register_streaming()` are preferred when available.
+
+**Built-in streaming functions:**
+
+| Category | Functions |
+|----------|-----------|
+| Transforms | Identity, Uppercase, Lowercase, Reverse, Base64Encode/Decode, Xor, Compress, Decompress |
+| Accumulators | Sha256, ByteCount, Checksum (CRC32) |
+| Combiners | Concat, Interleave, ZipConcat |
+| Utilities | ChunkResizer, Take, Skip, Repeat, TeeCount |
+
+### Benchmarks
+
+```bash
+cargo bench -p deriva-benchmarks
+```
+
+Available benchmark suites: `storage_primitives`, `parallel_materialization`, `verification_overhead`, `cascade_invalidation`, `streaming_pipeline`.
 
 ## Building
 

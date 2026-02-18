@@ -853,19 +853,14 @@ pub struct FunctionRegistry {
 
 Location: `crates/deriva-compute/src/builtins_streaming.rs`
 
-```rust
-use std::collections::HashMap;
-use bytes::{Bytes, BytesMut};
-use tokio::sync::mpsc;
-use async_trait::async_trait;
-use sha2::{Sha256, Digest};
-use deriva_core::streaming::StreamChunk;
-use crate::streaming::{
-    StreamingComputeFunction, DEFAULT_CHUNK_SIZE, DEFAULT_CHANNEL_CAPACITY,
-};
+20 built-in streaming functions organized by pattern:
 
-/// Streaming identity: passes input chunks through unchanged.
-/// Useful for testing and as a pipeline passthrough.
+#### Category 1: Single-Input Chunk-by-Chunk Transforms
+
+These emit one output chunk per input chunk — true streaming with no buffering.
+
+```rust
+/// 1. Streaming identity: passes input chunks through unchanged.
 pub struct StreamingIdentity;
 
 #[async_trait]
@@ -876,140 +871,159 @@ impl StreamingComputeFunction for StreamingIdentity {
         _params: &HashMap<String, String>,
     ) -> mpsc::Receiver<StreamChunk> {
         assert_eq!(inputs.len(), 1, "identity takes exactly 1 input");
-        // Pass through — just return the input receiver directly
         inputs.remove(0)
     }
 }
 
-/// Streaming concatenation: reads all inputs sequentially,
-/// emitting chunks as they arrive.
-pub struct StreamingConcat;
-
-#[async_trait]
-impl StreamingComputeFunction for StreamingConcat {
-    async fn stream_execute(
-        &self,
-        inputs: Vec<mpsc::Receiver<StreamChunk>>,
-        _params: &HashMap<String, String>,
-    ) -> mpsc::Receiver<StreamChunk> {
-        let (tx, rx) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
-
-        tokio::spawn(async move {
-            for mut input_rx in inputs {
-                loop {
-                    match input_rx.recv().await {
-                        Some(StreamChunk::Data(chunk)) => {
-                            if tx.send(StreamChunk::Data(chunk)).await.is_err() {
-                                return; // downstream cancelled
-                            }
-                        }
-                        Some(StreamChunk::End) => break, // next input
-                        Some(StreamChunk::Error(e)) => {
-                            let _ = tx.send(StreamChunk::Error(e)).await;
-                            return;
-                        }
-                        None => break, // channel closed
-                    }
-                }
-            }
-            let _ = tx.send(StreamChunk::End).await;
-        });
-
-        rx
-    }
-}
-
-/// Streaming SHA-256 hash: reads input chunks, computes rolling hash,
-/// emits single chunk with the 32-byte digest at the end.
-///
-/// Note: this function cannot emit output until all input is consumed
-/// (hash requires full input). It still benefits from streaming input
-/// because it doesn't need to buffer the full input in memory.
-pub struct StreamingSha256;
-
-#[async_trait]
-impl StreamingComputeFunction for StreamingSha256 {
-    async fn stream_execute(
-        &self,
-        mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
-        _params: &HashMap<String, String>,
-    ) -> mpsc::Receiver<StreamChunk> {
-        assert_eq!(inputs.len(), 1, "sha256 takes exactly 1 input");
-        let mut input_rx = inputs.remove(0);
-        let (tx, rx) = mpsc::channel(2); // small: only 1 data + 1 end
-
-        tokio::spawn(async move {
-            let mut hasher = Sha256::new();
-            loop {
-                match input_rx.recv().await {
-                    Some(StreamChunk::Data(chunk)) => {
-                        hasher.update(&chunk);
-                    }
-                    Some(StreamChunk::End) => break,
-                    Some(StreamChunk::Error(e)) => {
-                        let _ = tx.send(StreamChunk::Error(e)).await;
-                        return;
-                    }
-                    None => break,
-                }
-            }
-            let digest = hasher.finalize();
-            let _ = tx.send(StreamChunk::Data(Bytes::copy_from_slice(&digest))).await;
-            let _ = tx.send(StreamChunk::End).await;
-        });
-
-        rx
-    }
-}
-
-/// Streaming uppercase transform: converts each chunk to uppercase ASCII.
-/// Demonstrates true chunk-by-chunk streaming (output per input chunk).
+/// 2. Streaming uppercase: converts each chunk to uppercase ASCII.
 pub struct StreamingUppercase;
+// Spawns task: for each Data chunk, map bytes to ascii_uppercase, forward.
 
-#[async_trait]
-impl StreamingComputeFunction for StreamingUppercase {
-    async fn stream_execute(
-        &self,
-        mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
-        _params: &HashMap<String, String>,
-    ) -> mpsc::Receiver<StreamChunk> {
-        assert_eq!(inputs.len(), 1, "uppercase takes exactly 1 input");
-        let mut input_rx = inputs.remove(0);
-        let (tx, rx) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
+/// 3. Streaming lowercase: converts each chunk to lowercase ASCII.
+pub struct StreamingLowercase;
+// Same pattern as uppercase, uses to_ascii_lowercase.
 
-        tokio::spawn(async move {
-            loop {
-                match input_rx.recv().await {
-                    Some(StreamChunk::Data(chunk)) => {
-                        let upper = Bytes::from(
-                            chunk.iter()
-                                .map(|b| b.to_ascii_uppercase())
-                                .collect::<Vec<u8>>()
-                        );
-                        if tx.send(StreamChunk::Data(upper)).await.is_err() {
-                            return;
-                        }
-                    }
-                    Some(StreamChunk::End) => {
-                        let _ = tx.send(StreamChunk::End).await;
-                        return;
-                    }
-                    Some(StreamChunk::Error(e)) => {
-                        let _ = tx.send(StreamChunk::Error(e)).await;
-                        return;
-                    }
-                    None => {
-                        let _ = tx.send(StreamChunk::End).await;
-                        return;
-                    }
-                }
-            }
-        });
+/// 4. Streaming reverse: reverses bytes within each chunk.
+pub struct StreamingReverse;
+// For each Data chunk, reverse the byte slice, forward.
 
-        rx
-    }
-}
+/// 5. Streaming base64 encode: encodes each chunk to base64.
+pub struct StreamingBase64Encode;
+// Uses base64::engine::general_purpose::STANDARD.encode(&chunk).
+
+/// 6. Streaming base64 decode: decodes each chunk from base64.
+pub struct StreamingBase64Decode;
+// Uses base64::engine::general_purpose::STANDARD.decode(&chunk).
+// Emits Error on invalid base64.
+
+/// 7. Streaming XOR cipher: XORs each byte with a key from params["key"].
+pub struct StreamingXor;
+// Reads params["key"] as single byte. XORs each byte in each chunk.
+
+/// 8. Streaming compress: zlib-compresses each chunk independently.
+pub struct StreamingCompress;
+// Uses flate2::write::ZlibEncoder per chunk. Each chunk compressed independently.
+
+/// 9. Streaming decompress: zlib-decompresses each chunk independently.
+pub struct StreamingDecompress;
+// Uses flate2::write::ZlibDecoder per chunk. Each chunk decompressed independently.
 ```
+
+#### Category 2: Single-Input Accumulators
+
+These consume all input before emitting a summary result. They benefit from
+streaming input because they don't buffer the full input — just update state.
+
+```rust
+/// 10. Streaming SHA-256: rolling hash, emits 32-byte digest.
+pub struct StreamingSha256;
+// Feeds each chunk to sha2::Sha256 hasher. On End, emits digest + End.
+
+/// 11. Streaming byte count: counts total bytes, emits u64 as 8-byte BE.
+pub struct StreamingByteCount;
+// Accumulates chunk.len() for each Data. On End, emits u64::to_be_bytes() + End.
+
+/// 12. Streaming CRC32 checksum: rolling CRC32, emits 4-byte checksum.
+pub struct StreamingChecksum;
+// Uses crc32fast::Hasher. Feeds each chunk. On End, emits u32::to_be_bytes() + End.
+```
+
+#### Category 3: Multi-Input Combiners
+
+These consume multiple input streams and produce a single output stream.
+
+```rust
+/// 13. Streaming concatenation: reads inputs sequentially, emits chunks as they arrive.
+pub struct StreamingConcat;
+// For each input receiver in order: forward all Data chunks, on End move to next.
+// After all inputs consumed, emit End.
+
+/// 14. Streaming interleave: round-robin chunks from N inputs.
+pub struct StreamingInterleave;
+// Cycles through inputs: take one chunk from input[0], then input[1], etc.
+// When an input ends, skip it. When all ended, emit End.
+
+/// 15. Streaming zip-concat: pair-wise concatenate chunks from 2 inputs.
+pub struct StreamingZipConcat;
+// Takes exactly 2 inputs. Reads one chunk from each, concatenates them
+// into a single output chunk. When either ends, drain the other.
+```
+
+#### Category 4: Pipeline Utilities
+
+These reshape or limit streams without transforming content.
+
+```rust
+/// 16. Streaming chunk resizer: re-chunks to a target chunk size.
+pub struct StreamingChunkResizer;
+// Reads params["target_size"] (default 64KB). Buffers incoming chunks
+// in a BytesMut. When buffer >= target_size, emit a chunk of exactly
+// target_size. On End, flush remaining buffer + End.
+
+/// 17. Streaming take: emits only the first N bytes, then End.
+pub struct StreamingTake;
+// Reads params["bytes"] as usize. Forwards Data chunks, tracking total
+// bytes emitted. When limit reached, truncate last chunk and emit End.
+// Drops remaining input (backpressure will stop upstream).
+
+/// 18. Streaming skip: skips the first N bytes, then passes through.
+pub struct StreamingSkip;
+// Reads params["bytes"] as usize. Drops bytes until N consumed,
+// then forwards remaining chunks unchanged.
+
+/// 19. Streaming repeat: repeats the input stream N times.
+pub struct StreamingRepeat;
+// Reads params["count"] as usize. Collects full input into buffer,
+// then emits the buffer N times as chunked streams. End after all repeats.
+
+/// 20. Streaming tee-count: passes data through while counting bytes.
+pub struct StreamingTeeCount;
+// Forwards all Data chunks unchanged. On End, appends one final Data
+// chunk containing the byte count as decimal ASCII string, then End.
+// Useful for adding a trailer with metadata.
+```
+
+#### Summary Table
+
+| # | Name | Inputs | Pattern | Crate Dep |
+|---|------|--------|---------|-----------|
+| 1 | StreamingIdentity | 1 | passthrough | — |
+| 2 | StreamingUppercase | 1 | chunk transform | — |
+| 3 | StreamingLowercase | 1 | chunk transform | — |
+| 4 | StreamingReverse | 1 | chunk transform | — |
+| 5 | StreamingBase64Encode | 1 | chunk transform | base64 |
+| 6 | StreamingBase64Decode | 1 | chunk transform | base64 |
+| 7 | StreamingXor | 1 | chunk transform | — |
+| 8 | StreamingCompress | 1 | chunk transform | flate2 |
+| 9 | StreamingDecompress | 1 | chunk transform | flate2 |
+| 10 | StreamingSha256 | 1 | accumulator | sha2 |
+| 11 | StreamingByteCount | 1 | accumulator | — |
+| 12 | StreamingChecksum | 1 | accumulator | crc32fast |
+| 13 | StreamingConcat | N | combiner | — |
+| 14 | StreamingInterleave | N | combiner | — |
+| 15 | StreamingZipConcat | 2 | combiner | — |
+| 16 | StreamingChunkResizer | 1 | utility | — |
+| 17 | StreamingTake | 1 | utility | — |
+| 18 | StreamingSkip | 1 | utility | — |
+| 19 | StreamingRepeat | 1 | utility (buffered) | — |
+| 20 | StreamingTeeCount | 1 | utility | — |
+
+#### New Dependencies
+
+```toml
+# In workspace Cargo.toml [workspace.dependencies]
+sha2 = "0.10"
+base64 = "0.22"
+flate2 = "1"
+crc32fast = "1"
+
+# In deriva-compute/Cargo.toml [dependencies]
+sha2 = { workspace = true }
+base64 = { workspace = true }
+flate2 = { workspace = true }
+crc32fast = { workspace = true }
+```
+
 
 ### 3.8 gRPC Streaming Integration
 

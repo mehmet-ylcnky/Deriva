@@ -48,5 +48,11 @@ anyhow = "1"
 # Bytes
 bytes = "1"
 
+# Streaming builtins
+sha2 = "0.10"
+base64 = "0.22"
+flate2 = "1"
+crc32fast = "1"
+
 # Testing
 proptest = "1"

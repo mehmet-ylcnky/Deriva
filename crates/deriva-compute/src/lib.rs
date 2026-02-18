@@ -1,5 +1,6 @@
 pub mod async_executor;
 pub mod builtins;
+pub mod builtins_streaming;
 pub mod cache;
 pub mod executor;
 pub mod function;

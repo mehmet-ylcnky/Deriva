@@ -46,4 +46,8 @@ impl FunctionRegistry {
     pub fn get_streaming(&self, id: &FunctionId) -> Option<Arc<dyn StreamingComputeFunction>> {
         self.streaming_functions.get(id).cloned()
     }
+
+    pub fn has_streaming(&self, id: &FunctionId) -> bool {
+        self.streaming_functions.contains_key(id)
+    }
 }

@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
-use deriva_core::{CAddr, DerivaError, DagStore};
+use deriva_core::{CAddr, DerivaError};
 use deriva_core::streaming::StreamChunk;
+use crate::async_executor::DagReader;
 use crate::cache::AsyncMaterializationCache;
 use crate::leaf_store::AsyncLeafStore;
 use crate::pipeline::{StreamPipeline, PipelineConfig};
@@ -19,19 +20,44 @@ impl StreamingExecutor {
         Self { config }
     }
 
+    /// Topological sort using DagReader (works with any backend).
+    fn resolve_order(dag: &dyn DagReader, addr: &CAddr) -> Result<Vec<CAddr>, DerivaError> {
+        let mut order = Vec::new();
+        let mut visited = HashSet::new();
+        Self::topo_visit(dag, addr, &mut visited, &mut order)?;
+        Ok(order)
+    }
+
+    fn topo_visit(
+        dag: &dyn DagReader,
+        addr: &CAddr,
+        visited: &mut HashSet<CAddr>,
+        order: &mut Vec<CAddr>,
+    ) -> Result<(), DerivaError> {
+        if !visited.insert(*addr) {
+            return Ok(());
+        }
+        if let Some(recipe) = dag.get_recipe(addr)
+            .map_err(|e| DerivaError::Storage(e.to_string()))?
+        {
+            for input in &recipe.inputs {
+                Self::topo_visit(dag, input, visited, order)?;
+            }
+            order.push(*addr);
+        }
+        Ok(())
+    }
+
     /// Build and execute a streaming pipeline for the given recipe DAG.
-    ///
-    /// Returns a receiver that yields output chunks. The caller is
-    /// responsible for collecting and caching the result.
     pub async fn materialize_streaming(
         &self,
         addr: &CAddr,
-        dag: &DagStore,
+        dag: &dyn DagReader,
         cache: &dyn AsyncMaterializationCache,
         leaf_store: &dyn AsyncLeafStore,
         registry: &FunctionRegistry,
     ) -> Result<mpsc::Receiver<StreamChunk>, DerivaError> {
-        let topo_order = dag.resolve_order(addr);
+        let topo_order = Self::resolve_order(dag, addr)?;
 
         let mut pipeline = StreamPipeline::new(self.config.clone());
         let mut addr_to_idx: HashMap<CAddr, usize> = HashMap::new();
@@ -45,6 +71,7 @@ impl StreamingExecutor {
             }
 
             let recipe = dag.get_recipe(topo_addr)
+                .map_err(|e| DerivaError::Storage(e.to_string()))?
                 .ok_or_else(|| DerivaError::NotFound(format!("{}", topo_addr)))?;
 
             // Ensure all inputs are in the pipeline (leaves aren't in topo_order)

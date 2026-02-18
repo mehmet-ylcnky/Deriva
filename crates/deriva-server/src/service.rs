@@ -2,7 +2,13 @@ use crate::metrics::*;
 use crate::state::ServerState;
 use deriva_core::address::*;
 use deriva_core::invalidation::CascadePolicy;
+use deriva_core::streaming::StreamChunk;
+use deriva_compute::async_executor::CombinedDagReader;
+use deriva_compute::cache::AsyncMaterializationCache;
 use deriva_compute::invalidation::CascadeInvalidator;
+use deriva_compute::pipeline::PipelineConfig;
+use deriva_compute::streaming::collect_stream;
+use deriva_compute::streaming_executor::StreamingExecutor;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -131,33 +137,84 @@ impl Deriva for DerivaService {
         let (start, span) = begin_rpc("get");
         let addr = parse_addr(&request.get_ref().addr)?;
         let state = Arc::clone(&self.state);
-        let (tx, rx) = mpsc::channel(16);
 
-        tokio::spawn(async move {
-            let result = state.executor.materialize(addr).await;
-            match result {
-                Ok(data) => {
-                    for chunk in data.chunks(CHUNK_SIZE) {
-                        if tx
-                            .send(Ok(GetResponse {
-                                chunk: chunk.to_vec(),
-                            }))
-                            .await
-                            .is_err()
-                        {
+        // Check if root function supports streaming
+        let use_streaming = state.recipes.get(&addr)
+            .ok()
+            .flatten()
+            .map(|r| state.registry.has_streaming(&r.function_id))
+            .unwrap_or(false);
+
+        if use_streaming {
+            let streaming_executor = StreamingExecutor::new(PipelineConfig::default());
+            let dag_reader = CombinedDagReader {
+                dag: Arc::clone(&state.dag),
+                recipes: Arc::clone(&state.recipes),
+            };
+            let compute_rx = streaming_executor.materialize_streaming(
+                &addr, &dag_reader,
+                state.cache.as_ref(), state.blobs.as_ref(), &state.registry,
+            ).await.map_err(|e| Status::internal(e.to_string()))?;
+
+            // Tee: client stream + background cache collector
+            let (client_tx, client_rx) = mpsc::channel(8);
+            let (cache_tx, cache_rx) = mpsc::channel(8);
+            let cache = Arc::clone(&state.cache);
+            let cache_addr = addr;
+
+            tokio::spawn(async move {
+                let mut compute_rx = compute_rx;
+                loop {
+                    match compute_rx.recv().await {
+                        Some(StreamChunk::Data(chunk)) => {
+                            let _ = client_tx.send(Ok(GetResponse { chunk: chunk.to_vec() })).await;
+                            let _ = cache_tx.send(StreamChunk::Data(chunk)).await;
+                        }
+                        Some(StreamChunk::End) => {
+                            let _ = cache_tx.send(StreamChunk::End).await;
                             break;
                         }
+                        Some(StreamChunk::Error(e)) => {
+                            let _ = client_tx.send(Err(Status::internal(e.to_string()))).await;
+                            let _ = cache_tx.send(StreamChunk::Error(e)).await;
+                            break;
+                        }
+                        None => break,
                     }
-                    record_rpc("get", start, true);
                 }
-                Err(e) => {
-                    let _ = tx.send(Err(Status::internal(e.to_string()))).await;
-                    record_rpc("get", start, false);
-                }
-            }
-        }.instrument(span));
+                record_rpc("get", start, true);
+            }.instrument(span));
 
-        Ok(Response::new(ReceiverStream::new(rx)))
+            tokio::spawn(async move {
+                if let Ok(full_data) = collect_stream(cache_rx).await {
+                    cache.put(cache_addr, full_data).await;
+                }
+            });
+
+            Ok(Response::new(ReceiverStream::new(client_rx)))
+        } else {
+            // Batch path (existing behavior)
+            let (tx, rx) = mpsc::channel(16);
+            tokio::spawn(async move {
+                let result = state.executor.materialize(addr).await;
+                match result {
+                    Ok(data) => {
+                        for chunk in data.chunks(CHUNK_SIZE) {
+                            if tx.send(Ok(GetResponse { chunk: chunk.to_vec() })).await.is_err() {
+                                break;
+                            }
+                        }
+                        record_rpc("get", start, true);
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(Status::internal(e.to_string()))).await;
+                        record_rpc("get", start, false);
+                    }
+                }
+            }.instrument(span));
+
+            Ok(Response::new(ReceiverStream::new(rx)))
+        }
     }
 
     async fn resolve(

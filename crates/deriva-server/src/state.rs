@@ -12,6 +12,7 @@ pub struct ServerState {
     pub cache: Arc<SharedCache>,
     pub dag: Arc<PersistentDag>,
     pub recipes: Arc<SledRecipeStore>,
+    pub blobs: Arc<deriva_storage::BlobStore>,
     pub registry: Arc<FunctionRegistry>,
     pub storage: StorageBackend,
     pub start_time: Instant,
@@ -47,7 +48,7 @@ impl ServerState {
             dag_reader,
             Arc::clone(&registry),
             Arc::clone(&cache),
-            blobs,
+            Arc::clone(&blobs),
             config,
         );
 
@@ -56,6 +57,7 @@ impl ServerState {
             cache,
             dag,
             recipes,
+            blobs,
             registry,
             storage,
             start_time: Instant::now(),

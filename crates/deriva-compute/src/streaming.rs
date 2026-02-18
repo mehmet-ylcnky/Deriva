@@ -99,3 +99,25 @@ pub async fn collect_stream(mut rx: mpsc::Receiver<StreamChunk>) -> Result<Bytes
         Ok(Bytes::from(buf))
     }
 }
+
+/// Tee a stream into two receivers.
+///
+/// Each chunk is cloned and sent to both outputs. If either receiver
+/// is dropped, the tee continues sending to the other.
+pub fn tee_stream(
+    mut input: mpsc::Receiver<StreamChunk>,
+    capacity: usize,
+) -> (mpsc::Receiver<StreamChunk>, mpsc::Receiver<StreamChunk>) {
+    let (tx_a, rx_a) = mpsc::channel(capacity);
+    let (tx_b, rx_b) = mpsc::channel(capacity);
+
+    tokio::spawn(async move {
+        while let Some(chunk) = input.recv().await {
+            let chunk_clone = chunk.clone();
+            let _ = tx_a.send(chunk).await;
+            let _ = tx_b.send(chunk_clone).await;
+        }
+    });
+
+    (rx_a, rx_b)
+}

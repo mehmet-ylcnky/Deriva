@@ -7,7 +7,7 @@ use deriva_compute::async_executor::CombinedDagReader;
 use deriva_compute::cache::AsyncMaterializationCache;
 use deriva_compute::invalidation::CascadeInvalidator;
 use deriva_compute::pipeline::PipelineConfig;
-use deriva_compute::streaming::collect_stream;
+use deriva_compute::streaming::{collect_stream, tee_stream};
 use deriva_compute::streaming_executor::StreamingExecutor;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -157,29 +157,26 @@ impl Deriva for DerivaService {
             ).await.map_err(|e| Status::internal(e.to_string()))?;
 
             // Tee: client stream + background cache collector
-            let (client_tx, client_rx) = mpsc::channel(8);
-            let (cache_tx, cache_rx) = mpsc::channel(8);
+            let (client_rx, cache_rx) = tee_stream(compute_rx, 8);
             let cache = Arc::clone(&state.cache);
             let cache_addr = addr;
 
+            // Convert client_rx to gRPC stream
+            let (grpc_tx, grpc_rx) = mpsc::channel(8);
             tokio::spawn(async move {
-                let mut compute_rx = compute_rx;
+                let mut client_rx = client_rx;
                 loop {
-                    match compute_rx.recv().await {
+                    match client_rx.recv().await {
                         Some(StreamChunk::Data(chunk)) => {
-                            let _ = client_tx.send(Ok(GetResponse { chunk: chunk.to_vec() })).await;
-                            let _ = cache_tx.send(StreamChunk::Data(chunk)).await;
+                            if grpc_tx.send(Ok(GetResponse { chunk: chunk.to_vec() })).await.is_err() {
+                                break;
+                            }
                         }
-                        Some(StreamChunk::End) => {
-                            let _ = cache_tx.send(StreamChunk::End).await;
-                            break;
-                        }
+                        Some(StreamChunk::End) | None => break,
                         Some(StreamChunk::Error(e)) => {
-                            let _ = client_tx.send(Err(Status::internal(e.to_string()))).await;
-                            let _ = cache_tx.send(StreamChunk::Error(e)).await;
+                            let _ = grpc_tx.send(Err(Status::internal(e.to_string()))).await;
                             break;
                         }
-                        None => break,
                     }
                 }
                 record_rpc("get", start, true);
@@ -191,7 +188,7 @@ impl Deriva for DerivaService {
                 }
             });
 
-            Ok(Response::new(ReceiverStream::new(client_rx)))
+            Ok(Response::new(ReceiverStream::new(grpc_rx)))
         } else {
             // Batch path (existing behavior)
             let (tx, rx) = mpsc::channel(16);

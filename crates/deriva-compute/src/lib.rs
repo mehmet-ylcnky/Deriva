@@ -6,8 +6,10 @@ pub mod function;
 pub mod invalidation;
 pub mod leaf_store;
 pub mod metrics;
+pub mod pipeline;
 pub mod registry;
 pub mod streaming;
+pub mod streaming_executor;
 
 pub use async_executor::AsyncExecutor;
 pub use executor::Executor;

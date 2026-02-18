@@ -1,11 +1,13 @@
 use crate::function::ComputeFunction;
+use crate::streaming::StreamingComputeFunction;
 use deriva_core::address::FunctionId;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct FunctionRegistry {
     functions: HashMap<FunctionId, Arc<dyn ComputeFunction>>,
+    streaming_functions: HashMap<FunctionId, Arc<dyn StreamingComputeFunction>>,
 }
 
 impl FunctionRegistry {
@@ -35,5 +37,13 @@ impl FunctionRegistry {
 
     pub fn list(&self) -> Vec<FunctionId> {
         self.functions.keys().cloned().collect()
+    }
+
+    pub fn register_streaming(&mut self, f: Arc<dyn StreamingComputeFunction>, id: FunctionId) {
+        self.streaming_functions.insert(id, f);
+    }
+
+    pub fn get_streaming(&self, id: &FunctionId) -> Option<Arc<dyn StreamingComputeFunction>> {
+        self.streaming_functions.get(id).cloned()
     }
 }

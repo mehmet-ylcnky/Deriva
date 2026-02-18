@@ -1673,6 +1673,373 @@ async fn test_pipeline_large_data_backpressure() {
 ```
 
 
+
+### 5.9 Unit Tests — StreamingIdentity
+
+```rust
+#[tokio::test]
+async fn test_streaming_identity() {
+    let result = run_one(&StreamingIdentity, vec![b"abc", b"def"], &HashMap::new()).await.unwrap();
+    assert_eq!(result, Bytes::from("abcdef"));
+}
+```
+
+### 5.10 Unit Tests — StreamingLowercase
+
+```rust
+#[tokio::test]
+async fn test_streaming_lowercase() {
+    let result = run_one(&StreamingLowercase, vec![b"HELLO", b" WORLD"], &HashMap::new()).await.unwrap();
+    assert_eq!(result, Bytes::from("hello world"));
+}
+```
+
+### 5.11 Unit Tests — StreamingReverse
+
+```rust
+#[tokio::test]
+async fn test_streaming_reverse() {
+    let result = run_one(&StreamingReverse, vec![b"abc"], &HashMap::new()).await.unwrap();
+    assert_eq!(result, Bytes::from("cba"));
+}
+
+#[tokio::test]
+async fn test_streaming_reverse_multi_chunk() {
+    // Each chunk reversed independently
+    let result = run_one(&StreamingReverse, vec![b"ab", b"cd"], &HashMap::new()).await.unwrap();
+    assert_eq!(result, Bytes::from("badc"));
+}
+```
+
+### 5.12 Unit Tests — StreamingBase64Encode / Decode
+
+```rust
+#[tokio::test]
+async fn test_streaming_base64_encode() {
+    let result = run_one(&StreamingBase64Encode, vec![b"hello"], &HashMap::new()).await.unwrap();
+    assert_eq!(result, Bytes::from("aGVsbG8="));
+}
+
+#[tokio::test]
+async fn test_streaming_base64_decode() {
+    let result = run_one(&StreamingBase64Decode, vec![b"aGVsbG8="], &HashMap::new()).await.unwrap();
+    assert_eq!(result, Bytes::from("hello"));
+}
+
+#[tokio::test]
+async fn test_streaming_base64_roundtrip() {
+    // encode then decode returns original
+    let encoded = run_one(&StreamingBase64Encode, vec![b"test data"], &HashMap::new()).await.unwrap();
+    let decoded = run_one(&StreamingBase64Decode, vec![&encoded], &HashMap::new()).await.unwrap();
+    assert_eq!(decoded, Bytes::from("test data"));
+}
+
+#[tokio::test]
+async fn test_streaming_base64_decode_invalid() {
+    let result = run_one(&StreamingBase64Decode, vec![b"!!!invalid!!!"], &HashMap::new()).await;
+    assert!(result.is_err());
+}
+```
+
+### 5.13 Unit Tests — StreamingXor
+
+```rust
+#[tokio::test]
+async fn test_streaming_xor() {
+    let mut params = HashMap::new();
+    params.insert("key".into(), "255".into()); // 0xFF
+    let result = run_one(&StreamingXor, vec![b"\x00\x01\x02"], &params).await.unwrap();
+    assert_eq!(&result[..], &[0xFF, 0xFE, 0xFD]);
+}
+
+#[tokio::test]
+async fn test_streaming_xor_roundtrip() {
+    // XOR is its own inverse
+    let mut params = HashMap::new();
+    params.insert("key".into(), "42".into());
+    let encrypted = run_one(&StreamingXor, vec![b"hello"], &params).await.unwrap();
+    let decrypted = run_one(&StreamingXor, vec![&encrypted], &params).await.unwrap();
+    assert_eq!(decrypted, Bytes::from("hello"));
+}
+```
+
+### 5.14 Unit Tests — StreamingCompress / Decompress
+
+```rust
+#[tokio::test]
+async fn test_streaming_compress_decompress() {
+    let original = Bytes::from("hello world hello world hello world");
+    let compressed = run_one(&StreamingCompress, vec![&original], &HashMap::new()).await.unwrap();
+    assert_ne!(compressed, original);
+    let decompressed = run_one(&StreamingDecompress, vec![&compressed], &HashMap::new()).await.unwrap();
+    assert_eq!(decompressed, original);
+}
+```
+
+### 5.15 Unit Tests — StreamingByteCount
+
+```rust
+#[tokio::test]
+async fn test_streaming_byte_count() {
+    let result = run_one(&StreamingByteCount, vec![b"hello", b" world"], &HashMap::new()).await.unwrap();
+    let count = u64::from_be_bytes(result[..8].try_into().unwrap());
+    assert_eq!(count, 11);
+}
+
+#[tokio::test]
+async fn test_streaming_byte_count_empty() {
+    let result = run_one(&StreamingByteCount, vec![], &HashMap::new()).await.unwrap();
+    let count = u64::from_be_bytes(result[..8].try_into().unwrap());
+    assert_eq!(count, 0);
+}
+```
+
+### 5.16 Unit Tests — StreamingChecksum
+
+```rust
+#[tokio::test]
+async fn test_streaming_checksum() {
+    let result = run_one(&StreamingChecksum, vec![b"hello"], &HashMap::new()).await.unwrap();
+    assert_eq!(result.len(), 4);
+    let mut h = crc32fast::Hasher::new();
+    h.update(b"hello");
+    assert_eq!(&result[..], &h.finalize().to_be_bytes());
+}
+
+#[tokio::test]
+async fn test_streaming_checksum_chunked() {
+    // Same CRC32 regardless of chunking
+    let r1 = run_one(&StreamingChecksum, vec![b"hello world"], &HashMap::new()).await.unwrap();
+    let r2 = run_one(&StreamingChecksum, vec![b"hello", b" world"], &HashMap::new()).await.unwrap();
+    assert_eq!(r1, r2);
+}
+```
+
+### 5.17 Unit Tests — StreamingInterleave
+
+```rust
+#[tokio::test]
+async fn test_streaming_interleave() {
+    // Round-robin: a1, b1, a2, b2, a3
+    let rx_a = make_stream(vec![b"a1", b"a2", b"a3"]).await;
+    let rx_b = make_stream(vec![b"b1", b"b2"]).await;
+    let out = StreamingInterleave.stream_execute(vec![rx_a, rx_b], &HashMap::new()).await;
+    assert_eq!(collect_stream(out).await.unwrap(), Bytes::from("a1b1a2b2a3"));
+}
+
+#[tokio::test]
+async fn test_streaming_interleave_single() {
+    let rx = make_stream(vec![b"only"]).await;
+    let out = StreamingInterleave.stream_execute(vec![rx], &HashMap::new()).await;
+    assert_eq!(collect_stream(out).await.unwrap(), Bytes::from("only"));
+}
+```
+
+### 5.18 Unit Tests — StreamingZipConcat
+
+```rust
+#[tokio::test]
+async fn test_streaming_zip_concat() {
+    // Pairs: aa+11, bb+22
+    let rx_a = make_stream(vec![b"aa", b"bb"]).await;
+    let rx_b = make_stream(vec![b"11", b"22"]).await;
+    let out = StreamingZipConcat.stream_execute(vec![rx_a, rx_b], &HashMap::new()).await;
+    assert_eq!(collect_stream(out).await.unwrap(), Bytes::from("aa11bb22"));
+}
+
+#[tokio::test]
+async fn test_streaming_zip_concat_uneven() {
+    // Pair: aa+11, then drain remainder: bb, cc
+    let rx_a = make_stream(vec![b"aa", b"bb", b"cc"]).await;
+    let rx_b = make_stream(vec![b"11"]).await;
+    let out = StreamingZipConcat.stream_execute(vec![rx_a, rx_b], &HashMap::new()).await;
+    assert_eq!(collect_stream(out).await.unwrap(), Bytes::from("aa11bbcc"));
+}
+```
+
+### 5.19 Unit Tests — StreamingChunkResizer
+
+```rust
+#[tokio::test]
+async fn test_streaming_chunk_resizer() {
+    let mut params = HashMap::new();
+    params.insert("target_size".into(), "4".into());
+    // 10 bytes → re-chunked to 4, 4, 2
+    let rx = make_stream(vec![b"0123456789"]).await;
+    let mut out = StreamingChunkResizer.stream_execute(vec![rx], &params).await;
+    let mut chunks = vec![];
+    loop {
+        match out.recv().await.unwrap() {
+            StreamChunk::Data(c) => chunks.push(c),
+            StreamChunk::End => break,
+            StreamChunk::Error(e) => panic!("{:?}", e),
+        }
+    }
+    assert_eq!(chunks, vec![
+        Bytes::from("0123"), Bytes::from("4567"), Bytes::from("89")
+    ]);
+}
+```
+
+### 5.20 Unit Tests — StreamingTake
+
+```rust
+#[tokio::test]
+async fn test_streaming_take() {
+    let mut params = HashMap::new();
+    params.insert("bytes".into(), "5".into());
+    let result = run_one(&StreamingTake, vec![b"hello world"], &params).await.unwrap();
+    assert_eq!(result, Bytes::from("hello"));
+}
+
+#[tokio::test]
+async fn test_streaming_take_multi_chunk() {
+    let mut params = HashMap::new();
+    params.insert("bytes".into(), "7".into());
+    let result = run_one(&StreamingTake, vec![b"hello", b" world"], &params).await.unwrap();
+    assert_eq!(result, Bytes::from("hello w"));
+}
+
+#[tokio::test]
+async fn test_streaming_take_more_than_available() {
+    let mut params = HashMap::new();
+    params.insert("bytes".into(), "100".into());
+    let result = run_one(&StreamingTake, vec![b"short"], &params).await.unwrap();
+    assert_eq!(result, Bytes::from("short"));
+}
+```
+
+### 5.21 Unit Tests — StreamingSkip
+
+```rust
+#[tokio::test]
+async fn test_streaming_skip() {
+    let mut params = HashMap::new();
+    params.insert("bytes".into(), "6".into());
+    let result = run_one(&StreamingSkip, vec![b"hello world"], &params).await.unwrap();
+    assert_eq!(result, Bytes::from("world"));
+}
+
+#[tokio::test]
+async fn test_streaming_skip_multi_chunk() {
+    let mut params = HashMap::new();
+    params.insert("bytes".into(), "3".into());
+    let result = run_one(&StreamingSkip, vec![b"he", b"llo world"], &params).await.unwrap();
+    assert_eq!(result, Bytes::from("lo world"));
+}
+
+#[tokio::test]
+async fn test_streaming_skip_more_than_available() {
+    let mut params = HashMap::new();
+    params.insert("bytes".into(), "100".into());
+    let result = run_one(&StreamingSkip, vec![b"short"], &params).await.unwrap();
+    assert_eq!(result, Bytes::new());
+}
+```
+
+### 5.22 Unit Tests — StreamingRepeat
+
+```rust
+#[tokio::test]
+async fn test_streaming_repeat() {
+    let mut params = HashMap::new();
+    params.insert("count".into(), "3".into());
+    let result = run_one(&StreamingRepeat, vec![b"ab"], &params).await.unwrap();
+    assert_eq!(result, Bytes::from("ababab"));
+}
+
+#[tokio::test]
+async fn test_streaming_repeat_zero() {
+    let mut params = HashMap::new();
+    params.insert("count".into(), "0".into());
+    let result = run_one(&StreamingRepeat, vec![b"ab"], &params).await.unwrap();
+    assert_eq!(result, Bytes::new());
+}
+```
+
+### 5.23 Unit Tests — StreamingTeeCount
+
+```rust
+#[tokio::test]
+async fn test_streaming_tee_count() {
+    // Passes data through, appends byte count as ASCII trailer
+    let result = run_one(&StreamingTeeCount, vec![b"hello", b" world"], &HashMap::new()).await.unwrap();
+    assert_eq!(result, Bytes::from("hello world11"));
+}
+
+#[tokio::test]
+async fn test_streaming_tee_count_empty() {
+    let result = run_one(&StreamingTeeCount, vec![], &HashMap::new()).await.unwrap();
+    assert_eq!(result, Bytes::from("0"));
+}
+```
+
+### 5.24 Integration Tests — New Function Pipelines
+
+```rust
+#[tokio::test]
+async fn test_pipeline_compress_then_decompress() {
+    // Pipeline: decompress(compress(src)) == src
+    let mut pipeline = StreamPipeline::new(PipelineConfig::default());
+    let idx_src = pipeline.add_source(test_addr("src"), Bytes::from("hello world"));
+    let idx_comp = pipeline.add_streaming_stage(
+        test_addr("comp"), Arc::new(StreamingCompress), HashMap::new(), vec![idx_src],
+    );
+    let _idx_dec = pipeline.add_streaming_stage(
+        test_addr("dec"), Arc::new(StreamingDecompress), HashMap::new(), vec![idx_comp],
+    );
+    let out = pipeline.execute().await.unwrap();
+    assert_eq!(collect_stream(out).await.unwrap(), Bytes::from("hello world"));
+}
+
+#[tokio::test]
+async fn test_pipeline_take_skip_compose() {
+    // skip(3) then take(5) on "hello world" → "lo wo"
+    let mut pipeline = StreamPipeline::new(PipelineConfig { chunk_size: 4, ..Default::default() });
+    let idx_src = pipeline.add_source(test_addr("src"), Bytes::from("hello world"));
+    let idx_skip = pipeline.add_streaming_stage(
+        test_addr("skip"), Arc::new(StreamingSkip),
+        HashMap::from([("bytes".into(), "3".into())]), vec![idx_src],
+    );
+    let _idx_take = pipeline.add_streaming_stage(
+        test_addr("take"), Arc::new(StreamingTake),
+        HashMap::from([("bytes".into(), "5".into())]), vec![idx_skip],
+    );
+    let out = pipeline.execute().await.unwrap();
+    assert_eq!(collect_stream(out).await.unwrap(), Bytes::from("lo wo"));
+}
+```
+
+#### Test Summary Table
+
+| Section | Tests | Functions Covered |
+|---------|-------|-------------------|
+| §5.1 | 3 | StreamChunk type |
+| §5.2 | 3 | batch_to_stream |
+| §5.3 | 4 | collect_stream |
+| §5.4 | 3 | StreamingConcat |
+| §5.5 | 2 | StreamingSha256 |
+| §5.6 | 1 | StreamingUppercase |
+| §5.7 | 2 | tee_stream |
+| §5.8 | 2 | Pipeline integration (original) |
+| §5.9 | 1 | StreamingIdentity |
+| §5.10 | 1 | StreamingLowercase |
+| §5.11 | 2 | StreamingReverse |
+| §5.12 | 4 | StreamingBase64Encode/Decode |
+| §5.13 | 2 | StreamingXor |
+| §5.14 | 1 | StreamingCompress/Decompress |
+| §5.15 | 2 | StreamingByteCount |
+| §5.16 | 2 | StreamingChecksum |
+| §5.17 | 2 | StreamingInterleave |
+| §5.18 | 2 | StreamingZipConcat |
+| §5.19 | 1 | StreamingChunkResizer |
+| §5.20 | 3 | StreamingTake |
+| §5.21 | 3 | StreamingSkip |
+| §5.22 | 2 | StreamingRepeat |
+| §5.23 | 2 | StreamingTeeCount |
+| §5.24 | 2 | Pipeline integration (new) |
+| **Total** | **52** | **20 functions + core utilities** |
+
 ---
 
 ## 6. Edge Cases & Error Handling

@@ -225,6 +225,7 @@ fn bench_concurrency_limits(c: &mut Criterion) {
         let config = ExecutorConfig {
             max_concurrency: *limit,
             dedup_channel_capacity: 16,
+            verification: Default::default(),
         };
         let executor = Arc::new(AsyncExecutor::with_config(
             dag,

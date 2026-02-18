@@ -9,6 +9,7 @@ use crate::streaming::{
     collect_stream, DEFAULT_CHUNK_SIZE, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::ComputeFunction;
+use crate::metrics;
 
 /// Configuration for a streaming pipeline.
 #[derive(Debug, Clone)]
@@ -100,6 +101,9 @@ impl StreamPipeline {
 
     /// Execute the pipeline, returning the output stream of the last node.
     pub async fn execute(self) -> Result<mpsc::Receiver<StreamChunk>, DerivaError> {
+        let start = std::time::Instant::now();
+        metrics::STREAM_PIPELINES_TOTAL.inc();
+
         let mut outputs: Vec<Option<mpsc::Receiver<StreamChunk>>> =
             Vec::with_capacity(self.nodes.len());
 
@@ -145,8 +149,32 @@ impl StreamPipeline {
             }
         }
 
-        outputs.last_mut()
+        let raw = outputs.last_mut()
             .and_then(|o| o.take())
-            .ok_or_else(|| DerivaError::ComputeFailed("empty pipeline".into()))
+            .ok_or_else(|| DerivaError::ComputeFailed("empty pipeline".into()))?;
+
+        // Wrap output stream to track chunks, bytes, and pipeline duration.
+        let (tx, rx) = mpsc::channel(self.config.channel_capacity);
+        tokio::spawn(async move {
+            let mut raw = raw;
+            while let Some(chunk) = raw.recv().await {
+                match &chunk {
+                    StreamChunk::Data(d) => {
+                        metrics::STREAM_CHUNKS_TOTAL.inc();
+                        metrics::STREAM_BYTES_TOTAL.inc_by(d.len() as u64);
+                    }
+                    StreamChunk::End => {
+                        metrics::STREAM_PIPELINE_DURATION.observe(start.elapsed().as_secs_f64());
+                    }
+                    StreamChunk::Error(_) => {
+                        metrics::STREAM_PIPELINE_DURATION.observe(start.elapsed().as_secs_f64());
+                    }
+                }
+                if tx.send(chunk).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(rx)
     }
 }

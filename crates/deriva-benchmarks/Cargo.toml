@@ -28,3 +28,7 @@ harness = false
 [[bench]]
 name = "cascade_invalidation"
 harness = false
+
+[[bench]]
+name = "streaming_pipeline"
+harness = false

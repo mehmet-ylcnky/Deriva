@@ -1838,20 +1838,20 @@ Alerting rules:
 
 ## 12. Checklist
 
-- [ ] Create `deriva-core/src/gc.rs` with `GcResult`, `GcConfig`, `PinSet`
-- [ ] Add `remove()`, `remove_batch()`, `list_addrs()`, `stats()` to `BlobStore`
-- [ ] Create `deriva-compute/src/gc.rs` with `compute_live_set`, `GarbageCollector`
-- [ ] Add `run_gc_async()` wrapper
-- [ ] Update `proto/deriva.proto` with GC + Pin RPCs
-- [ ] Implement 4 RPC handlers in `service.rs`
-- [ ] Add `PinSet` to `ServerState`
-- [ ] Add CLI commands: `gc`, `pin`, `unpin`, `list-pins`
-- [ ] Write unit tests for PinSet (~4 tests)
-- [ ] Write unit tests for BlobStore extensions (~6 tests)
-- [ ] Write unit tests for live set computation (~4 tests)
-- [ ] Write unit tests for GarbageCollector (~7 tests)
-- [ ] Write integration tests (~2 tests)
-- [ ] Add GC metrics to observability
-- [ ] Run full test suite — all existing tests still pass
-- [ ] `cargo clippy --workspace -- -D warnings` clean
-- [ ] Commit and push
+- [x] Create `deriva-core/src/gc.rs` with `GcResult`, `GcConfig`, `PinSet`
+- [x] Add `remove()`, `remove_batch()`, `list_addrs()`, `stats()` to `BlobStore`
+- [x] Create `deriva-compute/src/gc.rs` with `compute_live_set`, `GarbageCollector`
+- [x] Add `run_gc_async()` wrapper
+- [x] Update `proto/deriva.proto` with GC + Pin RPCs
+- [x] Implement 4 RPC handlers in `service.rs`
+- [x] Add `PinSet` to `ServerState`
+- [x] Add CLI commands: `gc`, `pin`, `unpin`, `list-pins`
+- [x] Write unit tests for PinSet (~4 tests)
+- [x] Write unit tests for BlobStore extensions (~6 tests)
+- [x] Write unit tests for live set computation (~4 tests)
+- [x] Write unit tests for GarbageCollector (~7 tests)
+- [x] Write integration tests (~2 tests)
+- [x] Add GC metrics to observability
+- [x] Run full test suite — all existing tests still pass
+- [x] `cargo clippy --workspace -- -D warnings` clean
+- [x] Commit and push

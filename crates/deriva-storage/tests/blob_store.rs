@@ -152,3 +152,84 @@ fn leaf_store_trait_missing() {
     let store = BlobStore::open(dir.path().join("blobs")).unwrap();
     assert_eq!(store.get_leaf(&addr("nope")), None);
 }
+
+// --- Group 5: GC Extensions ---
+
+#[test]
+fn remove_with_size_returns_bytes() {
+    let dir = tempdir().unwrap();
+    let store = BlobStore::open(dir.path().join("blobs")).unwrap();
+    store.put(&addr("a"), &[0; 42]).unwrap();
+    let freed = store.remove_with_size(&addr("a")).unwrap();
+    assert_eq!(freed, 42);
+    assert!(!store.contains(&addr("a")));
+}
+
+#[test]
+fn remove_with_size_missing_returns_zero() {
+    let dir = tempdir().unwrap();
+    let store = BlobStore::open(dir.path().join("blobs")).unwrap();
+    assert_eq!(store.remove_with_size(&addr("nope")).unwrap(), 0);
+}
+
+#[test]
+fn remove_batch_blobs_removes_all() {
+    let dir = tempdir().unwrap();
+    let store = BlobStore::open(dir.path().join("blobs")).unwrap();
+    store.put(&addr("a"), &[0; 10]).unwrap();
+    store.put(&addr("b"), &[0; 20]).unwrap();
+    store.put(&addr("c"), &[0; 30]).unwrap();
+    let (count, bytes) = store.remove_batch_blobs(&[addr("a"), addr("b")]).unwrap();
+    assert_eq!(count, 2);
+    assert_eq!(bytes, 30);
+    assert!(store.contains(&addr("c")));
+}
+
+#[test]
+fn remove_batch_blobs_skips_missing() {
+    let dir = tempdir().unwrap();
+    let store = BlobStore::open(dir.path().join("blobs")).unwrap();
+    store.put(&addr("a"), &[0; 10]).unwrap();
+    let (count, bytes) = store.remove_batch_blobs(&[addr("a"), addr("nope")]).unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(bytes, 10);
+}
+
+#[test]
+fn remove_batch_blobs_empty_slice() {
+    let dir = tempdir().unwrap();
+    let store = BlobStore::open(dir.path().join("blobs")).unwrap();
+    let (count, bytes) = store.remove_batch_blobs(&[]).unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(bytes, 0);
+}
+
+#[test]
+fn list_addrs_returns_all() {
+    let dir = tempdir().unwrap();
+    let store = BlobStore::open(dir.path().join("blobs")).unwrap();
+    store.put(&addr("x"), b"xx").unwrap();
+    store.put(&addr("y"), b"yy").unwrap();
+    let addrs = store.list_addrs().unwrap();
+    assert_eq!(addrs.len(), 2);
+    assert!(addrs.contains(&addr("x")));
+    assert!(addrs.contains(&addr("y")));
+}
+
+#[test]
+fn list_addrs_empty_store() {
+    let dir = tempdir().unwrap();
+    let store = BlobStore::open(dir.path().join("blobs")).unwrap();
+    assert!(store.list_addrs().unwrap().is_empty());
+}
+
+#[test]
+fn stats_counts_and_bytes() {
+    let dir = tempdir().unwrap();
+    let store = BlobStore::open(dir.path().join("blobs")).unwrap();
+    store.put(&addr("a"), &[0; 100]).unwrap();
+    store.put(&addr("b"), &[0; 200]).unwrap();
+    let (count, bytes) = store.stats().unwrap();
+    assert_eq!(count, 2);
+    assert_eq!(bytes, 300);
+}

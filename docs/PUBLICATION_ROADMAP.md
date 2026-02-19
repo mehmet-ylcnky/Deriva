@@ -40,15 +40,21 @@
 
 ## Paper 2
 
-**Title:** Async DAG Execution: Concurrent Materialization in a Computation-Addressed Store
+**Title:** Robust Materialization in a Computation-Addressed Store: Async Execution, Cascade Invalidation & Garbage Collection
 
 **Status:** 📋 Planned (write after Phase 2)
 
-**Phase:** Phase 2 (Robustness)
+**Phase:** Phase 2 (Robustness) — §2.1–§2.6, §2.8
 
-**Thesis:** Dependency-aware parallelism enables optimal materialization scheduling — independent DAG branches can be computed concurrently, and the persistent DAG allows the system to make scheduling decisions that no external orchestrator can.
+**Thesis:** A computation-addressed store requires more than correct materialization — it needs persistent dependency tracking, deadlock-free parallel execution, transitive invalidation, and safe storage reclamation. We present a cohesive robustness layer built on a persistent DAG that enables concurrent materialization with broadcast-channel deduplication, policy-driven cascade invalidation, and mark-and-sweep garbage collection with pin-based protection — all without external orchestration.
 
-**Audience:** Systems/concurrency researchers, async Rust community
+**Audience:** Systems/concurrency researchers, async Rust community, storage systems community
+
+**Why This Paper Matters:**
+- Build systems (Bazel, Ninja) parallelize but don't own the storage — they can't GC or invalidate cached results structurally
+- Dataflow engines (Spark, Dask) parallelize but treat storage as external — invalidation requires manual pipeline reruns
+- No existing system combines DAG-aware parallel execution + cascade invalidation + GC in a single storage layer
+- The persistent DAG is the key enabler: it makes all three features possible from a single data structure
 
 **Planned Sections:**
 
@@ -56,57 +62,228 @@
    - Recap of Deriva's core model (reference Paper 1)
    - The sequential materialization bottleneck in Phase 1
    - Why DAG-aware parallelism is different from generic task parallelism
+   - The robustness gap: Phase 1 had no invalidation, no GC, no persistence across restarts
+   - Contribution: persistent DAG as the foundation for three interlocking robustness features
 
-2. Background: DAG Scheduling
+2. Background
    - Critical path analysis in dependency graphs
-   - Comparison with build system parallelism (Bazel, Ninja)
-   - Comparison with dataflow engines (Spark, Dask, Ray)
+   - Comparison with build system parallelism (Bazel, Ninja) — parallelize but don't own storage
+   - Comparison with dataflow engines (Spark, Dask, Ray) — parallelize but treat storage as external
+   - Comparison with cache invalidation strategies (Redis, Memcached) — no dependency awareness
+   - Comparison with storage GC (Git gc, HDFS block scanner) — no computation awareness
 
-3. Design
-   - Persistent DAG store (sled-backed, survives restarts)
-   - Async materialization via Tokio tasks
-   - Parallel branch detection: when two inputs of a recipe are both unmaterialized, compute concurrently
-   - Scheduling heuristics: critical path first vs breadth-first vs cost-weighted
+3. Persistent DAG Store (§2.1)
+   - sled-backed forward/reverse adjacency lists
+   - Transactional inserts: recipe + edges atomically
+   - Survives restarts — no DAG reconstruction needed
+   - `all_addrs()` and `live_addr_set()` for GC live set computation
+   - Design decision: sled over RocksDB (embedded, pure Rust, transactional)
 
-4. Verification Mode
-   - Dual-compute for high-assurance workloads
-   - Hash comparison to detect non-deterministic functions at runtime
-   - Performance cost of verification (2x compute, measured)
+4. Async Materialization (§2.2–§2.3)
+   - AsyncExecutor: parallel materialization via Tokio tasks
+   - Broadcast-channel deduplication: when multiple requests need the same CAddr simultaneously, only one computes — others subscribe to the broadcast channel and receive the result
+   - Semaphore-bounded concurrency: acquired only at the compute step (not during input resolution) to prevent deadlock in diamond DAGs
+   - Input assembly: positional slot collection ensures deterministic input ordering regardless of parallel completion order
+   - Comparison: Bazel (action graph parallelism, external cache), Ninja (implicit dep parallelism), Dask (task graph with distributed scheduler)
 
-5. Observability
-   - Structured logging via `tracing` crate
-   - Prometheus-compatible metrics export
-   - Key metrics: cache hit rate, materialization latency by function, DAG depth distribution, eviction rate
-   - Dashboard design for operators
+5. Verification Mode (§2.4)
+   - Dual-compute for high-assurance workloads: execute function twice, compare output hashes
+   - `DeterminismViolation` error type for runtime detection of non-deterministic functions
+   - Three modes: Off (production), DualCompute (full verification), Sampled (probabilistic — verify N% of materializations)
+   - Performance cost: 2x compute, measured via benchmarks
+   - Why this matters for CAS: if `f(inputs)` is non-deterministic, the entire addressing model breaks
 
-6. Evaluation
-   - Benchmark: sequential vs parallel materialization on diamond/wide/deep DAGs
-   - Metric: wall-clock time, CPU utilization, memory pressure
-   - Benchmark: verification mode overhead (2x compute cost, measured)
+6. Cascade Invalidation (§2.6)
+   - Problem: when a leaf changes, all transitive dependents have stale cached materializations
+   - `CascadeInvalidator`: walks reverse edges in the persistent DAG to find all transitive dependents
+   - Policy-driven: `CascadePolicy` controls depth limits, whether to invalidate or just report
+   - Sync and async variants for different execution contexts
+   - Dry-run mode: show what would be invalidated without actually evicting
+   - Comparison: database materialized view refresh (full recompute), dbt incremental models (manual dependency declaration), Airflow (DAG-level retrigger, no cache awareness)
+
+7. Garbage Collection (§2.8)
+   - Problem: orphaned blobs, orphaned recipes, stale cache entries accumulate over time
+   - Mark-and-sweep: live set = `dag.live_addr_set()` ∪ pinned addrs
+   - Sweep phases: orphaned blobs → orphaned recipes → stale cache entries → dangling DAG edges
+   - `PinSet` (Arc<RwLock>): protect important addrs from GC via gRPC Pin/Unpin RPCs
+   - `GcConfig`: grace period, max removals, dry-run mode
+   - `GcResult`: blobs removed, bytes reclaimed, recipes removed, cache entries cleared
+   - Comparison: Git gc (pack objects, prune unreachable), HDFS block scanner (replica-aware), S3 lifecycle rules (time-based, no dependency awareness)
+
+8. Observability (§2.5)
+   - 40+ Prometheus metrics across all subsystems: RPC latency, cache hit/miss, DAG operations, GC runs, cascade invalidations, materialization duration by function
+   - Metrics exposed via axum HTTP server on separate port (/metrics + /health)
+   - Key metrics: `MATERIALIZATION_DURATION`, `CACHE_HIT_TOTAL`, `CACHE_MISS_TOTAL`, `GC_BLOBS_REMOVED`, `GC_BYTES_RECLAIMED`, `CASCADE_EVICTIONS_TOTAL`
+   - Design: lazy_static Prometheus counters/histograms, zero-cost when not scraped
+
+9. Evaluation
+   - Benchmark: sequential (Phase 1 Executor) vs parallel (Phase 2 AsyncExecutor) on diamond/wide/deep DAGs
+   - Metric: wall-clock time, speedup factor, CPU utilization
+   - Benchmark: verification mode overhead (DualCompute vs Off)
+   - Benchmark: cascade invalidation time vs number of transitive dependents (N = 1, 10, 100, 1000)
+   - Benchmark: GC sweep time vs number of blobs (100, 1000, 5000)
+   - Benchmark: GC live set computation time vs DAG size
    - Benchmark: persistent DAG recovery time after restart
+   - Benchmark: broadcast-channel dedup — N concurrent requests for same CAddr, measure total compute invocations (should be 1)
 
-7. Tradeoffs
-   - Async complexity vs performance gain
-   - Verification mode cost vs safety guarantee
-   - Observability overhead
+10. Tradeoffs
+    - Async complexity vs performance gain (broadcast channels add code complexity)
+    - Semaphore at compute-only vs full-path (deadlock prevention vs potential over-parallelism)
+    - Verification mode cost vs safety guarantee (2x compute is expensive)
+    - GC grace period vs storage reclamation speed
+    - Pin set as manual protection vs automatic reference counting
+    - Observability overhead (metric recording on every operation)
 
-8. Conclusion
+11. Conclusion
+    - The persistent DAG is the single enabler for all three robustness features
+    - Parallel execution, cascade invalidation, and GC are not independent features — they share the DAG and interact (GC respects cascade state, cascade uses DAG reverse edges, parallel execution populates the DAG)
+    - First system to combine DAG-aware parallel materialization + structural cascade invalidation + computation-aware GC in a unified storage layer
 
 **Methodology:**
 - Controlled benchmarks on fixed hardware (document CPU, RAM, SSD specs)
 - DAG shapes: diamond (depth 3, width 2), wide fan-out (1→100), deep chain (depth 20), realistic ML pipeline (mixed)
 - Each benchmark: 100 runs, report p50/p95/p99
 - Compare: Phase 1 sequential executor vs Phase 2 parallel executor on identical workloads
+- GC benchmarks: vary blob count (100, 1000, 5000), measure sweep time and live set computation
+- Cascade benchmarks: vary fan-out width (1→N), measure invalidation time
 
 **Key Metrics to Collect:**
 | Metric | Unit | Collection Method |
 |--------|------|-------------------|
 | Materialization wall time | ms | Instrumented executor, per-request |
 | Parallelism factor | concurrent tasks / total tasks | Tokio task count during materialization |
+| Dedup effectiveness | compute invocations / unique CAddrs requested | Counter in AsyncExecutor |
 | DAG recovery time | ms | Time from process start to DAG fully loaded from sled |
 | Verification overhead | % | Dual-compute time / single-compute time |
 | Cache hit rate | % | Counter in cache layer |
 | Materialization latency by function | ms | Per-function histogram via tracing |
+| Cascade invalidation time | ms per N dependents | Timed cascade with varying fan-out |
+| Cascade depth reached | levels | Instrumented invalidator |
+| GC sweep time | ms | Timed run_gc with varying blob counts |
+| GC live set computation time | μs | Timed live_addr_set() |
+| GC blobs removed | count | GcResult fields |
+| GC bytes reclaimed | bytes | GcResult fields |
+| GC list_addrs time | ms | Timed BlobStore::list_addrs() (I/O-bound, dominates GC) |
+
+---
+
+## Paper 2b
+
+**Title:** Streaming Materialization in a Computation-Addressed Store: Chunk-Level Dataflow over Dependency Graphs
+
+**Status:** 📋 Planned (write after Phase 2)
+
+**Phase:** Phase 2 (Robustness) — §2.7
+
+**Thesis:** Computation-addressed storage can natively support streaming dataflow without external orchestration — by combining the dependency DAG with chunk-level processing, the system can stream derived data through multi-stage pipelines while preserving content-addressing, caching, and determinism guarantees that batch-only systems cannot offer for streaming workloads.
+
+**Audience:** Dataflow/streaming systems researchers, data engineering community, Rust async ecosystem
+
+**Why This Paper Matters:**
+- Existing streaming systems (Flink, Kafka Streams, Spark Structured Streaming) are external orchestrators — they don't own the storage and can't leverage content-addressing for deduplication or caching
+- Existing CAS systems (Nix, Bazel, IPFS) are batch-only — they materialize entire outputs before serving
+- Deriva bridges the gap: streaming execution within a content-addressed store, where intermediate chunks are addressable and cacheable
+- The auto-wrapping mechanism (batch functions transparently participate in streaming pipelines) is a novel contribution — no existing system does this
+
+**Planned Sections:**
+
+1. Introduction
+   - The batch materialization limitation: client must wait for full output before receiving any bytes
+   - Why streaming matters for computation-addressed storage: large derived datasets, interactive queries, pipeline composition
+   - Reference Paper 1 (core model) and Paper 2 (async execution, persistent DAG)
+   - Contribution: streaming dataflow that preserves CAS invariants (addressability, caching, determinism)
+
+2. Background: Streaming Dataflow
+   - Dataflow models: push vs pull, backpressure, chunk semantics
+   - Comparison with Spark Structured Streaming (micro-batch, external storage)
+   - Comparison with Apache Flink (true streaming, external state backends)
+   - Comparison with Kafka Streams (log-based, no computation-addressing)
+   - Comparison with Unix pipes (streaming but no caching, no DAG awareness, no content-addressing)
+   - Gap: no existing system combines streaming execution with content-addressed storage
+
+3. StreamChunk Protocol
+   - `StreamChunk` enum: `Data(Bytes)`, `End`, `Error(String)`
+   - Chunk-level processing: functions receive and emit individual chunks, not full blobs
+   - Backpressure via bounded async channels (tokio::mpsc)
+   - End-of-stream semantics: `End` chunk signals completion, enables downstream finalization
+   - Error propagation: `Error` chunk terminates pipeline with diagnostic information
+
+4. Streaming Compute Functions (§2.7)
+   - `StreamingComputeFunction` trait: `async fn process_chunk(&self, chunk: StreamChunk, state: &mut State) -> Vec<StreamChunk>`
+   - 20 built-in streaming functions across 4 categories:
+     - **Chunk-by-chunk transforms** (9): identity, uppercase, lowercase, reverse, base64_encode, base64_decode, xor, compress, decompress
+     - **Accumulators** (3): sha256, byte_count, checksum — accumulate state across chunks, emit result on `End`
+     - **Multi-input combiners** (3): concat, interleave, zip_concat — merge multiple input streams
+     - **Pipeline utilities** (5): chunk_resizer, take, skip, repeat, tee_count
+   - Design: stateless transforms vs stateful accumulators — different processing models unified under one trait
+
+5. Auto-Wrapping: Batch Functions in Streaming Pipelines
+   - Problem: existing batch `ComputeFunction` implementations should work in streaming pipelines without rewriting
+   - Solution: `BatchToStreamAdapter` — collects all chunks into a buffer, calls batch function on `End`, emits result as chunks
+   - Transparent to pipeline construction: `FunctionRegistry` resolves streaming-first, falls back to auto-wrapped batch
+   - Tradeoff: auto-wrapped functions lose streaming benefits (must buffer full input) but gain pipeline composability
+   - This is novel: no existing system auto-wraps batch functions into streaming pipelines
+
+6. StreamPipeline & DAG-Aware Pipeline Construction
+   - `StreamPipeline`: ordered sequence of streaming stages, built from DAG traversal
+   - `StreamingExecutor`: walks the persistent DAG from target CAddr, builds pipeline by resolving each recipe to its streaming function
+   - Tee semantics: pipeline output is tee'd to both the client stream (gRPC `Get` response) and the cache (for future hits)
+   - Multi-input handling: combiner functions receive multiple input streams, synchronized by the pipeline
+   - Pipeline composition: pipelines can be nested (output of one pipeline feeds input of another)
+
+7. Integration with CAS Invariants
+   - Content-addressing: final output of a streaming pipeline produces the same CAddr as batch materialization (determinism preserved)
+   - Caching: tee'd output is stored in `SharedCache` — subsequent requests for the same CAddr hit cache, skip pipeline
+   - Invalidation: cascade invalidation (Paper 2) applies to streaming results — invalidating an input invalidates all downstream cached stream outputs
+   - Verification: streaming results can be verified by re-executing the pipeline and comparing output CAddr (verification mode from Paper 2)
+
+8. Evaluation
+   - Benchmark: streaming vs batch materialization — time-to-first-byte for varying output sizes (1MB, 100MB, 1GB)
+   - Benchmark: pipeline throughput — chunks/sec for transform chains of depth 1, 5, 10, 20
+   - Benchmark: auto-wrap overhead — batch function via auto-wrap vs native streaming function
+   - Benchmark: tee overhead — streaming with cache tee vs without
+   - Benchmark: multi-input combiner throughput — concat/interleave/zip_concat with 2, 5, 10 input streams
+   - Benchmark: accumulator memory — peak memory for sha256/byte_count/checksum on 1GB input (should be O(state), not O(input))
+   - Comparison: Deriva streaming vs Unix pipes vs Spark Structured Streaming on equivalent workloads
+
+9. Tradeoffs
+   - Streaming complexity vs time-to-first-byte improvement
+   - Auto-wrap buffering vs native streaming (convenience vs performance)
+   - Tee overhead vs cache hit benefit on subsequent requests
+   - Chunk size selection: small chunks = low latency, large chunks = high throughput
+   - Stateful accumulators: must buffer state across chunks (memory pressure for large inputs)
+
+10. Conclusion
+    - First system to combine streaming dataflow with content-addressed storage
+    - Auto-wrapping enables gradual migration: start with batch functions, add streaming implementations for hot paths
+    - The persistent DAG enables pipeline construction without external orchestration — the system knows the computation graph and can build the pipeline automatically
+    - Streaming preserves all CAS invariants: same CAddr, same cache behavior, same invalidation semantics
+
+**Methodology:**
+- Controlled benchmarks on fixed hardware (document CPU, RAM, SSD specs)
+- Chunk sizes: 4KB, 64KB, 1MB (measure throughput and latency for each)
+- Pipeline depths: 1, 5, 10, 20 stages
+- Input sizes: 1MB (small), 100MB (medium), 1GB (large)
+- Each benchmark: 100 runs, report p50/p95/p99
+- Compare: Deriva streaming vs batch materialization (same functions, same inputs)
+- Compare: Deriva streaming vs Unix pipe chain (equivalent transforms)
+- Memory profiling: peak RSS during streaming vs batch for large inputs
+
+**Key Metrics to Collect:**
+| Metric | Unit | Collection Method |
+|--------|------|-------------------|
+| Time-to-first-byte | ms | Client-side measurement from request to first chunk |
+| Time-to-completion | ms | Client-side measurement from request to last chunk |
+| Pipeline throughput | MB/s | Total bytes / time-to-completion |
+| Chunks per second | chunks/s | Counter in StreamingExecutor |
+| Auto-wrap overhead | % | Auto-wrapped time / native streaming time |
+| Tee overhead | % | Streaming with tee / streaming without tee |
+| Peak memory (streaming) | MB | RSS measurement during pipeline execution |
+| Peak memory (batch) | MB | RSS measurement during batch materialization |
+| Memory ratio | streaming_peak / batch_peak | Derived from above (should be < 1 for large inputs) |
+| Accumulator state size | bytes | Instrumented accumulator state |
+| Cache hit after tee | % | Subsequent requests that hit cache |
+| CAddr consistency | % identical | Streaming output CAddr vs batch output CAddr (should be 100%) |
 
 ---
 
@@ -127,7 +304,7 @@
 1. Introduction
    - The distribution challenge for computation-addressed storage
    - Why naive sharding breaks the model (recipes reference CAddrs that may live on other nodes)
-   - Reference Papers 1 & 2 for single-node foundation
+   - Reference Papers 1, 2 & 2b for single-node foundation
 
 2. Node Discovery: SWIM Gossip Protocol (§3.1)
    - SWIM protocol adaptation for Deriva
@@ -651,18 +828,21 @@
 | Paper | Depends On | Estimated Write Time | Target |
 |-------|-----------|---------------------|--------|
 | Paper 1 | Phase 1 | — | ✅ Published |
-| Paper 2 | Phase 2 complete | 2-3 weeks | After Phase 2 |
+| Paper 2 | Phase 2 §2.1–§2.6, §2.8 | 2-3 weeks | After Phase 2 |
+| Paper 2b | Phase 2 §2.7 | 2-3 weeks | After Phase 2 (parallel with Paper 2) |
 | Paper 3 | Phase 3 complete | 3-4 weeks | After Phase 3 |
 | Paper 4 | Phase 4 Track A (§4.1–§4.5) | 4-5 weeks | After determinism backbone |
 | Paper 5 | Phase 4 Track B (§4.6–§4.10) | 3-4 weeks | After advanced features |
 | Paper 6 | All phases + benchmarks | 4-6 weeks | Final paper |
 
-**Total:** 6 papers covering all phases of Deriva development
+**Total:** 7 papers covering all phases of Deriva development
 
 ## Recommended Submission Targets
 
 | Paper | Venue | Rationale |
 |-------|-------|-----------|
+| Paper 2 | EuroSys / USENIX ATC | Systems/concurrency with novel dedup + GC integration |
+| Paper 2b | VLDB / SIGMOD (demo) / EuroSys | Streaming dataflow in CAS — novel intersection |
 | Paper 3 | USENIX ATC / EuroSys | Distributed systems with novel routing |
 | Paper 4 | OSDI / SOSP | Novel determinism guarantees with proofs — strongest contribution |
 | Paper 5 | USENIX ATC / FAST | Systems + filesystem intersection |
@@ -670,9 +850,12 @@
 
 ## Notes
 
-- Papers 2-5 can reference Paper 1 for core concepts — no need to re-explain CAddr, recipes, DAG
+- Papers 2–6 can reference Paper 1 for core concepts — no need to re-explain CAddr, recipes, DAG
+- Paper 2b references Paper 2 for persistent DAG and async execution — streaming builds on top of both
+- Papers 2 and 2b can be written in parallel since they cover independent Phase 2 subsections
 - Paper 4 (determinism) is the strongest academic contribution — consider submitting to a top venue
 - Paper 6 should be written last because it needs the complete system for fair benchmarks
 - Start collecting metrics from Phase 2 onward (instrument the code as you build)
 - All papers published on GitHub Pages under the same Deriva repository
 - Paper 4 could also target security venues (USENIX Security, CCS) given the integrity/proof angle
+- Paper 2b could also target the Rust community (RustConf, EuroRust) given the async streaming implementation

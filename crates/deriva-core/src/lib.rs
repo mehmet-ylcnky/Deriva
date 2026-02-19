@@ -2,6 +2,7 @@ pub mod address;
 pub mod cache;
 pub mod dag;
 pub mod error;
+pub mod gc;
 pub mod invalidation;
 pub mod persistent_dag;
 pub mod recipe_store;

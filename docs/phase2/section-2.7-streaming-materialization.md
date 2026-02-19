@@ -2370,23 +2370,25 @@ lazy_static! {
 
 ## 12. Checklist
 
-- [ ] Create `deriva-core/src/streaming.rs` with `StreamChunk`
-- [ ] Create `deriva-compute/src/streaming.rs` with `StreamingComputeFunction` trait
-- [ ] Implement `batch_to_stream`, `value_to_stream`, `collect_stream`, `tee_stream`
-- [ ] Create `deriva-compute/src/pipeline.rs` with `StreamPipeline`
-- [ ] Implement `PipelineConfig` with defaults
-- [ ] Create `deriva-compute/src/builtins_streaming.rs` with 4 built-in functions
-- [ ] Extend `FunctionRegistry` with streaming function storage
-- [ ] Add `StreamingExecutor` to `executor.rs`
-- [ ] Update `get()` RPC with streaming path and cache-after-collect
-- [ ] Write unit tests for `StreamChunk` (~3 tests)
-- [ ] Write unit tests for adapters (~7 tests)
-- [ ] Write unit tests for built-in streaming functions (~8 tests)
-- [ ] Write unit tests for `tee_stream` (~2 tests)
-- [ ] Write integration tests for `StreamPipeline` (~2 tests)
-- [ ] Run benchmarks: streaming vs batch at 1MB, 100MB
-- [ ] Run benchmarks: chunk size comparison
-- [ ] Verify backpressure works with slow consumer test
-- [ ] `cargo clippy --workspace -- -D warnings` clean
-- [ ] All existing 244+ tests still pass
-- [ ] Commit and push
+- [x] Create `deriva-core/src/streaming.rs` with `StreamChunk`
+- [x] Create `deriva-compute/src/streaming.rs` with `StreamingComputeFunction` trait
+- [x] Implement `batch_to_stream`, `value_to_stream`, `collect_stream`, `tee_stream`
+- [x] Create `deriva-compute/src/pipeline.rs` with `StreamPipeline`
+- [x] Implement `PipelineConfig` with defaults
+- [x] Create `deriva-compute/src/builtins_streaming.rs` with 20 built-in functions
+- [x] Extend `FunctionRegistry` with streaming function storage
+- [x] Add `StreamingExecutor` to `streaming_executor.rs`
+- [x] Update `get()` RPC with streaming path and cache-after-collect
+- [x] Write unit tests for `StreamChunk` (3 tests)
+- [x] Write unit tests for adapters (7 tests)
+- [x] Write unit tests for built-in streaming functions (32 tests)
+- [x] Write unit tests for `tee_stream` (2 tests)
+- [x] Write integration tests for `StreamPipeline` (4 tests)
+- [x] Run benchmarks: streaming vs batch at 1MB, 100MB
+- [x] Run benchmarks: chunk size comparison
+- [x] Verify backpressure works with slow consumer test
+- [x] Add streaming observability metrics (4 metrics)
+- [x] Document test specifications (§5.9–5.24)
+- [x] `cargo clippy --workspace -- -D warnings` clean
+- [x] All existing tests still pass (476+ total)
+- [x] Commit and push

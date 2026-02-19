@@ -71,6 +71,29 @@ lazy_static! {
     pub static ref CASCADE_TOTAL: CounterVec = register_counter_vec!(
         "deriva_cascade_invalidation_total", "Total cascade invalidations", &["policy"]
     ).unwrap();
+
+    // GC metrics
+    pub static ref GC_RUNS_TOTAL: CounterVec = register_counter_vec!(
+        "deriva_gc_runs_total", "Total GC cycles by mode", &["mode"]
+    ).unwrap();
+    pub static ref GC_BLOBS_REMOVED: Histogram = register_histogram!(
+        "deriva_gc_blobs_removed", "Blobs removed per GC cycle",
+        vec![0.0, 1.0, 10.0, 100.0, 1000.0, 10000.0]
+    ).unwrap();
+    pub static ref GC_BYTES_RECLAIMED: Histogram = register_histogram!(
+        "deriva_gc_bytes_reclaimed", "Bytes reclaimed per GC cycle",
+        vec![0.0, 1024.0, 1e6, 1e7, 1e8, 1e9]
+    ).unwrap();
+    pub static ref GC_DURATION: Histogram = register_histogram!(
+        "deriva_gc_duration_seconds", "GC cycle duration",
+        vec![0.01, 0.1, 0.5, 1.0, 5.0, 30.0, 60.0]
+    ).unwrap();
+    pub static ref GC_LIVE_BLOBS: Gauge = register_gauge!(
+        "deriva_gc_live_blobs", "Number of live blobs after last GC"
+    ).unwrap();
+    pub static ref GC_PINNED_COUNT: Gauge = register_gauge!(
+        "deriva_gc_pinned_count", "Number of pinned addrs"
+    ).unwrap();
     pub static ref CASCADE_EVICTED: Histogram = register_histogram!(
         "deriva_cascade_evicted_count", "Entries evicted per cascade",
         vec![0.0, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 10000.0]

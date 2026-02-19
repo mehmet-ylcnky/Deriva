@@ -447,6 +447,13 @@ impl Deriva for DerivaService {
             dry_run: result.dry_run,
         }));
         record_rpc("garbage_collect", start, true);
+        let mode = if result.dry_run { "dry_run" } else { "actual" };
+        GC_RUNS_TOTAL.with_label_values(&[mode]).inc();
+        GC_BLOBS_REMOVED.observe(result.blobs_removed as f64);
+        GC_BYTES_RECLAIMED.observe(result.total_bytes_reclaimed as f64);
+        GC_DURATION.observe(result.duration.as_secs_f64());
+        GC_LIVE_BLOBS.set(result.live_blobs as f64);
+        GC_PINNED_COUNT.set(result.pinned_count as f64);
         resp
     }
 

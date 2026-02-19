@@ -7,11 +7,17 @@ edition = "2021"
 deriva-core = { path = "../deriva-core" }
 deriva-compute = { path = "../deriva-compute" }
 deriva-storage = { path = "../deriva-storage" }
+deriva-server = { path = "../deriva-server" }
 bytes.workspace = true
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 async-trait.workspace = true
+sled = { workspace = true }
+
+[[bench]]
+name = "garbage_collection"
+harness = false
 
 [[bench]]
 name = "storage_primitives"

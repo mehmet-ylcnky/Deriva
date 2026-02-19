@@ -505,7 +505,9 @@ dependencies = [
  "criterion",
  "deriva-compute",
  "deriva-core",
+ "deriva-server",
  "deriva-storage",
+ "sled",
  "tempfile",
  "tokio",
 ]

@@ -2,10 +2,12 @@ use deriva_compute::async_executor::{AsyncExecutor, CombinedDagReader, ExecutorC
 use deriva_compute::cache::SharedCache;
 use deriva_compute::registry::FunctionRegistry;
 use deriva_core::cache::EvictableCache;
+use deriva_core::gc::PinSet;
 use deriva_core::PersistentDag;
 use deriva_storage::{StorageBackend, SledRecipeStore};
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::RwLock;
 
 pub struct ServerState {
     pub executor: AsyncExecutor<SharedCache, deriva_storage::BlobStore, CombinedDagReader<SledRecipeStore>>,
@@ -15,6 +17,7 @@ pub struct ServerState {
     pub blobs: Arc<deriva_storage::BlobStore>,
     pub registry: Arc<FunctionRegistry>,
     pub storage: StorageBackend,
+    pub pins: Arc<RwLock<PinSet>>,
     pub start_time: Instant,
 }
 
@@ -60,6 +63,7 @@ impl ServerState {
             blobs,
             registry,
             storage,
+            pins: Arc::new(RwLock::new(PinSet::new())),
             start_time: Instant::now(),
         })
     }

@@ -60,4 +60,31 @@ pub enum Command {
     },
     /// Server status
     Status,
+    /// Run garbage collection
+    Gc {
+        /// Dry run: show what would be removed
+        #[arg(long)]
+        dry_run: bool,
+        /// Grace period in seconds
+        #[arg(long, default_value_t = 300)]
+        grace_period: u64,
+        /// Show addresses of removed entries
+        #[arg(long)]
+        detail: bool,
+        /// Max blobs to remove (0 = unlimited)
+        #[arg(long, default_value_t = 0)]
+        max_removals: u64,
+    },
+    /// Pin an addr to protect from GC
+    Pin {
+        /// CAddr (hex)
+        addr: String,
+    },
+    /// Unpin an addr
+    Unpin {
+        /// CAddr (hex)
+        addr: String,
+    },
+    /// List all pinned addrs
+    ListPins,
 }

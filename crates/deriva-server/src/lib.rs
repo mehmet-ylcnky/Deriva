@@ -1,3 +1,4 @@
+pub mod gc;
 pub mod metrics;
 pub mod metrics_server;
 pub mod service;

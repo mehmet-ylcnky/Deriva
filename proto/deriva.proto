@@ -10,6 +10,10 @@ service Deriva {
   rpc CascadeInvalidate (CascadeInvalidateRequest) returns (CascadeInvalidateResponse);
   rpc Status (StatusRequest) returns (StatusResponse);
   rpc Verify (VerifyRequest) returns (VerifyResponse);
+  rpc GarbageCollect (GcRequest) returns (GcResponse);
+  rpc Pin (PinRequest) returns (PinResponse);
+  rpc Unpin (UnpinRequest) returns (UnpinResponse);
+  rpc ListPins (ListPinsRequest) returns (ListPinsResponse);
 }
 
 message PutLeafRequest { bytes data = 1; }
@@ -83,4 +87,38 @@ message VerifyResponse {
   uint64 output_size = 3;
   uint64 compute_time_us = 4;
   string error = 5;
+}
+
+message GcRequest {
+  uint64 grace_period_secs = 1;
+  bool dry_run = 2;
+  bool detail_addrs = 3;
+  uint64 max_removals = 4;
+}
+
+message GcResponse {
+  uint64 blobs_removed = 1;
+  uint64 recipes_removed = 2;
+  uint64 cache_entries_removed = 3;
+  uint64 bytes_reclaimed_blobs = 4;
+  uint64 bytes_reclaimed_cache = 5;
+  uint64 total_bytes_reclaimed = 6;
+  uint64 live_blobs = 7;
+  uint64 live_recipes = 8;
+  uint64 pinned_count = 9;
+  uint64 duration_micros = 10;
+  repeated bytes removed_addrs = 11;
+  bool dry_run = 12;
+}
+
+message PinRequest { bytes addr = 1; }
+message PinResponse { bool was_new = 1; }
+
+message UnpinRequest { bytes addr = 1; }
+message UnpinResponse { bool was_pinned = 1; }
+
+message ListPinsRequest {}
+message ListPinsResponse {
+  repeated bytes addrs = 1;
+  uint64 count = 2;
 }

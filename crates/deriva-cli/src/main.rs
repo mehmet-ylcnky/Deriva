@@ -111,6 +111,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("cache size:    {} bytes", resp.cache_size_bytes);
             println!("hit rate:      {:.1}%", resp.cache_hit_rate * 100.0);
         }
+        Command::Gc { dry_run, grace_period, detail, max_removals } => {
+            let resp = client.garbage_collect(GcRequest {
+                grace_period_secs: grace_period,
+                dry_run,
+                detail_addrs: detail,
+                max_removals,
+            }).await?.into_inner();
+            let mode = if resp.dry_run { "DRY RUN" } else { "COMPLETED" };
+            println!("Garbage Collection {mode}");
+            println!("  Blobs removed:   {}", resp.blobs_removed);
+            println!("  Recipes removed: {}", resp.recipes_removed);
+            println!("  Cache cleared:   {}", resp.cache_entries_removed);
+            println!("  Bytes reclaimed: {} ({} blobs + {} cache)",
+                resp.total_bytes_reclaimed, resp.bytes_reclaimed_blobs, resp.bytes_reclaimed_cache);
+            println!("  Live blobs:      {}", resp.live_blobs);
+            println!("  Live recipes:    {}", resp.live_recipes);
+            println!("  Pinned addrs:    {}", resp.pinned_count);
+            println!("  Duration:        {}μs", resp.duration_micros);
+            if detail {
+                for a in &resp.removed_addrs {
+                    println!("  - {}", addr_to_hex(a));
+                }
+            }
+        }
+        Command::Pin { addr } => {
+            let addr_bytes = hex_to_addr(&addr)?;
+            let resp = client.pin(PinRequest { addr: addr_bytes }).await?.into_inner();
+            println!("pinned: {} (new: {})", addr, resp.was_new);
+        }
+        Command::Unpin { addr } => {
+            let addr_bytes = hex_to_addr(&addr)?;
+            let resp = client.unpin(UnpinRequest { addr: addr_bytes }).await?.into_inner();
+            println!("unpinned: {} (was_pinned: {})", addr, resp.was_pinned);
+        }
+        Command::ListPins => {
+            let resp = client.list_pins(ListPinsRequest {}).await?.into_inner();
+            println!("Pinned addrs ({}):", resp.count);
+            for a in &resp.addrs {
+                println!("  {}", addr_to_hex(a));
+            }
+        }
     }
 
     Ok(())

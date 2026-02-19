@@ -1,6 +1,7 @@
 use crate::metrics::*;
 use crate::state::ServerState;
 use deriva_core::address::*;
+use deriva_core::gc::GcConfig;
 use deriva_core::invalidation::CascadePolicy;
 use deriva_core::streaming::StreamChunk;
 use deriva_compute::async_executor::CombinedDagReader;
@@ -413,5 +414,69 @@ impl Deriva for DerivaService {
         }));
         record_rpc("verify", start, true);
         resp
+    }
+
+    async fn garbage_collect(
+        &self,
+        request: Request<proto::GcRequest>,
+    ) -> Result<Response<proto::GcResponse>, Status> {
+        let start = Instant::now();
+        let req = request.get_ref();
+        let config = GcConfig {
+            grace_period: std::time::Duration::from_secs(req.grace_period_secs),
+            dry_run: req.dry_run,
+            detail_addrs: req.detail_addrs,
+            max_removals: req.max_removals as usize,
+        };
+        let pins = self.state.pins.read().await;
+        let result = crate::gc::run_gc(
+            &self.state.dag, &self.state.blobs, &self.state.cache, &pins, &config,
+        ).await.map_err(|e| Status::internal(e.to_string()))?;
+        let resp = Ok(Response::new(proto::GcResponse {
+            blobs_removed: result.blobs_removed,
+            recipes_removed: result.recipes_removed,
+            cache_entries_removed: result.cache_entries_removed,
+            bytes_reclaimed_blobs: result.bytes_reclaimed_blobs,
+            bytes_reclaimed_cache: result.bytes_reclaimed_cache,
+            total_bytes_reclaimed: result.total_bytes_reclaimed,
+            live_blobs: result.live_blobs,
+            live_recipes: result.live_recipes,
+            pinned_count: result.pinned_count,
+            duration_micros: result.duration.as_micros() as u64,
+            removed_addrs: result.removed_addrs.iter().map(|a| a.as_bytes().to_vec()).collect(),
+            dry_run: result.dry_run,
+        }));
+        record_rpc("garbage_collect", start, true);
+        resp
+    }
+
+    async fn pin(
+        &self,
+        request: Request<proto::PinRequest>,
+    ) -> Result<Response<proto::PinResponse>, Status> {
+        let addr = parse_addr(&request.get_ref().addr)?;
+        let mut pins = self.state.pins.write().await;
+        let was_new = pins.pin(addr);
+        Ok(Response::new(proto::PinResponse { was_new }))
+    }
+
+    async fn unpin(
+        &self,
+        request: Request<proto::UnpinRequest>,
+    ) -> Result<Response<proto::UnpinResponse>, Status> {
+        let addr = parse_addr(&request.get_ref().addr)?;
+        let mut pins = self.state.pins.write().await;
+        let was_pinned = pins.unpin(&addr);
+        Ok(Response::new(proto::UnpinResponse { was_pinned }))
+    }
+
+    async fn list_pins(
+        &self,
+        _request: Request<proto::ListPinsRequest>,
+    ) -> Result<Response<proto::ListPinsResponse>, Status> {
+        let pins = self.state.pins.read().await;
+        let addrs: Vec<Vec<u8>> = pins.list().iter().map(|a| a.as_bytes().to_vec()).collect();
+        let count = addrs.len() as u64;
+        Ok(Response::new(proto::ListPinsResponse { addrs, count }))
     }
 }

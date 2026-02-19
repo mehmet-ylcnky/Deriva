@@ -4,8 +4,6 @@ use deriva_core::gc::PinSet;
 use deriva_core::persistent_dag::PersistentDag;
 
 /// Compute the set of live CAddrs that must not be garbage collected.
-///
-/// live = all recipe outputs ∪ all recipe inputs ∪ pinned addrs
 pub fn compute_live_set(dag: &PersistentDag, pins: &PinSet) -> HashSet<CAddr> {
     let mut live = dag.live_addr_set();
     for addr in pins.as_set() {

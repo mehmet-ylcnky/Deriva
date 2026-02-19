@@ -239,4 +239,28 @@ impl PersistentDag {
         self.db.flush().map_err(|e| DerivaError::Storage(e.to_string()))?;
         Ok(())
     }
+
+    /// List all recipe output addrs in the DAG.
+    pub fn all_addrs(&self) -> Vec<CAddr> {
+        self.forward.iter()
+            .filter_map(|r| r.ok())
+            .filter_map(|(k, _)| <[u8; 32]>::try_from(k.as_ref()).ok().map(CAddr::from_raw))
+            .collect()
+    }
+
+    /// Compute the set of all live addrs: recipe outputs ∪ their inputs.
+    pub fn live_addr_set(&self) -> HashSet<CAddr> {
+        let mut live = HashSet::new();
+        for (key, val) in self.forward.iter().flatten() {
+            if let Ok(arr) = <[u8; 32]>::try_from(key.as_ref()) {
+                live.insert(CAddr::from_raw(arr));
+            }
+            if let Ok(inputs) = bincode::deserialize::<Vec<CAddr>>(&val) {
+                for input in inputs {
+                    live.insert(input);
+                }
+            }
+        }
+        live
+    }
 }

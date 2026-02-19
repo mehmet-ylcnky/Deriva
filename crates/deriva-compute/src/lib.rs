@@ -4,6 +4,7 @@ pub mod builtins_streaming;
 pub mod cache;
 pub mod executor;
 pub mod function;
+pub mod gc;
 pub mod invalidation;
 pub mod leaf_store;
 pub mod metrics;

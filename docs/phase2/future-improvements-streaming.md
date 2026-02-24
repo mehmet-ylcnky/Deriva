@@ -96,50 +96,16 @@ if use_streaming {
 
 ---
 
-## 6. Channel Capacity Sweep Study
+## 6. Channel Capacity Sweep Study — ✅ COMPLETED
 
-**Problem:** The current default channel capacity of 8 was chosen based on informal testing. Paper 2b §3.4 states that "smaller values (1–2) cause excessive task switching" and "larger values (32–64) waste memory without improving throughput," but these claims lack rigorous empirical backing across different input sizes and pipeline depths.
+> **Status:** Implemented and benchmarked. Results published in Paper 2b §8.7. The §3.4 backpressure section now references empirical data instead of informal claims.
 
-**Proposed study:** A two-dimensional sweep benchmark varying:
-- **Channel capacity:** 1, 2, 4, 8, 16, 32, 64
-- **Input size:** 1 MB, 4 MB, 16 MB, 64 MB, 256 MB
+**Summary of results** (7 capacities × 6 input sizes, 5-stage identity pipeline, Criterion.rs median):
 
-For each (capacity, size) pair, measure:
-1. **End-to-end latency** (Criterion.rs median, 5-stage identity pipeline)
-2. **Time-to-first-byte** (time from pipeline start to first chunk arriving at the final consumer)
-3. **Peak RSS** (resident set size via `/proc/self/statm` snapshots)
-4. **Task switch count** (number of times the producer suspends on a full channel — instrument via an atomic counter in the send loop)
+| Capacity | 1 MB | 4 MB | 16 MB | 64 MB | 256 MB | 512 MB |
+|----------|------|------|-------|-------|--------|--------|
+| 1 | 2.72 ms | 7.01 ms | 22.7 ms | 130.3 ms | 501.1 ms | 1,128 ms |
+| **8 (default)** | **1.75 ms** | **2.72 ms** | **7.75 ms** | **50.8 ms** | **185.2 ms** | **368.7 ms** |
+| 64 | 1.66 ms | 2.82 ms | 4.63 ms | 43.3 ms | 132.9 ms | 245.3 ms |
 
-**Expected findings:**
-- Capacity 1–2: high latency due to producer suspending on every send, especially for small inputs where per-chunk overhead dominates
-- Capacity 4–8: sweet spot where the buffer absorbs producer/consumer speed mismatches without excessive memory
-- Capacity 16–32: diminishing returns on latency, linear increase in memory footprint
-- Capacity 64: no latency improvement over 32, but 8× the memory of capacity 8
-- The optimal capacity may shift with input size: small inputs (1–4 MB) may prefer lower capacity (less allocation overhead), while large inputs (64–256 MB) may benefit from slightly higher capacity to reduce task switching frequency
-
-**Implementation:**
-
-```rust
-// In benches/capacity_sweep.rs:
-const CAPACITIES: &[usize] = &[1, 2, 4, 8, 16, 32, 64];
-const SIZES: &[usize] = &[1 << 20, 4 << 20, 16 << 20, 64 << 20, 256 << 20];
-
-for &cap in CAPACITIES {
-    for &size in SIZES {
-        let config = PipelineConfig {
-            channel_capacity: cap,
-            chunk_size: 64 * 1024,
-            ..Default::default()
-        };
-        group.bench_with_input(
-            BenchmarkId::new(format!("cap{}", cap), size),
-            &size,
-            |b, &sz| b.iter(|| run_pipeline(sz, config)),
-        );
-    }
-}
-```
-
-**Outcome:** If the sweep confirms capacity 8 as universally near-optimal, the current default is validated. If the optimal capacity varies by input size, this motivates an adaptive capacity selection mechanism (e.g., `capacity = min(8, input_chunks / 2)` for small inputs) that could be integrated into `PipelineConfig`.
-
-**Complexity:** Low. ~40 lines of benchmark code. No production code changes unless the results motivate adaptive capacity.
+**Verdict:** Capacity 8 captures 80–90% of available throughput gain while using only 2.5 MB per 5-stage pipeline. Capacity 16 is a reasonable alternative for ≥256 MB workloads (14–21% faster, 2× memory). Capacity 32+ is not justified by the data.

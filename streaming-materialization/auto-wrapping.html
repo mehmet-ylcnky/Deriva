@@ -6,10 +6,14 @@
             Not every compute function has a streaming implementation. Deriva's function registry contains both batch functions (<code>ComputeFunction</code>) and streaming functions (<code>StreamingComputeFunction</code>). When the pipeline builder encounters a recipe whose function has no streaming variant, it automatically wraps the batch function — collecting inputs, executing batch, and re-chunking the output. This section describes the mechanism and its implications.
         </p>
 
+        <p>
+            The auto-wrapping layer is what makes the streaming pipeline a <em>universal</em> execution engine rather than a parallel system that only works for streaming-aware functions. Without it, introducing the streaming path would create a fragmentation problem: every existing batch function would need a manual streaming port before it could participate in a pipeline. With auto-wrapping, the 4 existing batch functions (see <a href="#streaming-functions-container">§4</a>) and any future user-registered functions work immediately — the pipeline builder handles the adaptation transparently, and downstream stages see a standard <code>Receiver&lt;StreamChunk&gt;</code> regardless of whether the upstream stage was native-streaming or auto-wrapped. This design follows the same principle as Unix pipes: every program reads stdin and writes stdout, whether it processes data incrementally or buffers everything internally.
+        </p>
+
         <h3>5.1 Registry Resolution</h3>
 
         <p>
-            The <code>StreamingExecutor</code> resolves each recipe's function in two steps:
+            The <code>StreamingExecutor</code> resolves each recipe's function in a strict two-step priority order. For every node in the topological order of the recipe DAG, it first checks whether a streaming implementation exists, then falls back to batch:
         </p>
 
         <div class="code-block">
@@ -26,40 +30,53 @@
         </div>
 
         <p>
-            Streaming-native functions are preferred. The batch path is a transparent fallback — the pipeline builder handles the adaptation internally, and the rest of the pipeline sees a standard <code>Receiver&lt;StreamChunk&gt;</code> output regardless of which path was taken.
+            Streaming-native functions are always preferred. The <code>FunctionRegistry</code> maintains two separate maps — <code>get_streaming(func_id)</code> looks up the <code>Arc&lt;dyn StreamingComputeFunction&gt;</code> map, while <code>get(func_id)</code> looks up the <code>Arc&lt;dyn ComputeFunction&gt;</code> map. A function can be registered in both maps simultaneously (e.g., <code>identity</code> has both <code>IdentityFn</code> and <code>StreamingIdentity</code>), in which case the streaming variant wins. This means that adding a streaming implementation for an existing batch function is a pure upgrade — no configuration change, no pipeline rebuild, just register the streaming variant and it takes priority automatically.
+        </p>
+
+        <p>
+            The resolution happens once during pipeline construction, not per-chunk at runtime. By the time <code>StreamPipeline::execute()</code> runs, every node is already classified as either a <code>StreamingStage</code> or a <code>BatchStage</code> in the pipeline's node list. This means the per-chunk hot path has zero branching overhead from the resolution logic — the decision is baked into the pipeline topology.
+        </p>
+
+        <p>
+            The third branch — <code>FunctionNotFound</code> — is a hard error. The pipeline builder does not attempt to synthesize a function from its name or parameters. If a recipe references <code>sha512@1.0.0</code> and neither a streaming nor batch implementation is registered, the entire pipeline construction fails immediately rather than producing a partial result. This fail-fast behavior is essential for a Computation-Addressed Store where every output must be deterministically reproducible: a pipeline that silently skips a missing function would produce a different CAddr than one that includes it.
         </p>
 
         <h3>5.2 The Batch Stage Wrapper</h3>
 
         <p>
-            When a <code>BatchStage</code> node executes inside the pipeline, it performs three steps:
+            When a <code>BatchStage</code> node executes inside the pipeline, it performs three steps that bridge the streaming world (channels of <code>StreamChunk</code>) and the batch world (a single <code>Vec&lt;Bytes&gt;</code> input, single <code>Bytes</code> output):
         </p>
 
         <ol>
-            <li><strong>Collect.</strong> For each input, call <code>collect_stream(rx)</code> to gather all chunks into a single <code>Bytes</code> value. This blocks until the upstream sends <code>End</code>.</li>
-            <li><strong>Execute.</strong> Call the batch function's <code>execute(input_bytes, &amp;params)</code> — the standard synchronous batch path.</li>
-            <li><strong>Re-chunk.</strong> Pass the result through <code>batch_to_stream(result, chunk_size)</code> to slice it back into 64 KB chunks for downstream consumers.</li>
+            <li><strong>Collect.</strong> For each input, call <code>collect_stream(rx)</code> to gather all chunks into a single <code>Bytes</code> value. This drains the upstream receiver until it sees <code>StreamChunk::End</code>, accumulating all <code>Data</code> chunks into a <code>Vec&lt;Bytes&gt;</code> and then coalescing them into a contiguous <code>Bytes</code>. If the upstream sends <code>StreamChunk::Error</code>, the error propagates immediately — the batch function never executes. If the channel closes without an <code>End</code> marker (sender dropped), <code>collect_stream</code> returns <code>DerivaError::ComputeFailed("stream closed without End marker")</code>. As an optimization, if only a single <code>Data</code> chunk was received (common for small inputs), <code>collect_stream</code> returns it directly without copying — avoiding an unnecessary allocation.</li>
+            <li><strong>Execute.</strong> Call the batch function's <code>execute(input_bytes, &amp;params)</code> — the standard synchronous batch path. This is the same code path that the non-streaming <code>Executor</code> uses, so batch functions require zero modification to work inside a streaming pipeline. The function receives a <code>Vec&lt;Bytes&gt;</code> (one entry per input) and returns <code>Result&lt;Bytes, ComputeError&gt;</code>. Any <code>ComputeError</code> is mapped to <code>DerivaError::ComputeFailed</code> and propagated.</li>
+            <li><strong>Re-chunk.</strong> Pass the result through <code>batch_to_stream(result, chunk_size)</code> to slice it back into chunks for downstream consumers. This function delegates to <code>value_to_stream</code>, which spawns a Tokio task that iterates over the <code>Bytes</code> in <code>chunk_size</code> increments using <code>Bytes::slice(offset..end)</code> — a zero-copy operation since <code>Bytes</code> is reference-counted. Each slice is sent as <code>StreamChunk::Data</code>, followed by <code>StreamChunk::End</code>. If the downstream receiver is dropped (cancellation), the spawned task detects the send failure and exits cleanly.</li>
         </ol>
 
         <div class="code-block">
             <pre>
 <span class="rust-type">PipelineNode</span>::BatchStage { function, params, input_indices, .. } =&gt; {
-    <span class="rust-keyword">let mut</span> input_bytes = <span class="rust-type">Vec</span>::new();
+    <span class="rust-keyword">let mut</span> input_bytes = <span class="rust-type">Vec</span>::<span class="rust-function">with_capacity</span>(input_indices.<span class="rust-function">len</span>());
     <span class="rust-keyword">for</span> &amp;i <span class="rust-keyword">in</span> &amp;input_indices {
         <span class="rust-keyword">let</span> rx = outputs[i].<span class="rust-function">take</span>().expect(<span class="rust-string">"input already consumed"</span>);
         <span class="rust-keyword">let</span> bytes = <span class="rust-function">collect_stream</span>(rx).<span class="rust-keyword">await</span>?;
         input_bytes.<span class="rust-function">push</span>(bytes);
     }
-    <span class="rust-keyword">let</span> result = function.<span class="rust-function">execute</span>(input_bytes, &amp;params)?;
-    <span class="rust-keyword">let</span> rx = <span class="rust-function">batch_to_stream</span>(result, config.chunk_size);
+    <span class="rust-keyword">let</span> result = function.<span class="rust-function">execute</span>(input_bytes, &amp;params)
+        .<span class="rust-function">map_err</span>(|e| <span class="rust-type">DerivaError</span>::<span class="rust-function">ComputeFailed</span>(e.<span class="rust-function">to_string</span>()))?;
+    <span class="rust-keyword">let</span> rx = <span class="rust-function">batch_to_stream</span>(result, self.config.chunk_size);
     outputs.<span class="rust-function">push</span>(<span class="rust-type">Some</span>(rx));
 }</pre>
         </div>
 
+        <p>
+            The three-step pattern — collect, execute, re-chunk — is the minimal bridge between the two execution models. It preserves the <code>StreamChunk</code> protocol invariants from <a href="#stream-chunk-container">§3.2</a>: the output always follows the <code>Data* · End</code> grammar, errors propagate correctly, and the downstream receiver is indistinguishable from one produced by a native streaming stage. The cost is that the collect step breaks the bounded-memory property: the batch stage must hold the entire input in memory simultaneously. For a 512 MB input with 64 KB chunks, this means the batch stage allocates ~512 MB during collection, compared to ~512 KB (8 chunks × 64 KB) for a streaming stage with the default channel capacity of 8.
+        </p>
+
         <h3>5.3 Implications</h3>
 
         <p>
-            Click the diagram below to toggle between the streaming-native and auto-wrapped execution paths.
+            The diagram below compares the streaming-native and auto-wrapped execution paths side by side. The streaming path processes chunks incrementally with bounded memory and immediate first-byte latency. The auto-wrapped path introduces three intermediate steps — collect, batch execute, re-chunk — each with distinct performance characteristics. Click the diagram to highlight each path.
         </p>
 
         <div class="svg-container" style="margin: 1.5rem auto; text-align: center;">
@@ -152,29 +169,34 @@
         </div>
 
         <p>
-            The auto-wrap mechanism has three costs:
+            The auto-wrap mechanism has three costs, each a direct consequence of breaking the streaming invariant that data flows through the pipeline without full materialization:
         </p>
 
         <ul>
-            <li><strong>Memory.</strong> <code>collect_stream</code> buffers the entire input in memory. For a 100 MB input, the batch stage holds 100 MB while executing — compared to 512 KB for a streaming stage.</li>
-            <li><strong>Latency.</strong> No output is produced until the batch function completes. Downstream stages stall, and the client sees no data until the batch stage finishes and <code>batch_to_stream</code> begins emitting chunks.</li>
-            <li><strong>Cancellation granularity.</strong> A streaming function can be cancelled mid-chunk. A batch function either runs to completion or doesn't run at all — there is no partial cancellation once <code>execute()</code> begins.</li>
+            <li><strong>Memory.</strong> <code>collect_stream</code> buffers the entire input in memory. For a 100 MB input, the batch stage holds 100 MB while executing — compared to ~512 KB for a streaming stage with the default channel capacity of 8 (see <a href="#evaluation-container">§8.7</a>). In a pipeline with multiple batch stages, the memory cost compounds: each batch stage independently buffers its full input. A 5-stage pipeline where 3 stages are auto-wrapped could hold 3× the input size simultaneously. The <code>memory_budget</code> field in <code>PipelineConfig</code> exists to cap this, but is not yet enforced (see future improvements §4).</li>
+            <li><strong>Latency.</strong> No output is produced until the batch function completes. Downstream stages stall, and the client sees no data until the batch stage finishes and <code>batch_to_stream</code> begins emitting chunks. For a streaming-native stage, time-to-first-byte (TTFB) is approximately the time to process one chunk (~microseconds for simple transforms). For an auto-wrapped stage, TTFB equals the full collection time plus the batch execution time. On a 512 MB input, the batch vs streaming benchmarks in <a href="#evaluation-container">§8</a> show this difference is 744 ms (batch) vs 564 ms (streaming) — but the TTFB difference is far larger: the streaming path emits its first chunk in under 1 ms, while the batch path emits nothing for the full 744 ms.</li>
+            <li><strong>Cancellation granularity.</strong> A streaming function can be cancelled mid-chunk: dropping the output receiver triggers backward propagation through the channel chain (see <a href="#stream-chunk-container">§3.5</a>), and each upstream stage detects the closed channel on its next <code>send()</code>. A batch function either runs to completion or doesn't run at all — there is no partial cancellation once <code>execute()</code> begins. If a downstream consumer decides it only needs the first 1 MB of a 512 MB result, the streaming path stops after ~16 chunks; the batch path computes the entire 512 MB result, then the re-chunking task detects the dropped receiver after sending the first 16 chunks. The wasted computation is proportional to the input size.</li>
         </ul>
 
         <h3>5.4 When Auto-Wrapping Is Acceptable</h3>
 
         <p>
-            Despite these costs, auto-wrapping is the right default for several cases:
+            Despite these costs, auto-wrapping is the right default for several cases. The key insight is that not all functions <em>can</em> benefit from streaming — some are inherently batch by nature, and wrapping them is not a compromise but the correct execution strategy:
         </p>
 
         <ul>
-            <li><strong>Small inputs.</strong> For values under 1 MB, the memory and latency overhead is negligible.</li>
-            <li><strong>Inherently batch operations.</strong> Some computations (sorting, global deduplication) require seeing all input before producing any output. A streaming wrapper would just buffer internally anyway.</li>
-            <li><strong>Third-party functions.</strong> User-registered compute functions that predate the streaming API work without modification. The registry resolution ensures backward compatibility.</li>
+            <li><strong>Small inputs.</strong> For values under ~3 MB, the batch path is actually <em>faster</em> than streaming. The batch vs streaming sweep in <a href="#evaluation-container">§8</a> shows batch winning by 9.3× at 1 MB and 5.7× at 2 MB, because streaming's fixed overhead (channel creation, Tokio task spawning, chunk framing) dominates when there are only a few chunks to process. Auto-wrapping a batch function for small inputs is not just acceptable — it is optimal. The future size-aware execution mode (§1 in future improvements) will formalize this by automatically selecting batch for inputs below a configurable threshold.</li>
+            <li><strong>Inherently batch operations.</strong> Some computations require seeing all input before producing any output. Sorting requires the complete dataset. Global deduplication needs to compare every element against every other. JSON schema validation must parse the entire document tree. PDF page extraction requires random access to the page tree via the cross-reference table. For these functions, a streaming wrapper would just call <code>collect_stream</code> internally anyway — the auto-wrap mechanism does exactly the same thing, but without requiring the function author to know about the streaming API. The 283 format-aware functions catalogued for future development include 148 batch-only functions (52%) that fall into this category.</li>
+            <li><strong>Third-party and user-registered functions.</strong> The <code>ComputeFunction</code> trait predates the streaming API. Any function registered before the streaming system was introduced — or any function written by users who don't want to learn the streaming protocol — works without modification. The registry resolution ensures backward compatibility: existing <code>register(Arc::new(MyCustomFn)))</code> calls continue to work, and the function participates in streaming pipelines via auto-wrapping. This is critical for adoption — requiring all function authors to implement <code>StreamingComputeFunction</code> would create a barrier that discourages extending the function library.</li>
+            <li><strong>Accumulator-like functions without streaming implementations.</strong> The 3 built-in accumulators (<code>StreamingSha256</code>, <code>StreamingByteCount</code>, <code>StreamingChecksum</code>) have native streaming implementations because they are high-value and straightforward. But a batch-only <code>Sha512Fn</code> or <code>Blake3Fn</code> would work perfectly well through auto-wrapping — the collect step gathers the input, the hash is computed in one call, and the 32–64 byte result is re-chunked (trivially, as a single chunk). The performance difference between streaming and auto-wrapped hashing is negligible for inputs under ~100 MB because the hash computation itself dominates the cost.</li>
         </ul>
 
         <p>
-            The key design principle: <strong>every function participates in the streaming pipeline</strong>, whether natively or through auto-wrapping. The pipeline builder never needs to distinguish between the two — it always gets a <code>Receiver&lt;StreamChunk&gt;</code> from each stage.
+            The key design principle: <strong>every function participates in the streaming pipeline</strong>, whether natively or through auto-wrapping. The pipeline builder never needs to distinguish between the two — it always gets a <code>Receiver&lt;StreamChunk&gt;</code> from each stage. This uniformity is what makes the pipeline composable: any function can be placed at any position in the DAG, and the type system guarantees that the connections work. A pipeline of <code>[StreamingUppercase → BatchSha256 → StreamingBase64Encode]</code> is perfectly valid — the middle stage auto-wraps, and the downstream base64 encoder sees the same <code>StreamChunk</code> protocol it would see from any streaming stage.
+        </p>
+
+        <p>
+            The auto-wrapping mechanism also provides a natural migration path for the function library. New functions can be introduced as batch-only implementations first — simpler to write, simpler to test — and later upgraded to streaming implementations when the performance benefit justifies the additional complexity. The registry resolution ensures that the upgrade is transparent: the moment a streaming variant is registered, it takes priority over the batch variant, and all pipelines that use that function automatically benefit without any configuration change.
         </p>
 
     </section>

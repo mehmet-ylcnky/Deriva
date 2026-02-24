@@ -268,7 +268,208 @@ if use_streaming {
 
 ---
 
-## 7. Channel Capacity Sweep Study — ✅ COMPLETED
+## 7. Expanded Batch Function Library
+
+**Current state:** 4 batch functions — `IdentityFn`, `ConcatFn`, `UppercaseFn`, `RepeatFn`. These cover only the minimum needed for initial CAS pipeline testing. The batch path (`ComputeFunction` trait) takes `Vec<Bytes>` inputs and returns a single `Bytes`, making it simpler than the streaming trait but limited to in-memory operation.
+
+**Goal:** Achieve parity with the streaming library where applicable, and add batch-only functions that benefit from having the full input available at once (e.g., sorting, global search-replace, whole-file compression). Each function implements `ComputeFunction` with `id()`, `execute()`, and `estimated_cost()`.
+
+**Design note:** Not every streaming function needs a batch counterpart. Accumulators (SHA-256, byte count, checksum) are trivially batch — they just operate on the full `Bytes` at once. Combiners map directly to multi-input `execute()`. Flow control functions (rate limit, timeout, debounce) are streaming-only concepts with no batch equivalent.
+
+### Existing 4 Functions (for reference)
+
+| # | Function | FunctionId | Inputs | Description |
+|---|----------|-----------|--------|-------------|
+| 1 | `IdentityFn` | `identity@1.0.0` | 1 | Pass-through, returns input unchanged |
+| 2 | `ConcatFn` | `concat@1.0.0` | N | Concatenate all inputs sequentially |
+| 3 | `UppercaseFn` | `uppercase@1.0.0` | 1 | UTF-8 uppercase conversion |
+| 4 | `RepeatFn` | `repeat@1.0.0` | 1 | Repeat input N times. Params: `count` |
+
+### Category 1: Transforms (single input → single output)
+
+| # | Function | FunctionId | Complexity | Description |
+|---|----------|-----------|------------|-------------|
+| 5 | `LowercaseFn` | `lowercase@1.0.0` | Low | UTF-8 lowercase conversion |
+| 6 | `ReverseFn` | `reverse@1.0.0` | Low | Reverse all bytes |
+| 7 | `Base64EncodeFn` | `base64_encode@1.0.0` | Low | Base64-encode entire input |
+| 8 | `Base64DecodeFn` | `base64_decode@1.0.0` | Low | Base64-decode entire input |
+| 9 | `HexEncodeFn` | `hex_encode@1.0.0` | Low | Hex-encode entire input |
+| 10 | `HexDecodeFn` | `hex_decode@1.0.0` | Low | Hex-decode entire input |
+| 11 | `Base32EncodeFn` | `base32_encode@1.0.0` | Low | Base32-encode entire input |
+| 12 | `Base32DecodeFn` | `base32_decode@1.0.0` | Low | Base32-decode entire input |
+| 13 | `XorFn` | `xor@1.0.0` | Low | XOR each byte with key. Params: `key` |
+| 14 | `BitwiseAndFn` | `bitwise_and@1.0.0` | Low | AND each byte with mask. Params: `mask` |
+| 15 | `BitwiseOrFn` | `bitwise_or@1.0.0` | Low | OR each byte with mask. Params: `mask` |
+| 16 | `BitwiseNotFn` | `bitwise_not@1.0.0` | Low | Complement each byte |
+| 17 | `ByteSwapFn` | `byte_swap@1.0.0` | Low | Swap byte order within words. Params: `word_size` (2/4/8) |
+| 18 | `TrimFn` | `trim@1.0.0` | Low | Strip leading/trailing whitespace |
+| 19 | `PadFn` | `pad@1.0.0` | Low | Pad to fixed size. Params: `block_size`, `padding_byte` |
+| 20 | `LineEndingFn` | `line_ending@1.0.0` | Low | Convert `\r\n` ↔ `\n`. Params: `target` (`lf`/`crlf`) |
+
+### Category 2: Compression (single input → single output)
+
+| # | Function | FunctionId | Complexity | Description |
+|---|----------|-----------|------------|-------------|
+| 21 | `CompressFn` | `compress@1.0.0` | Low | Zlib compress entire input (whole-stream, better ratio than per-chunk streaming) |
+| 22 | `DecompressFn` | `decompress@1.0.0` | Low | Zlib decompress entire input |
+| 23 | `ZstdCompressFn` | `zstd_compress@1.0.0` | Medium | Zstandard compress. Params: `level` (1–22) |
+| 24 | `ZstdDecompressFn` | `zstd_decompress@1.0.0` | Medium | Zstandard decompress |
+| 25 | `Lz4CompressFn` | `lz4_compress@1.0.0` | Low | LZ4 compress — fastest |
+| 26 | `Lz4DecompressFn` | `lz4_decompress@1.0.0` | Low | LZ4 decompress |
+| 27 | `SnappyCompressFn` | `snappy_compress@1.0.0` | Low | Snappy compress |
+| 28 | `SnappyDecompressFn` | `snappy_decompress@1.0.0` | Low | Snappy decompress |
+| 29 | `BrotliCompressFn` | `brotli_compress@1.0.0` | Medium | Brotli compress. Params: `quality` (0–11) |
+| 30 | `BrotliDecompressFn` | `brotli_decompress@1.0.0` | Medium | Brotli decompress |
+
+### Category 3: Cryptography & Hashing (single input → single output)
+
+| # | Function | FunctionId | Complexity | Description |
+|---|----------|-----------|------------|-------------|
+| 31 | `Sha256Fn` | `sha256@1.0.0` | Low | SHA-256 hash. Returns 32-byte digest |
+| 32 | `Sha512Fn` | `sha512@1.0.0` | Low | SHA-512 hash. Returns 64-byte digest |
+| 33 | `Md5Fn` | `md5@1.0.0` | Low | MD5 hash (legacy/S3 ETag compat). Returns 16-byte digest |
+| 34 | `Blake3Fn` | `blake3@1.0.0` | Low | BLAKE3 hash — fastest. Returns 32-byte digest |
+| 35 | `HmacSha256Fn` | `hmac_sha256@1.0.0` | Low | HMAC-SHA256 keyed hash. Params: `key`. Returns 32-byte MAC |
+| 36 | `Crc32Fn` | `crc32@1.0.0` | Low | CRC32 checksum. Returns 4 bytes |
+| 37 | `EncryptFn` | `encrypt@1.0.0` | Medium | AES-256-CTR encrypt. Params: `key`, `nonce` |
+| 38 | `DecryptFn` | `decrypt@1.0.0` | Medium | AES-256-CTR decrypt. Params: `key`, `nonce` |
+| 39 | `AeadEncryptFn` | `aead_encrypt@1.0.0` | Medium | AES-256-GCM authenticated encrypt. Appends 16-byte tag |
+| 40 | `AeadDecryptFn` | `aead_decrypt@1.0.0` | Medium | AES-256-GCM authenticated decrypt. Verifies tag |
+| 41 | `RedactFn` | `redact@1.0.0` | Medium | Regex-based PII redaction. Params: `patterns[]` |
+
+### Category 4: Accumulators / Analytics (single input → small output)
+
+| # | Function | FunctionId | Complexity | Description |
+|---|----------|-----------|------------|-------------|
+| 42 | `ByteCountFn` | `byte_count@1.0.0` | Low | Return input length as 8-byte big-endian u64 |
+| 43 | `LineCountFn` | `line_count@1.0.0` | Low | Count `\n` bytes, return as u64 |
+| 44 | `WordCountFn` | `word_count@1.0.0` | Low | Count whitespace-delimited words, return as u64 |
+| 45 | `HistogramFn` | `histogram@1.0.0` | Low | 256-bucket byte frequency histogram. Returns 2KB |
+| 46 | `EntropyFn` | `entropy@1.0.0` | Low | Shannon entropy of byte distribution. Returns f64 (8 bytes) |
+| 47 | `MinMaxFn` | `min_max@1.0.0` | Low | Min and max byte values. Returns `[min, max]` (2 bytes) |
+| 48 | `SumFn` | `sum@1.0.0` | Low | Parse newline-delimited decimals, return sum as string |
+| 49 | `AverageFn` | `average@1.0.0` | Low | Parse newline-delimited decimals, return average as string |
+
+### Category 5: Combiners (multi-input → single output)
+
+| # | Function | FunctionId | Complexity | Description |
+|---|----------|-----------|------------|-------------|
+| 50 | `InterleaveFn` | `interleave@1.0.0` | Medium | Round-robin bytes from each input in chunk-sized blocks. Params: `block_size` |
+| 51 | `ZipConcatFn` | `zip_concat@1.0.0` | Low | Pairwise concatenation of 2 inputs in blocks |
+| 52 | `DiffFn` | `diff@1.0.0` | High | Binary diff between 2 inputs. Returns edit script |
+| 53 | `PatchFn` | `patch@1.0.0` | High | Apply binary patch (input 0 = base, input 1 = patch) |
+| 54 | `MergeSortedFn` | `merge_sorted@1.0.0` | Medium | Merge N sorted line-delimited inputs into one sorted output |
+| 55 | `SelectFn` | `select@1.0.0` | Low | Return input at index N. Params: `index`. For conditional pipelines |
+
+### Category 6: Slicing & Restructuring (single input → single output)
+
+| # | Function | FunctionId | Complexity | Description |
+|---|----------|-----------|------------|-------------|
+| 56 | `TakeFn` | `take@1.0.0` | Low | Return first N bytes. Params: `bytes` |
+| 57 | `SkipFn` | `skip@1.0.0` | Low | Return all bytes after offset N. Params: `bytes` |
+| 58 | `SliceFn` | `slice@1.0.0` | Low | Return bytes [offset..offset+length]. Params: `offset`, `length` |
+| 59 | `SortFn` | `sort@1.0.0` | Medium | Sort lines lexicographically |
+| 60 | `UniqueFn` | `unique@1.0.0` | Medium | Deduplicate sorted lines (like `uniq`) |
+| 61 | `SortUniqueFn` | `sort_unique@1.0.0` | Medium | Sort + deduplicate in one pass |
+| 62 | `ShuffleFn` | `shuffle@1.0.0` | Medium | Randomly reorder lines. Params: `seed` (deterministic) |
+| 63 | `HeadFn` | `head@1.0.0` | Low | Return first N lines. Params: `lines` |
+| 64 | `TailFn` | `tail@1.0.0` | Low | Return last N lines. Params: `lines` |
+| 65 | `SampleFn` | `sample@1.0.0` | Medium | Reservoir sample N lines. Params: `lines`, `seed` |
+
+### Category 7: Text Processing (single input → single output)
+
+| # | Function | FunctionId | Complexity | Description |
+|---|----------|-----------|------------|-------------|
+| 66 | `ReplaceFn` | `replace@1.0.0` | Medium | Byte pattern find-and-replace. Params: `find`, `replace` |
+| 67 | `RegexReplaceFn` | `regex_replace@1.0.0` | Medium | Regex find-and-replace. Params: `pattern`, `replacement` |
+| 68 | `GrepFn` | `grep@1.0.0` | Medium | Keep lines matching regex. Params: `pattern` |
+| 69 | `GrepInvertFn` | `grep_invert@1.0.0` | Medium | Drop lines matching regex. Params: `pattern` |
+| 70 | `PrefixFn` | `prefix@1.0.0` | Low | Prepend bytes. Params: `prefix` |
+| 71 | `SuffixFn` | `suffix@1.0.0` | Low | Append bytes. Params: `suffix` |
+| 72 | `LinePrefixFn` | `line_prefix@1.0.0` | Medium | Prepend string to each line. Params: `prefix` |
+| 73 | `LineNumberFn` | `line_number@1.0.0` | Medium | Prepend line numbers (`1: `, `2: `, ...) |
+| 74 | `TruncateLinesFn` | `truncate_lines@1.0.0` | Low | Truncate each line to max N bytes. Params: `max_line_bytes` |
+| 75 | `CharsetConvertFn` | `charset_convert@1.0.0` | Medium | Convert encoding (e.g., Latin-1 → UTF-8). Params: `from`, `to` |
+
+### Category 8: Validation & Integrity (single input → input or error)
+
+| # | Function | FunctionId | Complexity | Description |
+|---|----------|-----------|------------|-------------|
+| 76 | `Utf8ValidateFn` | `utf8_validate@1.0.0` | Low | Return input unchanged if valid UTF-8, error otherwise |
+| 77 | `JsonValidateFn` | `json_validate@1.0.0` | Medium | Return input unchanged if valid JSON, error otherwise |
+| 78 | `SchemaValidateFn` | `schema_validate@1.0.0` | High | Validate JSON against JSON Schema. Params: `schema` |
+| 79 | `MagicBytesFn` | `magic_bytes@1.0.0` | Low | Verify input starts with expected bytes. Params: `expected` |
+| 80 | `SizeLimitFn` | `size_limit@1.0.0` | Low | Error if input exceeds limit. Params: `max_bytes` |
+| 81 | `NonEmptyFn` | `non_empty@1.0.0` | Low | Error if input is 0 bytes |
+| 82 | `Sha256VerifyFn` | `sha256_verify@1.0.0` | Low | Compute SHA-256, error if mismatch. Params: `expected_hash` |
+| 83 | `Crc32VerifyFn` | `crc32_verify@1.0.0` | Low | Compute CRC32, error if mismatch. Params: `expected_crc32` |
+
+### Category 9: Format Conversion (single input → single output)
+
+| # | Function | FunctionId | Complexity | Description |
+|---|----------|-----------|------------|-------------|
+| 84 | `JsonPrettyPrintFn` | `json_pretty@1.0.0` | Medium | Parse JSON, re-emit pretty-printed |
+| 85 | `JsonMinifyFn` | `json_minify@1.0.0` | Medium | Parse JSON, re-emit compact |
+| 86 | `CsvToJsonFn` | `csv_to_json@1.0.0` | High | Parse CSV, emit JSON array of objects |
+| 87 | `JsonToCsvFn` | `json_to_csv@1.0.0` | High | Parse JSON array of objects, emit CSV |
+| 88 | `JsonLinesFn` | `json_lines@1.0.0` | Low | Ensure each line is newline-terminated (NDJSON formatting) |
+| 89 | `YamlToJsonFn` | `yaml_to_json@1.0.0` | Medium | Parse YAML, emit JSON |
+| 90 | `JsonToYamlFn` | `json_to_yaml@1.0.0` | Medium | Parse JSON, emit YAML |
+| 91 | `TomlToJsonFn` | `toml_to_json@1.0.0` | Medium | Parse TOML, emit JSON |
+
+### Category 10: CAS-Specific Operations
+
+| # | Function | FunctionId | Complexity | Description |
+|---|----------|-----------|------------|-------------|
+| 92 | `CAddrComputeFn` | `caddr_compute@1.0.0` | Low | Compute CAddr (content-address) of input. Returns the address bytes |
+| 93 | `CAddrVerifyFn` | `caddr_verify@1.0.0` | Medium | Compute CAddr, error if mismatch. Params: `expected_caddr` |
+| 94 | `CAddrEmbedFn` | `caddr_embed@1.0.0` | Medium | Append CAddr as trailing metadata to the output |
+| 95 | `MerkleRootFn` | `merkle_root@1.0.0` | High | Build Merkle tree over fixed-size blocks, return 32-byte root hash. Params: `block_size` |
+| 96 | `ContentTypeFn` | `content_type@1.0.0` | Medium | Detect MIME type from magic bytes, prepend as metadata header |
+| 97 | `ChunkHashFn` | `chunk_hash@1.0.0` | Medium | Split input into fixed blocks, append SHA-256 hash per block. Params: `block_size` |
+| 98 | `DedupAnalyzeFn` | `dedup_analyze@1.0.0` | High | Compute rolling hash fingerprints for content-defined chunking analysis. Params: `window_size` |
+
+### Batch-Only Functions (no streaming equivalent)
+
+These functions benefit from having the full input in memory — they cannot be meaningfully streamed.
+
+| # | Function | FunctionId | Complexity | Description |
+|---|----------|-----------|------------|-------------|
+| 99 | `GlobalSortFn` | `global_sort@1.0.0` | Medium | Sort all bytes (not lines). Useful for binary deduplication analysis |
+| 100 | `GlobalReverseFn` | `global_reverse@1.0.0` | Low | Reverse entire byte sequence (streaming `Reverse` only reverses per-chunk) |
+
+### Summary
+
+| Status | Count | Categories |
+|--------|-------|------------|
+| **Existing (implemented)** | 4 | Identity, Concat, Uppercase, Repeat |
+| **New proposed** | 96 | See above: transforms (16), compression (10), crypto (11), accumulators (8), combiners (6), slicing (10), text (10), validation (8), format conversion (8), CAS-specific (7), batch-only (2) |
+| **Total library target** | **100** | Full coverage of common batch data operations |
+
+### Implementation Priority
+
+1. **High priority — streaming parity** (low complexity, direct counterparts to existing streaming functions): `LowercaseFn`, `ReverseFn`, `Base64EncodeFn/DecodeFn`, `HexEncodeFn/DecodeFn`, `XorFn`, `CompressFn/DecompressFn`, `Sha256Fn`, `ByteCountFn`, `Crc32Fn`, `TakeFn`, `SkipFn`
+2. **Medium priority — common operations**: `ZstdCompressFn/DecompressFn`, `Blake3Fn`, `GrepFn`, `ReplaceFn`, `SortFn`, `UniqueFn`, `JsonValidateFn`, `JsonPrettyPrintFn/MinifyFn`, `CAddrComputeFn/VerifyFn`
+3. **Low priority — niche or high complexity**: `DiffFn/PatchFn`, `SchemaValidateFn`, `CsvToJsonFn/JsonToCsvFn`, `MerkleRootFn`, `DedupAnalyzeFn`, `ShuffleFn`
+
+### Batch vs Streaming Parity Matrix
+
+Not all functions need both implementations. This matrix clarifies which functions are batch-only, streaming-only, or both:
+
+| Pattern | Batch | Streaming | Rationale |
+|---------|-------|-----------|-----------|
+| Transforms (map) | ✅ | ✅ | Both: batch is simpler, streaming handles large inputs |
+| Compression | ✅ | ✅ | Both: batch gets better ratios (whole-input dictionary), streaming bounds memory |
+| Hashing/Accumulators | ✅ | ✅ | Both: batch is trivial, streaming avoids buffering |
+| Combiners | ✅ | ✅ | Both: batch uses `Vec<Bytes>` inputs, streaming uses multi-receiver |
+| Flow control (rate limit, timeout) | ❌ | ✅ | Streaming-only: no concept of "rate" in batch |
+| Global sort/reverse | ✅ | ❌ | Batch-only: requires full input to produce correct output |
+| Format conversion (JSON↔CSV) | ✅ | ⚠️ | Batch preferred: parsing requires full structure; streaming version buffers anyway |
+| Validation | ✅ | ⚠️ | Batch preferred: most validators need full input; streaming can do prefix checks |
+
+---
+
+## 8. Channel Capacity Sweep Study — ✅ COMPLETED
 
 > **Status:** Implemented and benchmarked. Results published in Paper 2b §8.7. The §3.4 backpressure section now references empirical data instead of informal claims.
 

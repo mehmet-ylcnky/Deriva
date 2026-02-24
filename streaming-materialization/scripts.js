@@ -302,8 +302,26 @@ sections.forEach(section => {
             container.innerHTML = doc.body.innerHTML;
             attachCodeBlockButtons(container);
             initSvgHandlers(container);
+            container.querySelectorAll('a[href^="#"]').forEach(a => {
+                a.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    const t = document.querySelector(this.getAttribute('href'));
+                    if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                });
+            });
         })
         .catch(() => {
             container.innerHTML = '<p style="color:#e74c3c;">Failed to load section.</p>';
         });
+});
+
+// Smooth scrolling for anchor links
+document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+    anchor.addEventListener('click', function(e) {
+        e.preventDefault();
+        const target = document.querySelector(this.getAttribute('href'));
+        if (target) {
+            target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+    });
 });

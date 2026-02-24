@@ -315,5 +315,116 @@
         <p>Breakeven at ~3 MB for a 5-stage pipeline. Streaming wins on wall-clock above that, and always wins on time-to-first-byte.</p>
     </div>
 
+        <h3>8.7 Channel Capacity Sweep</h3>
+
+        <p>
+            <a href="#stream-chunk-container">§3.4</a> claims that the default channel capacity of 8 balances throughput against memory usage. To validate this empirically, we swept 7 capacity values (1, 2, 4, 8, 16, 32, 64) across 6 input sizes (1 MB – 512 MB) using a 5-stage streaming identity pipeline. Each configuration was measured with Criterion.rs (median of 10–100 iterations depending on size).
+        </p>
+
+    <div class="bench-chart">
+        <h4>Table 2: Channel Capacity × Input Size — Latency (ms, median)</h4>
+        <table>
+            <tr>
+                <th>Capacity</th>
+                <th>1 MB</th>
+                <th>4 MB</th>
+                <th>16 MB</th>
+                <th>64 MB</th>
+                <th>256 MB</th>
+                <th>512 MB</th>
+            </tr>
+            <tr>
+                <td class="num">1</td>
+                <td class="num">2.72</td>
+                <td class="num">7.01</td>
+                <td class="num">22.7</td>
+                <td class="num">130.3</td>
+                <td class="num">501.1</td>
+                <td class="num">1,128</td>
+            </tr>
+            <tr>
+                <td class="num">2</td>
+                <td class="num">2.20</td>
+                <td class="num">4.74</td>
+                <td class="num">15.9</td>
+                <td class="num">94.9</td>
+                <td class="num">366.2</td>
+                <td class="num">760.1</td>
+            </tr>
+            <tr>
+                <td class="num">4</td>
+                <td class="num">1.88</td>
+                <td class="num">3.54</td>
+                <td class="num">10.4</td>
+                <td class="num">72.9</td>
+                <td class="num">271.7</td>
+                <td class="num">503.6</td>
+            </tr>
+            <tr style="background:#232840;">
+                <td class="num"><strong>8 (default)</strong></td>
+                <td class="num"><strong>1.75</strong></td>
+                <td class="num"><strong>2.72</strong></td>
+                <td class="num"><strong>7.75</strong></td>
+                <td class="num"><strong>50.8</strong></td>
+                <td class="num"><strong>185.2</strong></td>
+                <td class="num"><strong>368.7</strong></td>
+            </tr>
+            <tr>
+                <td class="num">16</td>
+                <td class="num">1.66</td>
+                <td class="num">2.29</td>
+                <td class="num">7.20</td>
+                <td class="num">54.1</td>
+                <td class="num">159.0</td>
+                <td class="num">289.8</td>
+            </tr>
+            <tr>
+                <td class="num">32</td>
+                <td class="num">1.67</td>
+                <td class="num">2.25</td>
+                <td class="num">5.32</td>
+                <td class="num">48.3</td>
+                <td class="num">154.1</td>
+                <td class="num">259.4</td>
+            </tr>
+            <tr>
+                <td class="num">64</td>
+                <td class="num">1.66</td>
+                <td class="num">2.82</td>
+                <td class="num">4.63</td>
+                <td class="num">43.3</td>
+                <td class="num">132.9</td>
+                <td class="num">245.3</td>
+            </tr>
+        </table>
+    </div>
+
+        <p>
+            <strong>Key findings:</strong>
+        </p>
+
+        <ul>
+            <li><strong>Capacity 1 is consistently the worst</strong> — 1.6× to 3.1× slower than capacity 8 across all sizes. With only one slot, the producer suspends after every chunk, causing a task-switch round-trip (~100 ns) per 64 KB of data. At 512 MB (8,192 chunks), that adds up to ~800 µs of pure scheduling overhead on top of the data movement cost.</li>
+            <li><strong>Capacity 1→8 shows steep improvement</strong> — each doubling roughly halves the overhead. Going from 1→2 cuts latency by 19–33%; from 4→8 cuts another 7–30%. This is the region where additional buffering absorbs producer/consumer speed mismatches.</li>
+            <li><strong>Capacity 8→16 shows diminishing returns</strong> — improvement drops to 5–14% for most sizes. The exception is 512 MB, where 16 is 21% faster than 8, suggesting that very large inputs benefit from slightly deeper buffers.</li>
+            <li><strong>Capacity 32→64 is nearly flat</strong> — within noise for small inputs (1–4 MB). For large inputs (256–512 MB), capacity 64 is only 5–14% faster than 32. The marginal gain no longer justifies the 8× memory increase over capacity 8.</li>
+            <li><strong>Capacity 4 MB anomaly at cap=64</strong> — at 4 MB, capacity 64 (2.82 ms) is slightly slower than capacity 32 (2.25 ms). With only 64 chunks total and capacity 64, the entire input fits in the channel buffer, eliminating pipelining — the producer fills the buffer before the consumer starts, effectively reverting to batch behavior with channel overhead.</li>
+        </ul>
+
+        <p>
+            <strong>Memory tradeoff:</strong> Each capacity unit buffers one 64 KB chunk per pipeline edge. A 5-stage pipeline has 5 edges, so total buffer memory is <code>capacity × 5 × 64 KB</code>:
+        </p>
+
+        <ul>
+            <li>Capacity 1: 320 KB</li>
+            <li>Capacity 8 (default): 2.5 MB</li>
+            <li>Capacity 32: 10 MB</li>
+            <li>Capacity 64: 20 MB</li>
+        </ul>
+
+        <p>
+            <strong>Verdict:</strong> Capacity 8 sits at the knee of the curve — it captures 80–90% of the throughput gain available from buffering, while using only 2.5 MB per pipeline. Higher capacities offer marginal latency improvements at linear memory cost. For workloads dominated by inputs ≥256 MB, capacity 16 is a reasonable alternative (14–21% faster, 2× the memory). Capacity 32+ is not justified by the data.
+        </p>
+
     </section>
 </div>

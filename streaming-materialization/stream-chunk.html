@@ -3,17 +3,27 @@
         <h2>3. The StreamChunk Protocol</h2>
 
         <p>
-            Every streaming pipeline in Deriva communicates through a single three-variant enum. This section defines the protocol, its invariants, and the backpressure mechanism that keeps memory bounded.
+            Every streaming pipeline in Deriva communicates through a single three-variant enum: <code>StreamChunk</code>. This type is the wire format between every pair of stages — sources, compute functions, adapters, and sinks all speak the same protocol. The design is deliberately minimal: three variants cover the entire lifecycle of a stream, from the first data byte to successful completion or failure.
+        </p>
+
+        <p>
+            The protocol draws inspiration from two traditions. From message-passing systems (Erlang, Akka), it borrows the idea of typed messages over bounded channels. From byte-stream protocols (HTTP chunked transfer, gRPC streaming), it borrows the framing model where a stream is a sequence of data frames terminated by a sentinel. The result is a protocol simple enough to implement in a single <code>match</code> arm, yet expressive enough to support backpressure, cancellation, error propagation, and zero-copy forwarding.
         </p>
 
         <h3>3.1 The Enum</h3>
 
+        <p>
+            The entire streaming protocol is captured in a single Rust enum with three variants. There are no configuration structs, no trait hierarchies, no generics — just three cases that every stage must handle:
+        </p>
+
         <div class="code-block">
             <pre>
 <span class="rust-comment">/// A chunk in a streaming computation pipeline.</span>
+<span class="rust-comment">/// Every inter-stage channel carries values of this type.</span>
 #[derive(Debug, Clone)]
 <span class="rust-keyword">pub enum</span> <span class="rust-type">StreamChunk</span> {
     <span class="rust-comment">/// A data chunk — typically 64 KB of bytes.</span>
+    <span class="rust-comment">/// Size is advisory; consumers must not assume fixed sizes.</span>
     Data(<span class="rust-type">Bytes</span>),
     <span class="rust-comment">/// End of stream. Exactly one per stream. No chunks follow.</span>
     End,
@@ -26,28 +36,45 @@
             Three variants, three roles:
         </p>
         <ul>
-            <li><strong>Data(Bytes)</strong> — carries a payload. Size is advisory (default 64 KB via <code>DEFAULT_CHUNK_SIZE</code>), but functions may emit smaller or larger chunks. Consumers must not assume fixed sizes.</li>
-            <li><strong>End</strong> — signals successful completion. Exactly one <code>End</code> must terminate every successful stream. After <code>End</code>, no further chunks are sent.</li>
-            <li><strong>Error(DerivaError)</strong> — signals failure. Terminal like <code>End</code>. Downstream stages propagate the error and stop processing.</li>
+            <li><strong>Data(Bytes)</strong> — carries a payload. The <code>Bytes</code> type (from the <code>bytes</code> crate) is a reference-counted, cheaply cloneable byte buffer. Size is advisory: the default is 64 KB via <code>DEFAULT_CHUNK_SIZE</code>, but functions may emit smaller chunks (e.g., a filter that drops most input) or larger ones (e.g., a compression stage that buffers internally). Consumers must not assume fixed sizes — they should process whatever arrives.</li>
+            <li><strong>End</strong> — signals successful completion. Exactly one <code>End</code> must terminate every successful stream. After <code>End</code>, no further chunks are sent. This is the sentinel that tells the consumer "you have all the data; finalize your output." For cache-after-collect stages, <code>End</code> triggers the hash computation and cache write.</li>
+            <li><strong>Error(DerivaError)</strong> — signals failure. Terminal like <code>End</code> — no further chunks follow. Downstream stages propagate the error and stop processing. The <code>DerivaError</code> carries context (source stage, error kind, message) so that the pipeline can report which stage failed and why.</li>
         </ul>
+
+        <p>
+            The choice of <code>Bytes</code> over <code>Vec&lt;u8&gt;</code> is deliberate. <code>Bytes</code> supports zero-copy slicing (<code>bytes.slice(start..end)</code> shares the underlying allocation) and cheap cloning (reference count increment, not memcpy). This matters for <code>tee_stream</code> (<a href="#stream-chunk-container">§3.6</a>), where each chunk is sent to two consumers — with <code>Bytes</code>, the clone is O(1) regardless of chunk size.
+        </p>
 
         <h3>3.2 Protocol Invariants</h3>
 
         <p>
-            Every stream — whether produced by a source, a compute function, or the <code>batch_to_stream</code> adapter — must satisfy:
+            Every stream — whether produced by a source, a compute function, or the <code>batch_to_stream</code> adapter — must satisfy three invariants. These are not enforced at the type level (Rust's type system cannot express "exactly one terminal variant"), but they are upheld by convention and tested in the benchmark suite.
         </p>
 
         <ol>
-            <li><strong>Termination.</strong> Every stream ends with exactly one <code>End</code> or one <code>Error</code>. Never both, never neither (unless the receiver is dropped, which is treated as cancellation).</li>
-            <li><strong>Ordering.</strong> Zero or more <code>Data</code> chunks precede the terminal. No <code>Data</code> follows <code>End</code> or <code>Error</code>.</li>
-            <li><strong>Non-empty data.</strong> <code>Data(Bytes)</code> chunks should contain at least one byte. Empty chunks are harmless but wasteful.</li>
+            <li><strong>Termination.</strong> Every stream ends with exactly one <code>End</code> or one <code>Error</code>. Never both, never neither (unless the receiver is dropped, which is treated as cancellation — see <a href="#stream-chunk-container">§3.5</a>). This invariant ensures that consumers always know when the stream is complete. Without it, a consumer would need a timeout to distinguish "slow producer" from "producer crashed."</li>
+            <li><strong>Ordering.</strong> Zero or more <code>Data</code> chunks precede the terminal. No <code>Data</code> follows <code>End</code> or <code>Error</code>. This means a consumer can stop reading as soon as it sees a terminal variant — there is no need to drain remaining chunks. The ordering invariant also simplifies the <code>collect_stream</code> helper: it appends <code>Data</code> payloads to a buffer and returns when it sees <code>End</code>.</li>
+            <li><strong>Non-empty data.</strong> <code>Data(Bytes)</code> chunks should contain at least one byte. Empty chunks are harmless (they are simply ignored by consumers) but wasteful — they consume a channel slot without carrying payload. The <code>batch_to_stream</code> helper enforces this by skipping zero-length slices at the end of input.</li>
         </ol>
+
+        <p>
+            Together, these invariants make the protocol a <em>regular language</em> over the alphabet {Data, End, Error}: the valid sequences are <code>Data* End</code> and <code>Data* Error</code>. Any other sequence (e.g., <code>End Data</code>, <code>Error End</code>, or an infinite stream of <code>Data</code> with no terminal) is a protocol violation.
+        </p>
 
         <h3>3.3 Chunk Lifecycle</h3>
 
         <p>
-            The interactive diagram below shows a chunk's journey from producer to consumer through a bounded channel. Click to advance through each phase.
+            A chunk's journey from producer to consumer passes through four distinct phases. The interactive diagram below visualizes this lifecycle using a bounded <code>tokio::mpsc</code> channel with 8 slots. Click the diagram to advance through each phase:
         </p>
+
+        <ul>
+            <li><strong>Phase 1 — Data flows:</strong> The producer emits <code>Data(Bytes)</code> chunks into the channel. Each chunk occupies one slot in the 8-slot buffer. The animated dot represents chunks flowing from left (producer) to right (consumer). As long as the channel has room, the producer sends without blocking and the consumer reads and processes each chunk incrementally — this is the steady-state of a healthy pipeline.</li>
+            <li><strong>Phase 2 — Backpressure:</strong> The channel fills to capacity (8/8 slots occupied, shown in orange). The producer's <code>send().await</code> suspends — the Tokio runtime parks the task until the consumer frees a slot by calling <code>recv().await</code>. No data is lost, no explicit backpressure signal is needed. The producer simply waits. This is the mechanism that keeps memory bounded regardless of input size.</li>
+            <li><strong>Phase 3 — End of stream:</strong> The producer sends <code>StreamChunk::End</code> — exactly one per stream, shown in green. The consumer sees <code>End</code>, finalizes its output (e.g., flushes an accumulator, computes a hash for caching), and drops its receiver. The channel is deallocated.</li>
+            <li><strong>Phase 4 — Error propagation:</strong> If the producer encounters a failure, it sends <code>StreamChunk::Error(e)</code> instead of <code>End</code>, shown in red. The consumer receives the error, propagates it downstream (causing the next stage to also emit <code>Error</code>), and the entire pipeline tears down stage by stage.</li>
+        </ul>
+
+        <p style="font-size:0.85rem; color:#6a737d;">▶ Click the diagram to step through all four phases. The step indicator (● ○ ○ ○) tracks your position.</p>
 
         <div class="svg-container" style="margin: 1.5rem auto; text-align: center;">
             <svg id="chunk-lifecycle-svg" viewBox="0 0 720 300" style="display: inline-block; max-width: 860px; width: 100%; border-radius: 8px; cursor: pointer;"
@@ -128,54 +155,81 @@
         <h3>3.4 Backpressure via Bounded Channels</h3>
 
         <p>
-            Backpressure is implicit. Each inter-stage connection is a <code>tokio::mpsc::channel</code> with a fixed capacity (default: 8 chunks × 64 KB = 512 KB of buffered data per edge). The mechanism:
+            Backpressure — the mechanism by which a slow consumer slows down a fast producer — is the single most important property for bounded-memory streaming. Without it, a fast producer would fill memory with buffered chunks until the system runs out of RAM. Deriva's backpressure is implicit: it falls out of the channel semantics with zero additional code.
+        </p>
+
+        <p>
+            Each inter-stage connection is a <code>tokio::mpsc::channel</code> with a fixed capacity (default: 8 chunks). At the default chunk size of 64 KB, this means 512 KB of buffered data per edge. The mechanism is straightforward:
         </p>
 
         <ol>
             <li>Producer calls <code>tx.send(chunk).await</code>.</li>
-            <li>If the channel has room, the send completes immediately.</li>
-            <li>If the channel is full, the <code>.await</code> suspends the producer's task until the consumer calls <code>rx.recv().await</code> and frees a slot.</li>
-            <li>If the consumer drops the receiver (cancellation), <code>send()</code> returns <code>Err</code>, and the producer stops.</li>
+            <li>If the channel has room, the send completes immediately — the chunk is moved into the buffer and the producer continues to the next chunk.</li>
+            <li>If the channel is full (all 8 slots occupied), the <code>.await</code> suspends the producer's Tokio task. The runtime parks the task and schedules other work. No busy-waiting, no polling, no CPU wasted.</li>
+            <li>When the consumer calls <code>rx.recv().await</code> and reads a chunk, a slot opens. The Tokio runtime wakes the suspended producer, which sends its next chunk into the freed slot.</li>
+            <li>If the consumer drops the receiver (cancellation), <code>send()</code> returns <code>Err(SendError)</code>, and the producer stops — see <a href="#stream-chunk-container">§3.5</a>.</li>
         </ol>
 
         <p>
-            This gives bounded memory without explicit backpressure signals, flow-control frames, or watermarks. The total memory ceiling for a pipeline with <em>N</em> edges is <em>N × capacity × chunk_size</em>. For a 5-stage pipeline: 5 × 8 × 64 KB = 2.5 MB — regardless of input size.
+            This gives bounded memory without explicit backpressure signals, flow-control frames, credit-based schemes, or watermarks. The total memory ceiling for a pipeline with <em>N</em> edges is <em>N × capacity × chunk_size</em>. For a 5-stage pipeline with default settings: 5 × 8 × 64 KB = 2.5 MB — whether the input is 4 MB or 512 MB. The benchmarks in <a href="#evaluation-container">§8</a> confirm this: streaming memory usage remains flat across all input sizes, while batch memory scales linearly.
+        </p>
+
+        <p>
+            The capacity of 8 was chosen based on the empirical sweep in <a href="#evaluation-container">§8.7</a>, which tested capacities 1 through 64 across input sizes from 1 MB to 512 MB. The results show that capacity 8 sits at the knee of the throughput curve: it is 1.6–3.1× faster than capacity 1 (which suspends the producer after every chunk), while capacity 16–64 offers only 5–21% further improvement at 2–8× the memory cost. At capacity 8, a 5-stage pipeline buffers 2.5 MB total — enough to absorb producer/consumer speed mismatches without wasting memory. See <a href="#evaluation-container">§8.7</a> for the full data table and analysis.
         </p>
 
         <h3>3.5 Cancellation</h3>
 
         <p>
-            Cancellation is receiver-driven. When a consumer no longer needs data — because the client disconnected, a downstream error occurred, or a cache hit made the computation unnecessary — it drops its <code>mpsc::Receiver</code>. The next <code>tx.send()</code> in the producer returns <code>Err(SendError)</code>, and the producer's spawned task exits. This propagates backward through the pipeline: each stage drops its input receivers, causing upstream stages to terminate in turn.
+            Cancellation is receiver-driven and requires zero explicit coordination. When a consumer no longer needs data — because the client disconnected, a downstream error occurred, or a cache hit made the computation unnecessary — it simply drops its <code>mpsc::Receiver</code>. The next <code>tx.send()</code> in the producer returns <code>Err(SendError)</code>, and the producer's spawned Tokio task exits cleanly.
         </p>
 
         <p>
-            No explicit cancel tokens, no poison pills, no shutdown coordination. Rust's ownership model and Tokio's channel semantics provide graceful teardown for free.
+            This propagates backward through the pipeline automatically: each stage, upon receiving a send error, drops its own input receiver, causing the upstream stage to also receive a send error and exit. In a 5-stage pipeline, cancellation at the final consumer tears down all 5 stages in reverse order — typically within microseconds, since each stage is simply dropping a channel handle.
+        </p>
+
+        <p>
+            No explicit cancel tokens, no poison pills, no shutdown coordination protocol, no <code>CancellationToken</code> from <code>tokio_util</code>. Rust's ownership model (dropping a <code>Receiver</code> closes the channel) and Tokio's channel semantics (<code>send()</code> returns <code>Err</code> on a closed channel) provide graceful teardown for free. This is one of the key advantages of building on Rust's ownership system rather than a garbage-collected runtime where channel handles might linger.
         </p>
 
         <h3>3.6 Helper Functions</h3>
 
         <p>
-            Four utility functions bridge between batch and streaming worlds:
+            Four utility functions bridge between the batch world (a single <code>Bytes</code> buffer) and the streaming world (a channel of <code>StreamChunk</code> values). These are the glue that enables mixed pipelines where some stages are natively streaming and others are batch functions wrapped by the auto-wrapping mechanism described in <a href="#auto-wrapping-container">§5</a>.
         </p>
 
         <div class="code-block">
             <pre>
 <span class="rust-comment">/// Wraps a complete Bytes value as a chunked stream.</span>
+<span class="rust-comment">/// Slices the input into chunk_size pieces, sends each as Data,</span>
+<span class="rust-comment">/// then sends End. Spawns a Tokio task for the sending loop.</span>
 <span class="rust-keyword">fn</span> <span class="rust-function">batch_to_stream</span>(data: <span class="rust-type">Bytes</span>, chunk_size: <span class="rust-type">usize</span>) -&gt; <span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;
 
 <span class="rust-comment">/// Same as batch_to_stream with explicit channel capacity.</span>
+<span class="rust-comment">/// Useful when the caller needs tighter or looser buffering.</span>
 <span class="rust-keyword">fn</span> <span class="rust-function">value_to_stream</span>(data: <span class="rust-type">Bytes</span>, chunk_size: <span class="rust-type">usize</span>, capacity: <span class="rust-type">usize</span>) -&gt; <span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;
 
 <span class="rust-comment">/// Collects a stream back into a single Bytes value.</span>
+<span class="rust-comment">/// Appends each Data chunk to a BytesMut buffer, returns on End,</span>
+<span class="rust-comment">/// returns Err on Error. This is the inverse of batch_to_stream.</span>
 <span class="rust-keyword">async fn</span> <span class="rust-function">collect_stream</span>(rx: <span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;) -&gt; <span class="rust-type">Result</span>&lt;<span class="rust-type">Bytes</span>, <span class="rust-type">DerivaError</span>&gt;
 
 <span class="rust-comment">/// Splits one stream into two identical streams (clone each chunk).</span>
+<span class="rust-comment">/// Both outputs receive every Data chunk and the terminal.</span>
 <span class="rust-keyword">fn</span> <span class="rust-function">tee_stream</span>(input: <span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;, capacity: <span class="rust-type">usize</span>)
     -&gt; (<span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;, <span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;)</pre>
         </div>
 
         <p>
-            <code>batch_to_stream</code> slices a <code>Bytes</code> buffer into 64 KB chunks and sends them followed by <code>End</code>. <code>collect_stream</code> does the inverse — accumulates all <code>Data</code> chunks, returns <code>Err</code> on <code>Error</code>, and returns the concatenated buffer on <code>End</code>. <code>tee_stream</code> clones each chunk to two outputs, enabling simultaneous cache-write and client-delivery (<a href="#pipeline-container">§6</a>).
+            <code>batch_to_stream</code> is the entry point for injecting batch data into a streaming pipeline. It slices a <code>Bytes</code> buffer into chunks of the configured size (default 64 KB), sends each as <code>Data</code>, and finishes with <code>End</code>. The slicing uses <code>Bytes::slice()</code>, which is zero-copy — each chunk shares the underlying allocation with the original buffer. The sending loop runs in a spawned Tokio task, so the caller gets back a <code>Receiver</code> immediately and can begin consuming chunks before the entire input has been sliced.
+        </p>
+
+        <p>
+            <code>collect_stream</code> does the inverse: it reads chunks from a <code>Receiver</code>, appends each <code>Data</code> payload to a <code>BytesMut</code> accumulator, and returns the frozen <code>Bytes</code> when it sees <code>End</code>. If it encounters <code>Error</code>, it returns the error immediately without waiting for further chunks. This function is used by the cache-after-collect strategy (<a href="#cas-invariants-container">§7</a>) and by the auto-wrapping adapter that feeds batch functions.
+        </p>
+
+        <p>
+            <code>tee_stream</code> is the most interesting helper. It spawns a task that reads from the input channel and clones each chunk to two output channels. Because <code>Bytes::clone()</code> is O(1) (reference count increment), the per-chunk overhead is negligible — roughly 10 ns per clone regardless of chunk size. This enables the pipeline builder to simultaneously deliver streaming output to the client <em>and</em> write the collected result to the cache, without buffering the entire output twice. The pipeline construction in <a href="#pipeline-container">§6</a> uses <code>tee_stream</code> for exactly this purpose.
         </p>
 
     </section>

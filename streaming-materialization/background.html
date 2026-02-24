@@ -3,28 +3,46 @@
         <h2>2. Background: Streaming Dataflow</h2>
 
         <p>
-            Streaming dataflow — processing data incrementally as it arrives rather than waiting for the full input — is a well-studied paradigm in data processing systems. This section surveys the landscape and identifies the gap that Deriva's streaming materialization fills.
+            Streaming dataflow — processing data incrementally as it arrives rather than waiting for the full input — is a well-studied paradigm in data processing systems. The core insight is simple: if a function can produce useful output before consuming its entire input, there is no reason to buffer the full input first. This observation drives systems from Unix pipes (1973) to modern distributed stream processors like Apache Flink.
+        </p>
+
+        <p>
+            Yet streaming has historically been confined to <em>data transport</em> systems — message brokers, event processors, ETL pipelines — where the storage layer is external and opaque. Content-addressed systems, which derive storage identifiers from computation structure, have remained firmly batch-oriented: the entire output must exist before its address can be computed. This section surveys both traditions and identifies the gap that Deriva's streaming materialization fills.
         </p>
 
         <h3>2.1 Dataflow Models</h3>
 
         <p>
-            Two fundamental models govern how data moves through a pipeline:
+            Two fundamental models govern how data moves through a computation pipeline. The choice between them determines latency characteristics, memory bounds, and the complexity of flow control.
         </p>
 
         <ul>
-            <li><strong>Push-based.</strong> Producers emit data as it becomes available. Consumers must keep up or apply backpressure. Examples: Flink, Kafka Streams, Unix pipes.</li>
-            <li><strong>Pull-based.</strong> Consumers request data when ready. Producers block until a request arrives. Examples: iterators, database cursors, Volcano-style query engines.</li>
+            <li><strong>Push-based.</strong> Producers emit data as it becomes available. Consumers must keep up or apply backpressure to avoid unbounded buffering. This model minimizes latency — the first output byte can arrive before the last input byte is produced — but requires explicit flow control to prevent fast producers from overwhelming slow consumers. Examples: Apache Flink, Kafka Streams, Unix pipes, Reactive Streams.</li>
+            <li><strong>Pull-based.</strong> Consumers request data when ready. Producers block until a request arrives, naturally bounding memory usage. Latency is higher because the consumer must explicitly poll, but the model is simpler to reason about and compose. Examples: Rust iterators, database cursors, Volcano-style query engines, Python generators.</li>
         </ul>
 
         <p>
-            Deriva uses a <strong>push-based model with bounded-channel backpressure</strong>. Producers push <code>StreamChunk</code> values into <code>tokio::mpsc</code> channels. When the channel is full (default capacity: 8 chunks), the producer's <code>send().await</code> suspends until the consumer reads a chunk — providing natural flow control without explicit backpressure signaling.
+            A third hybrid approach — <strong>push-with-backpressure</strong> — combines the latency benefits of push with the memory safety of pull. The producer pushes eagerly, but a bounded buffer between stages forces the producer to suspend when the buffer is full. This is the model adopted by Reactive Streams (JVM), Tokio channels (Rust), and Go channels.
         </p>
+
+        <p>
+            Deriva uses this hybrid model. Producers push <code>StreamChunk</code> values into <code>tokio::sync::mpsc</code> channels with a bounded capacity (default: 8 chunks × 64 KB = 512 KB per stage). When the channel is full, the producer's <code>send().await</code> suspends until the consumer reads a chunk — providing natural flow control without explicit backpressure signaling or rate negotiation. The bounded buffer also caps the maximum memory footprint of a pipeline at <code>stages × capacity × chunk_size</code>, which is predictable and configurable via <code>PipelineConfig</code>.
+        </p>
+
+        <p>
+            This design has three important properties:
+        </p>
+
+        <ol>
+            <li><strong>Bounded memory.</strong> A 5-stage pipeline with default settings uses at most 5 × 512 KB = 2.5 MB of in-flight buffer, regardless of input size. Processing a 512 MB input uses the same buffer as processing a 4 MB input.</li>
+            <li><strong>Automatic flow control.</strong> No explicit backpressure protocol is needed. The Tokio runtime suspends and resumes tasks based on channel capacity, which means the slowest stage in the pipeline naturally becomes the throughput bottleneck — exactly the behavior we want.</li>
+            <li><strong>Composability.</strong> Each stage is a standalone Tokio task that reads from one channel and writes to another. Stages can be added, removed, or reordered without changing the flow control mechanism. This is what enables the auto-wrapping of batch functions described in <a href="#auto-wrapping-container">§5</a>.</li>
+        </ol>
 
         <h3>2.2 Comparison with Existing Systems</h3>
 
         <p>
-            The following comparison highlights where each system sits along two axes: whether it supports streaming execution, and whether it owns the storage layer with content-addressing semantics.
+            To understand where Deriva sits in the landscape, we compare along two orthogonal axes: <strong>streaming capability</strong> (whether the system can process and emit data incrementally) and <strong>content-addressing / storage ownership</strong> (whether the system derives storage identifiers from computation structure and manages its own store). The scatter plot below maps eight systems across these axes.
         </p>
 
         <div class="svg-container" style="margin: 1.5rem auto; text-align: center;">
@@ -105,29 +123,38 @@
             </svg>
         </div>
 
+        <p>
+            The systems cluster into three groups: streaming-capable but storage-external (top-left), content-addressed but batch-only (bottom-right), and Deriva alone in the top-right quadrant. We examine each group below.
+        </p>
+
         <h4>Apache Flink</h4>
         <p>
-            True streaming with event-time processing, exactly-once semantics, and sophisticated windowing. However, Flink is an external orchestrator — it does not own the storage layer. Intermediate state is managed through pluggable state backends (RocksDB, heap), and outputs are written to external sinks. There is no content-addressing, no structural caching, and no computation-aware eviction.
+            True streaming with event-time processing, exactly-once semantics, and sophisticated windowing. Flink's dataflow model is the closest to Deriva's in terms of execution: both use push-based channels with backpressure, both support DAG topologies, and both process data in bounded chunks (Flink's network buffers are analogous to Deriva's <code>StreamChunk</code>). However, Flink is an external orchestrator — it does not own the storage layer. Intermediate state is managed through pluggable state backends (RocksDB, heap), and outputs are written to external sinks (Kafka, HDFS, S3). There is no content-addressing, no structural caching, and no computation-aware eviction. If the same Flink job runs twice with identical input, it recomputes from scratch unless the user builds an external caching layer.
         </p>
 
         <h4>Spark Structured Streaming</h4>
         <p>
-            Micro-batch streaming built on the Spark SQL engine. Each micro-batch is a small batch job, providing streaming semantics at the cost of higher latency than true streaming systems. Storage is external (HDFS, S3, Delta Lake), and there is no content-addressing of intermediate or final results.
+            Micro-batch streaming built on the Spark SQL engine. Each micro-batch is a small batch job — the engine collects data for a configurable trigger interval, then processes it as a DataFrame. This provides streaming semantics at the cost of higher latency (typically 100 ms–10 s per micro-batch) compared to true streaming systems. Storage is external (HDFS, S3, Delta Lake), and there is no content-addressing of intermediate or final results. Spark's Catalyst optimizer can rewrite query plans, but it cannot skip computation when the result already exists in a content-addressed store.
         </p>
 
         <h4>Kafka Streams</h4>
         <p>
-            Log-based stream processing embedded in the Kafka ecosystem. State is maintained in local RocksDB stores backed by Kafka changelog topics. While Kafka provides durable message storage, it has no concept of computation-addressing — messages are identified by topic-partition-offset, not by the computation that produced them.
+            Log-based stream processing embedded in the Kafka ecosystem. State is maintained in local RocksDB stores backed by Kafka changelog topics, providing fault tolerance through log compaction. While Kafka provides durable message storage, it has no concept of computation-addressing — messages are identified by topic-partition-offset, not by the computation that produced them. Two different Kafka Streams applications producing identical output from identical input will generate distinct messages with distinct offsets.
         </p>
 
         <h4>Unix Pipes</h4>
         <p>
-            The original streaming dataflow: processes connected by kernel-buffered pipes with natural backpressure. Simple and effective, but with no caching, no DAG awareness, no content-addressing, and no ability to skip computation when the result is already known. Each invocation recomputes from scratch.
+            The original streaming dataflow (Thompson, 1973): processes connected by kernel-buffered pipes with natural backpressure. A pipe's buffer (typically 64 KB on Linux) suspends the writer when full — the same mechanism Deriva uses with <code>tokio::mpsc</code> channels. Simple and effective, but with no caching, no DAG awareness (pipes form linear chains, not arbitrary graphs), no content-addressing, and no ability to skip computation when the result is already known. Each invocation recomputes from scratch. Deriva's streaming model can be seen as "Unix pipes with content-addressed caching and DAG topology."
         </p>
 
         <h4>Bazel / Nix</h4>
         <p>
-            Content-addressed build systems that cache computation results. Bazel uses action graphs with remote caching; Nix uses derivation hashes for reproducible builds. Both are strictly batch — the entire output must be produced before it is stored and served. Neither supports streaming intermediate results through a pipeline.
+            Content-addressed build systems that cache computation results by deriving storage keys from the computation's inputs and parameters. Bazel uses action graphs with remote caching and remote execution; Nix uses derivation hashes for reproducible builds. Both are strictly batch — the entire output must be produced and hashed before it is stored and served. A Bazel action that produces a 500 MB artifact must write all 500 MB to disk before the downstream action can begin reading. Neither supports streaming intermediate results through a pipeline, which is precisely the limitation that motivated this work.
+        </p>
+
+        <h4>IPFS / DVC</h4>
+        <p>
+            IPFS (InterPlanetary File System) provides content-addressed storage for arbitrary data using Merkle DAGs, but has no computation model — it stores and retrieves data, it does not transform it. DVC (Data Version Control) adds content-addressed tracking to ML pipelines, using file hashes to detect when a pipeline stage can be skipped. However, DVC's execution model is batch: each stage runs to completion, writes its output, and only then does DVC hash the result and check the cache. Neither system supports streaming execution within the content-addressed framework.
         </p>
 
         <h3>2.3 The Gap</h3>

@@ -1,0 +1,31 @@
+[package]
+name = "deriva-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+deriva-core = { path = "../deriva-core" }
+deriva-compute = { path = "../deriva-compute" }
+deriva-storage = { path = "../deriva-storage" }
+tonic = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+bytes = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+blake3 = "1"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus = { workspace = true }
+lazy_static = { workspace = true }
+axum = "0.7"
+uuid = { version = "1", features = ["v4"] }
+serde_json = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+futures = "0.3"
+sled = { workspace = true }

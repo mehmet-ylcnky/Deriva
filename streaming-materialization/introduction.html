@@ -270,13 +270,22 @@
 
         <h3>1.4 Contributions</h3>
 
+        <p>
+            This paper makes the following contributions to the Deriva computation-addressed store:
+        </p>
+
         <ul>
             <li>A <strong>StreamChunk protocol</strong> with <code>Data</code>/<code>End</code>/<code>Error</code> semantics and bounded-channel backpressure (<a href="#stream-chunk-container">§3</a>)</li>
             <li>A <strong>StreamingComputeFunction</strong> trait with 20 built-in implementations across four categories (<a href="#streaming-functions-container">§4</a>)</li>
             <li>An <strong>auto-wrapping mechanism</strong> that allows batch functions to participate in streaming pipelines transparently (<a href="#auto-wrapping-container">§5</a>)</li>
             <li>A <strong>DAG-aware pipeline builder</strong> that constructs streaming pipelines from recipe graphs with cache-aware stage selection (<a href="#pipeline-container">§6</a>)</li>
             <li>Preservation of all <strong>CAS invariants</strong> — identical CAddrs, cache behavior, and invalidation semantics for streaming and batch outputs (<a href="#cas-invariants-container">§7</a>)</li>
+            <li><strong>Empirical evaluation</strong> with a 10-point sweep from 1 MB to 512 MB, identifying a ~3 MB crossover where streaming overtakes batch, peaking at 2.7× faster at 32 MB with constant ~1.6 ms time-to-first-byte (<a href="#evaluation-container">§8</a>)</li>
         </ul>
+
+        <p>
+            All implementations are in Rust, built on Tokio's async runtime, and integrated into the existing Deriva codebase. The streaming layer adds no new dependencies beyond <code>tokio::sync::mpsc</code> for inter-stage channels. The full benchmark suite is reproducible via <code>cargo bench</code>.
+        </p>
 
     </section>
 </div>

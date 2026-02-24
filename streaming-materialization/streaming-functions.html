@@ -3,16 +3,25 @@
         <h2>4. Streaming Compute Functions</h2>
 
         <p>
-            Deriva ships 20 built-in streaming functions organized into four categories. Each implements the <code>StreamingComputeFunction</code> trait — accepting one or more <code>Receiver&lt;StreamChunk&gt;</code> inputs and returning a single <code>Receiver&lt;StreamChunk&gt;</code> output. This section describes the trait contract, the internal helper patterns, and all 20 functions.
+            Deriva ships 20 built-in streaming functions organized into four categories. Each implements the <code>StreamingComputeFunction</code> trait — accepting one or more <code>Receiver&lt;StreamChunk&gt;</code> inputs and returning a single <code>Receiver&lt;StreamChunk&gt;</code> output. The function spawns its own Tokio task internally, so the caller receives a <code>Receiver</code> immediately and can begin consuming output before the function has finished processing all input.
+        </p>
+
+        <p>
+            The 20 functions are not intended to be exhaustive — they are a foundation that demonstrates the four fundamental execution patterns (map, accumulate, combine, utility) and provides enough variety for realistic pipelines. Users register additional functions via the <code>FunctionRegistry</code> by implementing the same trait. The built-in set was chosen to cover common data processing operations (encoding, hashing, compression, slicing) while exercising every edge case in the protocol: single-input vs multi-input, chunk-preserving vs chunk-resizing, streaming-output vs batch-output, and stateless vs stateful.
         </p>
 
         <h3>4.1 The Trait</h3>
+
+        <p>
+            The entire streaming function contract is captured in a single trait with one required method and two optional configuration hooks:
+        </p>
 
         <div class="code-block">
             <pre>
 #[async_trait]
 <span class="rust-keyword">pub trait</span> <span class="rust-type">StreamingComputeFunction</span>: Send + Sync {
     <span class="rust-comment">/// Process streaming inputs and produce streaming output.</span>
+    <span class="rust-comment">/// Called by the pipeline executor for each compute node.</span>
     <span class="rust-keyword">async fn</span> <span class="rust-function">stream_execute</span>(
         &amp;<span class="rust-keyword">self</span>,
         inputs: <span class="rust-type">Vec</span>&lt;mpsc::<span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;&gt;,
@@ -20,26 +29,37 @@
     ) -&gt; mpsc::<span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;;
 
     <span class="rust-comment">/// Preferred chunk size in bytes (default: 64 KB).</span>
+    <span class="rust-comment">/// The pipeline builder uses this to configure upstream chunking.</span>
     <span class="rust-keyword">fn</span> <span class="rust-function">preferred_chunk_size</span>(&amp;<span class="rust-keyword">self</span>) -&gt; <span class="rust-type">usize</span> { DEFAULT_CHUNK_SIZE }
 
     <span class="rust-comment">/// Output channel capacity (default: 8 chunks).</span>
+    <span class="rust-comment">/// Higher values trade memory for reduced task switching.</span>
     <span class="rust-keyword">fn</span> <span class="rust-function">channel_capacity</span>(&amp;<span class="rust-keyword">self</span>) -&gt; <span class="rust-type">usize</span> { DEFAULT_CHANNEL_CAPACITY }
 }</pre>
         </div>
 
         <p>
-            The trait is intentionally minimal. A function receives its inputs as a vector of receivers (one per dependency in the DAG), a parameter map for configuration, and returns a single output receiver. The function spawns its own Tokio task internally — the caller never blocks.
+            The trait is intentionally minimal — three methods, two of which have defaults. A function receives its inputs as a vector of receivers (one per dependency in the recipe DAG), a parameter map for runtime configuration (e.g., <code>{"key": "0x42"}</code> for XOR, <code>{"bytes": "1024"}</code> for Take), and returns a single output receiver. The function is responsible for spawning its own Tokio task internally — the caller never blocks waiting for the function to complete.
+        </p>
+
+        <p>
+            The <code>Send + Sync</code> bounds are required because functions are stored in the <code>FunctionRegistry</code> as <code>Arc&lt;dyn StreamingComputeFunction&gt;</code> and may be invoked concurrently from multiple pipeline executions. The <code>async_trait</code> macro (from the <code>async-trait</code> crate) desugars the async method into a boxed future, which is the standard pattern for async trait methods in Rust prior to native async trait stabilization.
+        </p>
+
+        <p>
+            The two configuration hooks — <code>preferred_chunk_size</code> and <code>channel_capacity</code> — allow functions to override the pipeline defaults. For example, a compression function might prefer larger chunks (256 KB) for better compression ratios, while a hash function might prefer the default 64 KB since SHA-256 processes data in 64-byte blocks regardless of chunk size. The capacity sweep in <a href="#evaluation-container">§8.7</a> validates the default capacity of 8.
         </p>
 
         <h3>4.2 Internal Helpers</h3>
 
         <p>
-            Two helper patterns eliminate boilerplate across the 20 implementations:
+            Implementing 20 streaming functions from scratch would involve significant boilerplate: each needs a channel pair, a spawned task, a recv loop, error propagation, and terminal forwarding. Two helper functions eliminate this repetition by capturing the two most common execution patterns:
         </p>
 
         <div class="code-block">
             <pre>
 <span class="rust-comment">/// Map: read one input, transform each Data chunk, forward.</span>
+<span class="rust-comment">/// Handles End/Error propagation automatically.</span>
 <span class="rust-keyword">fn</span> <span class="rust-function">spawn_map</span>(
     rx: <span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;,
     cap: <span class="rust-type">usize</span>,
@@ -47,6 +67,7 @@
 ) -&gt; <span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;
 
 <span class="rust-comment">/// Accumulate: fold all chunks into state, emit single result.</span>
+<span class="rust-comment">/// Calls fold() for each Data chunk, finalize() on End.</span>
 <span class="rust-keyword">fn</span> <span class="rust-function">spawn_accumulate</span>&lt;S: Send + <span class="rust-string">'static</span>&gt;(
     rx: <span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;,
     init: S,
@@ -56,13 +77,21 @@
         </div>
 
         <p>
-            <code>spawn_map</code> handles the 9 transforms (category 1): it reads chunks, applies a closure, and forwards the result. Error from the closure becomes <code>StreamChunk::Error</code>. <code>spawn_accumulate</code> handles the 3 accumulators (category 2): it folds all chunks into a state value, then emits a single <code>Data</code> chunk followed by <code>End</code>.
+            <code>spawn_map</code> covers 9 of the 20 functions (all of Category 1). It creates a channel pair, spawns a Tokio task that reads chunks from the input receiver, applies the closure <code>f</code> to each <code>Data</code> chunk's bytes, and sends the result downstream. If the closure returns <code>Err</code>, the helper sends <code>StreamChunk::Error</code> and stops. On <code>End</code>, it forwards <code>End</code>. On <code>Error</code>, it propagates the error. The entire recv-transform-send loop is ~15 lines of code, but writing it 9 times would be error-prone — especially the edge cases around send failures (receiver dropped) and error propagation.
+        </p>
+
+        <p>
+            <code>spawn_accumulate</code> covers the 3 accumulators (Category 2). It takes an initial state value, a fold function that updates the state for each chunk, and a finalize function that converts the final state into a <code>Bytes</code> output. The pattern is analogous to Rust's <code>Iterator::fold</code>, but operating over an async stream of chunks. The key property is that the state is fixed-size — 32 bytes for SHA-256, 8 bytes for a counter, 4 bytes for CRC32 — so memory usage is O(1) regardless of input size, even though the function must see all input before producing output.
+        </p>
+
+        <p>
+            The remaining 8 functions (Categories 3 and 4) have custom implementations because their execution patterns don't fit either helper: combiners need multi-receiver loops, and utilities like <code>StreamingChunkResizer</code> maintain internal buffers that don't map to a simple map or fold.
         </p>
 
         <h3>4.3 The 20 Built-in Functions</h3>
 
         <p>
-            Click a category in the diagram below to see its functions. Each category uses a different execution pattern.
+            The diagram below organizes all 20 functions into four categories based on their execution pattern. Click a category tab to expand its function list with descriptions. Each category uses a distinct pattern — map, accumulate, multi-input combine, or custom — that determines its memory profile, latency characteristics, and composability within a pipeline.
         </p>
 
         <div class="svg-container" style="margin: 1.5rem auto; text-align: center;">
@@ -185,25 +214,64 @@
 
         <h4>Category 1: Transforms (9 functions)</h4>
         <p>
-            All nine use <code>spawn_map</code>: read a chunk, apply a pure function, emit the result. Memory is O(chunk_size) — one chunk in, one chunk out. The transform closure is <code>Fn(&amp;[u8]) -&gt; Result&lt;Bytes, String&gt;</code>, so errors (e.g., invalid base64) become <code>StreamChunk::Error</code> and terminate the stream.
+            All nine use <code>spawn_map</code>: read a chunk, apply a pure function, emit the result. Memory is O(chunk_size) — one chunk in, one chunk out, with no accumulation across chunks. The transform closure is <code>Fn(&amp;[u8]) -&gt; Result&lt;Bytes, String&gt;</code>, so errors (e.g., invalid base64 input) become <code>StreamChunk::Error</code> and terminate the stream cleanly.
         </p>
         <p>
-            Notable: <code>StreamingCompress</code> and <code>StreamingDecompress</code> operate per-chunk, not across the full stream. This means each chunk is independently compressed — suitable for random-access decompression but with lower compression ratios than whole-stream compression.
+            The simplest is <code>StreamingIdentity</code> — it forwards each chunk unchanged. Despite doing no useful work, it is essential for benchmarking: it isolates the overhead of the streaming infrastructure (channel creation, task spawning, chunk framing) from the cost of actual computation. The identity pipeline benchmarks in <a href="#evaluation-container">§8</a> use chains of <code>StreamingIdentity</code> stages for exactly this purpose.
+        </p>
+        <p>
+            <code>StreamingUppercase</code> and <code>StreamingLowercase</code> operate on ASCII bytes — they apply <code>to_ascii_uppercase()</code> / <code>to_ascii_lowercase()</code> per byte within each chunk. These are useful for text normalization pipelines and serve as simple examples of byte-level transforms.
+        </p>
+        <p>
+            <code>StreamingBase64Encode</code> and <code>StreamingBase64Decode</code> encode/decode each chunk independently. This means the base64 encoding is not continuous across chunk boundaries — each chunk is a self-contained base64 unit. This is a deliberate tradeoff: it enables random-access decoding (decode chunk N without reading chunks 0..N-1) at the cost of ~33% overhead per chunk boundary due to base64 padding.
+        </p>
+        <p>
+            <code>StreamingCompress</code> and <code>StreamingDecompress</code> apply zlib compression per chunk. Like base64, this is per-chunk rather than whole-stream — each chunk is independently compressed. This yields lower compression ratios than whole-stream compression (no cross-chunk dictionary sharing) but enables parallel decompression and random access. For workloads where compression ratio matters more than random access, a future whole-stream compressor could be added.
+        </p>
+        <p>
+            <code>StreamingXor</code> XORs each byte with a single-byte key from <code>params["key"]</code>. It demonstrates parameterized transforms — the same function struct handles different keys based on runtime configuration. <code>StreamingReverse</code> reverses the bytes within each chunk (not across the stream), useful for testing byte-order-sensitive pipelines.
         </p>
 
         <h4>Category 2: Accumulators (3 functions)</h4>
         <p>
-            All three use <code>spawn_accumulate</code>: fold each chunk into a rolling state, then emit a single result on <code>End</code>. These are inherently non-streaming in output — they must see all input before producing any output — but they are streaming in <em>input</em>: they never buffer the full input, only the fixed-size state (32 bytes for SHA-256, 8 bytes for byte count, 4 bytes for CRC32).
+            All three use <code>spawn_accumulate</code>: fold each chunk into a rolling state, then emit a single result on <code>End</code>. These are inherently non-streaming in output — they must see all input before producing any output — but they are streaming in <em>input</em>: they never buffer the full input, only the fixed-size state.
+        </p>
+        <p>
+            <code>StreamingSha256</code> maintains a <code>sha2::Sha256</code> hasher (32 bytes of internal state). Each <code>Data</code> chunk is fed into the hasher via <code>update()</code>. On <code>End</code>, the hasher is finalized and the 32-byte digest is emitted as a single <code>Data</code> chunk followed by <code>End</code>. This is functionally identical to computing <code>sha256(entire_input)</code>, but without ever holding the entire input in memory. For a 512 MB input, the accumulator uses 32 bytes of state instead of 512 MB of buffer.
+        </p>
+        <p>
+            <code>StreamingByteCount</code> maintains a <code>u64</code> counter (8 bytes). Each chunk adds <code>chunk.len()</code> to the counter. On <code>End</code>, the count is emitted as an 8-byte big-endian value. <code>StreamingChecksum</code> maintains a CRC32 state (4 bytes) and emits the 4-byte checksum on completion.
+        </p>
+        <p>
+            Accumulators are the only category where time-to-first-byte equals total latency — the consumer sees no output until the entire input has been processed. In a pipeline, an accumulator stage acts as a "barrier": all upstream stages must complete before any downstream stage can begin. The pipeline builder in <a href="#pipeline-container">§6</a> is aware of this and avoids placing accumulators in the middle of latency-sensitive paths when possible.
         </p>
 
         <h4>Category 3: Combiners (3 functions)</h4>
         <p>
-            These accept multiple input receivers. <code>StreamingConcat</code> drains inputs sequentially — all chunks from input 0, then input 1, etc. <code>StreamingInterleave</code> round-robins: one chunk from each input in turn. <code>StreamingZipConcat</code> reads one chunk from each of exactly two inputs and concatenates them pairwise.
+            These accept multiple input receivers and merge them into a single output stream. Each combiner has a distinct merging strategy:
+        </p>
+        <ul>
+            <li><strong>StreamingConcat</strong> drains inputs sequentially — all chunks from input 0 (until its <code>End</code>), then all chunks from input 1, and so on. The output is the concatenation of all inputs in order. This is the streaming equivalent of <code>cat file1 file2 file3</code>. Memory is O(chunk_size) since only one input is active at a time.</li>
+            <li><strong>StreamingInterleave</strong> round-robins: one chunk from input 0, one from input 1, one from input 2, back to input 0, etc. When an input ends, it is removed from the rotation. This is useful for merging multiple data sources into a single stream with fair scheduling. Memory is O(N × chunk_size) where N is the number of active inputs, since each input may have one chunk buffered in its channel.</li>
+            <li><strong>StreamingZipConcat</strong> reads one chunk from each of exactly two inputs and concatenates them pairwise — chunk 0 from input A + chunk 0 from input B, then chunk 1 from A + chunk 1 from B, etc. If one input ends before the other, the remaining chunks from the longer input are passed through. This is useful for combining parallel computation results (e.g., data + metadata).</li>
+        </ul>
+        <p>
+            All three combiners handle the <code>End</code> and <code>Error</code> protocol correctly: if any input produces <code>Error</code>, the combiner propagates it downstream and drops all remaining input receivers (triggering upstream cancellation via the mechanism in <a href="#stream-chunk-container">§3.5</a>).
         </p>
 
         <h4>Category 4: Utilities (5 functions)</h4>
         <p>
-            Mixed patterns. <code>StreamingChunkResizer</code> maintains an internal <code>BytesMut</code> buffer and emits chunks of exactly the target size. <code>StreamingTake</code> and <code>StreamingSkip</code> track a byte offset and slice chunks at the boundary. <code>StreamingRepeat</code> is the only function that buffers the entire input — it must replay the full content <em>N</em> times. <code>StreamingTeeCount</code> combines pass-through with a rolling byte counter, appending the count as a decimal ASCII trailer after the final data chunk.
+            The utility category groups functions with mixed execution patterns that don't fit the map or accumulate helpers:
+        </p>
+        <ul>
+            <li><strong>StreamingChunkResizer</strong> re-chunks the input stream to a target size specified by <code>params["target_size"]</code>. It maintains an internal <code>BytesMut</code> buffer: incoming chunks are appended to the buffer, and whenever the buffer reaches the target size, a chunk is sliced off and sent downstream. On <code>End</code>, any remaining bytes in the buffer are flushed as a final (possibly smaller) chunk. This is essential when a downstream function requires a specific chunk size — for example, a block cipher that needs exact 16-byte blocks.</li>
+            <li><strong>StreamingTake</strong> emits the first <code>params["bytes"]</code> bytes of the input, then sends <code>End</code> and drops the input receiver (cancelling upstream). It tracks a running byte offset and slices the boundary chunk at the exact cutoff point. Memory is O(chunk_size).</li>
+            <li><strong>StreamingSkip</strong> is the complement of Take: it discards the first <code>params["bytes"]</code> bytes and passes the rest through. Like Take, it tracks a byte offset and slices the boundary chunk. Together, Take and Skip enable range reads: <code>Skip(offset) → Take(length)</code> extracts an arbitrary byte range from a stream.</li>
+            <li><strong>StreamingRepeat</strong> replays the entire input <code>params["count"]</code> times. This is the only built-in function that buffers the entire input — it collects all <code>Data</code> chunks into a <code>Vec&lt;Bytes&gt;</code>, then replays them N times. Memory is O(input_size), making it unsuitable for very large inputs. It exists for testing and for use cases where repetition is needed (e.g., generating test data from a template).</li>
+            <li><strong>StreamingTeeCount</strong> combines pass-through with a rolling byte counter. All <code>Data</code> chunks are forwarded unchanged, and after the last data chunk, the function appends an additional <code>Data</code> chunk containing the total byte count as a decimal ASCII string (e.g., <code>"1048576"</code>), followed by <code>End</code>. This demonstrates a function that augments the stream with computed metadata without modifying the original data.</li>
+        </ul>
+        <p>
+            The utility category is the most likely to grow as new use cases emerge. Candidates for future additions include a <code>StreamingFilter</code> (drop chunks matching a predicate), <code>StreamingRateLimit</code> (throttle output to a target bytes/sec), and <code>StreamingEncrypt</code> / <code>StreamingDecrypt</code> (AES-GCM with streaming authenticated encryption).
         </p>
 
     </section>

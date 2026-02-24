@@ -469,7 +469,13 @@ Not all functions need both implementations. This matrix clarifies which functio
 
 ---
 
-## 8. Channel Capacity Sweep Study — ✅ COMPLETED
+## 8. Format-Aware Function Library
+
+**See:** [`format-aware-functions.md`](format-aware-functions.md) — 283 functions across 19 categories covering all major file formats encountered in distributed file systems (columnar, row-oriented, serialization, archive, image, audio/video, document, config, geospatial, scientific, log, content-addressing, database, ML, network, bioinformatics, 3D/binary, erasure coding, universal detection). Combined with §6 and §7, the total library target is **483 functions**.
+
+---
+
+## 9. Channel Capacity Sweep Study — ✅ COMPLETED
 
 > **Status:** Implemented and benchmarked. Results published in Paper 2b §8.7. The §3.4 backpressure section now references empirical data instead of informal claims.
 

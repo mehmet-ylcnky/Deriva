@@ -360,7 +360,7 @@
                 <td class="num">271.7</td>
                 <td class="num">503.6</td>
             </tr>
-            <tr style="background:#232840;">
+            <tr>
                 <td class="num"><strong>8 (default)</strong></td>
                 <td class="num"><strong>1.75</strong></td>
                 <td class="num"><strong>2.72</strong></td>
@@ -398,6 +398,148 @@
             </tr>
         </table>
     </div>
+
+        <p style="font-size:0.85rem; color:#6a737d;">▶ Click legend entries to toggle lines. Click any data point for details. Capacity 1, 8, 64 shown by default.</p>
+
+        <svg id="cap-sweep-svg" viewBox="0 0 860 420" style="display:block;max-width:860px;width:100%;margin:1.5rem auto;background:#1a1e2e;border-radius:10px;cursor:pointer" xmlns="http://www.w3.org/2000/svg">
+            <text x="430" y="24" text-anchor="middle" fill="#e0e0e0" font-size="13" font-weight="600">Channel Capacity vs Latency (5-stage pipeline, log–log scale)</text>
+
+            <!-- axes -->
+            <line x1="90" y1="360" x2="780" y2="360" stroke="#3a3f5c" stroke-width="1"/>
+            <line x1="90" y1="360" x2="90" y2="50" stroke="#3a3f5c" stroke-width="1"/>
+            <text x="430" y="395" text-anchor="middle" fill="#90a4ae" font-size="10">Input Size</text>
+            <text x="30" y="205" text-anchor="middle" fill="#90a4ae" font-size="10" transform="rotate(-90 30 205)">Latency (ms)</text>
+
+            <!-- Y gridlines + labels (log scale: 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000) -->
+            <!-- Y range: log10(1.5)=0.176 to log10(1200)=3.079. Map to y: 360 (bottom) to 50 (top). span=310, offset=0.176 -->
+            <!-- y = 360 - (log10(val)-0.176) * (310/2.903) -->
+            <line x1="90" y1="341" x2="780" y2="341" stroke="#232840" stroke-width="1"/><text x="85" y="345" text-anchor="end" fill="#555" font-size="9">2</text>
+            <line x1="90" y1="315" x2="780" y2="315" stroke="#232840" stroke-width="1"/><text x="85" y="319" text-anchor="end" fill="#555" font-size="9">5</text>
+            <line x1="90" y1="287" x2="780" y2="287" stroke="#232840" stroke-width="1"/><text x="85" y="291" text-anchor="end" fill="#555" font-size="9">10</text>
+            <line x1="90" y1="255" x2="780" y2="255" stroke="#232840" stroke-width="1"/><text x="85" y="259" text-anchor="end" fill="#555" font-size="9">20</text>
+            <line x1="90" y1="228" x2="780" y2="228" stroke="#232840" stroke-width="1"/><text x="85" y="232" text-anchor="end" fill="#555" font-size="9">50</text>
+            <line x1="90" y1="200" x2="780" y2="200" stroke="#232840" stroke-width="1"/><text x="85" y="204" text-anchor="end" fill="#555" font-size="9">100</text>
+            <line x1="90" y1="168" x2="780" y2="168" stroke="#232840" stroke-width="1"/><text x="85" y="172" text-anchor="end" fill="#555" font-size="9">200</text>
+            <line x1="90" y1="141" x2="780" y2="141" stroke="#232840" stroke-width="1"/><text x="85" y="145" text-anchor="end" fill="#555" font-size="9">500</text>
+            <line x1="90" y1="113" x2="780" y2="113" stroke="#232840" stroke-width="1"/><text x="85" y="117" text-anchor="end" fill="#555" font-size="9">1000</text>
+
+            <!-- X labels (6 sizes, evenly spaced on log scale) -->
+            <!-- X positions: log10(1)=0, log10(4)=0.602, log10(16)=1.204, log10(64)=1.806, log10(256)=2.408, log10(512)=2.709 -->
+            <!-- x = 90 + (log10(sizeMB)/2.709) * 690 -->
+            <text x="90" y="378" text-anchor="middle" fill="#90a4ae" font-size="9">1 MB</text>
+            <text x="243" y="378" text-anchor="middle" fill="#90a4ae" font-size="9">4 MB</text>
+            <text x="397" y="378" text-anchor="middle" fill="#90a4ae" font-size="9">16 MB</text>
+            <text x="550" y="378" text-anchor="middle" fill="#90a4ae" font-size="9">64 MB</text>
+            <text x="703" y="378" text-anchor="middle" fill="#90a4ae" font-size="9">256 MB</text>
+            <text x="780" y="378" text-anchor="middle" fill="#90a4ae" font-size="9">512 MB</text>
+
+            <!-- Lines + dots per capacity. Colors: cap1=#e74c3c, cap2=#e67e22, cap4=#f39c12, cap8=#2ecc71, cap16=#81d4fa, cap32=#ce93d8, cap64=#9b59b6 -->
+            <!-- Data (capacity: [1MB,4MB,16MB,64MB,256MB,512MB]): -->
+            <!-- cap1:  [2.72, 7.01, 22.7, 130.3, 501.1, 1128] -->
+            <!-- cap2:  [2.20, 4.74, 15.9, 94.9, 366.2, 760.1] -->
+            <!-- cap4:  [1.88, 3.54, 10.4, 72.9, 271.7, 503.6] -->
+            <!-- cap8:  [1.75, 2.72, 7.75, 50.8, 185.2, 368.7] -->
+            <!-- cap16: [1.66, 2.29, 7.20, 54.1, 159.0, 289.8] -->
+            <!-- cap32: [1.67, 2.25, 5.32, 48.3, 154.1, 259.4] -->
+            <!-- cap64: [1.66, 2.82, 4.63, 43.3, 132.9, 245.3] -->
+
+            <!-- helper: y(v) = 360 - (log10(v)-0.176)*106.786 -->
+            <!-- cap1: y=[313,270,215,134,72,34] x=[90,243,397,550,703,780] -->
+            <g id="csw-cap1" class="csw-line">
+                <polyline points="90,332 243,288 397,234 550,153 703,90 780,53" fill="none" stroke="#e74c3c" stroke-width="2"/>
+                <circle cx="90" cy="332" r="5" fill="#e74c3c" data-cap="1" data-size="1 MB" data-lat="2.72 ms"/>
+                <circle cx="243" cy="288" r="5" fill="#e74c3c" data-cap="1" data-size="4 MB" data-lat="7.01 ms"/>
+                <circle cx="397" cy="234" r="5" fill="#e74c3c" data-cap="1" data-size="16 MB" data-lat="22.7 ms"/>
+                <circle cx="550" cy="153" r="5" fill="#e74c3c" data-cap="1" data-size="64 MB" data-lat="130.3 ms"/>
+                <circle cx="703" cy="90" r="5" fill="#e74c3c" data-cap="1" data-size="256 MB" data-lat="501.1 ms"/>
+                <circle cx="780" cy="53" r="5" fill="#e74c3c" data-cap="1" data-size="512 MB" data-lat="1,128 ms"/>
+            </g>
+
+            <!-- cap2: y=[323,288,232,149,87,53] -->
+            <g id="csw-cap2" class="csw-line" opacity="0.15">
+                <polyline points="90,342 243,307 397,251 550,168 703,105 780,71" fill="none" stroke="#e67e22" stroke-width="2"/>
+                <circle cx="90" cy="342" r="5" fill="#e67e22" data-cap="2" data-size="1 MB" data-lat="2.20 ms"/>
+                <circle cx="243" cy="307" r="5" fill="#e67e22" data-cap="2" data-size="4 MB" data-lat="4.74 ms"/>
+                <circle cx="397" cy="251" r="5" fill="#e67e22" data-cap="2" data-size="16 MB" data-lat="15.9 ms"/>
+                <circle cx="550" cy="168" r="5" fill="#e67e22" data-cap="2" data-size="64 MB" data-lat="94.9 ms"/>
+                <circle cx="703" cy="105" r="5" fill="#e67e22" data-cap="2" data-size="256 MB" data-lat="366.2 ms"/>
+                <circle cx="780" cy="71" r="5" fill="#e67e22" data-cap="2" data-size="512 MB" data-lat="760.1 ms"/>
+            </g>
+
+            <!-- cap4: y=[331,301,251,161,101,71] -->
+            <g id="csw-cap4" class="csw-line" opacity="0.15">
+                <polyline points="90,350 243,320 397,270 550,180 703,119 780,90" fill="none" stroke="#f39c12" stroke-width="2"/>
+                <circle cx="90" cy="350" r="5" fill="#f39c12" data-cap="4" data-size="1 MB" data-lat="1.88 ms"/>
+                <circle cx="243" cy="320" r="5" fill="#f39c12" data-cap="4" data-size="4 MB" data-lat="3.54 ms"/>
+                <circle cx="397" cy="270" r="5" fill="#f39c12" data-cap="4" data-size="16 MB" data-lat="10.4 ms"/>
+                <circle cx="550" cy="180" r="5" fill="#f39c12" data-cap="4" data-size="64 MB" data-lat="72.9 ms"/>
+                <circle cx="703" cy="119" r="5" fill="#f39c12" data-cap="4" data-size="256 MB" data-lat="271.7 ms"/>
+                <circle cx="780" cy="90" r="5" fill="#f39c12" data-cap="4" data-size="512 MB" data-lat="503.6 ms"/>
+            </g>
+
+            <!-- cap8: y=[334,313,265,178,118,87] -->
+            <g id="csw-cap8" class="csw-line">
+                <polyline points="90,353 243,332 397,284 550,197 703,137 780,105" fill="none" stroke="#2ecc71" stroke-width="2.5"/>
+                <circle cx="90" cy="353" r="5" fill="#2ecc71" data-cap="8" data-size="1 MB" data-lat="1.75 ms"/>
+                <circle cx="243" cy="332" r="5" fill="#2ecc71" data-cap="8" data-size="4 MB" data-lat="2.72 ms"/>
+                <circle cx="397" cy="284" r="5" fill="#2ecc71" data-cap="8" data-size="16 MB" data-lat="7.75 ms"/>
+                <circle cx="550" cy="197" r="5" fill="#2ecc71" data-cap="8" data-size="64 MB" data-lat="50.8 ms"/>
+                <circle cx="703" cy="137" r="5" fill="#2ecc71" data-cap="8" data-size="256 MB" data-lat="185.2 ms"/>
+                <circle cx="780" cy="105" r="5" fill="#2ecc71" data-cap="8" data-size="512 MB" data-lat="368.7 ms"/>
+            </g>
+
+            <!-- cap16: y=[337,321,268,175,125,95] -->
+            <g id="csw-cap16" class="csw-line" opacity="0.15">
+                <polyline points="90,355 243,340 397,287 550,194 703,144 780,116" fill="none" stroke="#81d4fa" stroke-width="2"/>
+                <circle cx="90" cy="355" r="5" fill="#81d4fa" data-cap="16" data-size="1 MB" data-lat="1.66 ms"/>
+                <circle cx="243" cy="340" r="5" fill="#81d4fa" data-cap="16" data-size="4 MB" data-lat="2.29 ms"/>
+                <circle cx="397" cy="287" r="5" fill="#81d4fa" data-cap="16" data-size="16 MB" data-lat="7.20 ms"/>
+                <circle cx="550" cy="194" r="5" fill="#81d4fa" data-cap="16" data-size="64 MB" data-lat="54.1 ms"/>
+                <circle cx="703" cy="144" r="5" fill="#81d4fa" data-cap="16" data-size="256 MB" data-lat="159.0 ms"/>
+                <circle cx="780" cy="116" r="5" fill="#81d4fa" data-cap="16" data-size="512 MB" data-lat="289.8 ms"/>
+            </g>
+
+            <!-- cap32: y=[336,322,283,180,127,99] -->
+            <g id="csw-cap32" class="csw-line" opacity="0.15">
+                <polyline points="90,355 243,341 397,301 550,199 703,145 780,121" fill="none" stroke="#ce93d8" stroke-width="2"/>
+                <circle cx="90" cy="355" r="5" fill="#ce93d8" data-cap="32" data-size="1 MB" data-lat="1.67 ms"/>
+                <circle cx="243" cy="341" r="5" fill="#ce93d8" data-cap="32" data-size="4 MB" data-lat="2.25 ms"/>
+                <circle cx="397" cy="301" r="5" fill="#ce93d8" data-cap="32" data-size="16 MB" data-lat="5.32 ms"/>
+                <circle cx="550" cy="199" r="5" fill="#ce93d8" data-cap="32" data-size="64 MB" data-lat="48.3 ms"/>
+                <circle cx="703" cy="145" r="5" fill="#ce93d8" data-cap="32" data-size="256 MB" data-lat="154.1 ms"/>
+                <circle cx="780" cy="121" r="5" fill="#ce93d8" data-cap="32" data-size="512 MB" data-lat="259.4 ms"/>
+            </g>
+
+            <!-- cap64: y=[337,312,289,183,133,103] -->
+            <g id="csw-cap64" class="csw-line">
+                <polyline points="90,355 243,331 397,308 550,204 703,152 780,124" fill="none" stroke="#9b59b6" stroke-width="2"/>
+                <circle cx="90" cy="355" r="5" fill="#9b59b6" data-cap="64" data-size="1 MB" data-lat="1.66 ms"/>
+                <circle cx="243" cy="331" r="5" fill="#9b59b6" data-cap="64" data-size="4 MB" data-lat="2.82 ms"/>
+                <circle cx="397" cy="308" r="5" fill="#9b59b6" data-cap="64" data-size="16 MB" data-lat="4.63 ms"/>
+                <circle cx="550" cy="204" r="5" fill="#9b59b6" data-cap="64" data-size="64 MB" data-lat="43.3 ms"/>
+                <circle cx="703" cy="152" r="5" fill="#9b59b6" data-cap="64" data-size="256 MB" data-lat="132.9 ms"/>
+                <circle cx="780" cy="124" r="5" fill="#9b59b6" data-cap="64" data-size="512 MB" data-lat="245.3 ms"/>
+            </g>
+
+            <!-- Legend -->
+            <g id="csw-legend">
+                <g id="csw-leg-1" class="csw-leg" cursor="pointer"><rect x="100" y="40" width="10" height="10" rx="2" fill="#e74c3c"/><text x="114" y="49" fill="#e0e0e0" font-size="9">cap 1</text></g>
+                <g id="csw-leg-2" class="csw-leg" cursor="pointer"><rect x="170" y="40" width="10" height="10" rx="2" fill="#e67e22"/><text x="184" y="49" fill="#666" font-size="9">cap 2</text></g>
+                <g id="csw-leg-4" class="csw-leg" cursor="pointer"><rect x="240" y="40" width="10" height="10" rx="2" fill="#f39c12"/><text x="254" y="49" fill="#666" font-size="9">cap 4</text></g>
+                <g id="csw-leg-8" class="csw-leg" cursor="pointer"><rect x="310" y="40" width="10" height="10" rx="2" fill="#2ecc71"/><text x="324" y="49" fill="#e0e0e0" font-size="9">cap 8 ★</text></g>
+                <g id="csw-leg-16" class="csw-leg" cursor="pointer"><rect x="400" y="40" width="10" height="10" rx="2" fill="#81d4fa"/><text x="414" y="49" fill="#666" font-size="9">cap 16</text></g>
+                <g id="csw-leg-32" class="csw-leg" cursor="pointer"><rect x="480" y="40" width="10" height="10" rx="2" fill="#ce93d8"/><text x="494" y="49" fill="#666" font-size="9">cap 32</text></g>
+                <g id="csw-leg-64" class="csw-leg" cursor="pointer"><rect x="560" y="40" width="10" height="10" rx="2" fill="#9b59b6"/><text x="574" y="49" fill="#e0e0e0" font-size="9">cap 64</text></g>
+            </g>
+
+            <!-- Tooltip -->
+            <g id="csw-tooltip" opacity="0">
+                <rect x="0" y="0" width="170" height="62" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+                <text id="csw-tt-cap" x="10" y="18" fill="#e0e0e0" font-size="11" font-weight="600"></text>
+                <text id="csw-tt-size" x="10" y="34" fill="#90a4ae" font-size="10"></text>
+                <text id="csw-tt-lat" x="10" y="50" fill="#81d4fa" font-size="10"></text>
+            </g>
+        </svg>
 
         <p>
             <strong>Key findings:</strong>

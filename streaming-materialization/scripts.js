@@ -267,6 +267,60 @@ function initSvgHandlers(container) {
             });
         });
     }
+
+    // Capacity sweep multi-line chart (evaluation.html §8.7)
+    const csw = container.querySelector('#cap-sweep-svg');
+    if (csw) {
+        const caps = ['1','2','4','8','16','32','64'];
+        const active = {1:true, 2:false, 4:false, 8:true, 16:false, 32:false, 64:true};
+        const tt = csw.querySelector('#csw-tooltip');
+        const ttCap = csw.querySelector('#csw-tt-cap');
+        const ttSize = csw.querySelector('#csw-tt-size');
+        const ttLat = csw.querySelector('#csw-tt-lat');
+
+        function updateLines() {
+            caps.forEach(c => {
+                const line = csw.querySelector('#csw-cap' + c);
+                const leg = csw.querySelector('#csw-leg-' + c);
+                if (!line || !leg) return;
+                const on = active[c];
+                line.setAttribute('opacity', on ? '1' : '0.15');
+                leg.querySelector('text').setAttribute('fill', on ? '#e0e0e0' : '#666');
+            });
+        }
+
+        // Legend toggle
+        caps.forEach(c => {
+            const leg = csw.querySelector('#csw-leg-' + c);
+            if (leg) leg.addEventListener('click', (e) => {
+                e.stopPropagation();
+                active[c] = !active[c];
+                updateLines();
+            });
+        });
+
+        // Dot tooltips
+        csw.querySelectorAll('.csw-line circle').forEach(dot => {
+            dot.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const cap = dot.getAttribute('data-cap');
+                const size = dot.getAttribute('data-size');
+                const lat = dot.getAttribute('data-lat');
+                ttCap.textContent = 'Capacity: ' + cap;
+                ttSize.textContent = 'Input: ' + size;
+                ttLat.textContent = 'Latency: ' + lat;
+                let tx = +dot.getAttribute('cx') + 12;
+                let ty = +dot.getAttribute('cy') - 35;
+                if (tx > 680) tx = +dot.getAttribute('cx') - 182;
+                if (ty < 40) ty = +dot.getAttribute('cy') + 12;
+                tt.setAttribute('transform', 'translate(' + tx + ',' + ty + ')');
+                tt.setAttribute('opacity', '1');
+            });
+        });
+
+        // Dismiss tooltip on background click
+        csw.addEventListener('click', () => { tt.setAttribute('opacity', '0'); });
+    }
 }
 
 function attachCodeBlockButtons(container) {

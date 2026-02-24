@@ -1,0 +1,182 @@
+<div class="section-content">
+    <section id="stream-chunk">
+        <h2>3. The StreamChunk Protocol</h2>
+
+        <p>
+            Every streaming pipeline in Deriva communicates through a single three-variant enum. This section defines the protocol, its invariants, and the backpressure mechanism that keeps memory bounded.
+        </p>
+
+        <h3>3.1 The Enum</h3>
+
+        <div class="code-block">
+            <pre>
+<span class="rust-comment">/// A chunk in a streaming computation pipeline.</span>
+#[derive(Debug, Clone)]
+<span class="rust-keyword">pub enum</span> <span class="rust-type">StreamChunk</span> {
+    <span class="rust-comment">/// A data chunk — typically 64 KB of bytes.</span>
+    Data(<span class="rust-type">Bytes</span>),
+    <span class="rust-comment">/// End of stream. Exactly one per stream. No chunks follow.</span>
+    End,
+    <span class="rust-comment">/// Stream error. Terminal. No chunks follow.</span>
+    Error(<span class="rust-type">DerivaError</span>),
+}</pre>
+        </div>
+
+        <p>
+            Three variants, three roles:
+        </p>
+        <ul>
+            <li><strong>Data(Bytes)</strong> — carries a payload. Size is advisory (default 64 KB via <code>DEFAULT_CHUNK_SIZE</code>), but functions may emit smaller or larger chunks. Consumers must not assume fixed sizes.</li>
+            <li><strong>End</strong> — signals successful completion. Exactly one <code>End</code> must terminate every successful stream. After <code>End</code>, no further chunks are sent.</li>
+            <li><strong>Error(DerivaError)</strong> — signals failure. Terminal like <code>End</code>. Downstream stages propagate the error and stop processing.</li>
+        </ul>
+
+        <h3>3.2 Protocol Invariants</h3>
+
+        <p>
+            Every stream — whether produced by a source, a compute function, or the <code>batch_to_stream</code> adapter — must satisfy:
+        </p>
+
+        <ol>
+            <li><strong>Termination.</strong> Every stream ends with exactly one <code>End</code> or one <code>Error</code>. Never both, never neither (unless the receiver is dropped, which is treated as cancellation).</li>
+            <li><strong>Ordering.</strong> Zero or more <code>Data</code> chunks precede the terminal. No <code>Data</code> follows <code>End</code> or <code>Error</code>.</li>
+            <li><strong>Non-empty data.</strong> <code>Data(Bytes)</code> chunks should contain at least one byte. Empty chunks are harmless but wasteful.</li>
+        </ol>
+
+        <h3>3.3 Chunk Lifecycle</h3>
+
+        <p>
+            The interactive diagram below shows a chunk's journey from producer to consumer through a bounded channel. Click to advance through each phase.
+        </p>
+
+        <div class="svg-container" style="margin: 1.5rem auto; text-align: center;">
+            <svg id="chunk-lifecycle-svg" viewBox="0 0 720 300" style="display: inline-block; max-width: 860px; width: 100%; border-radius: 8px; cursor: pointer;"
+                 xmlns="http://www.w3.org/2000/svg">
+                <rect width="720" height="300" rx="8" fill="#1a1e2e"/>
+
+                <text x="360" y="22" text-anchor="middle" fill="#e0e0e0" font-size="13" font-weight="bold" font-family="Roboto Condensed, sans-serif">StreamChunk Lifecycle</text>
+
+                <!-- Producer box -->
+                <rect x="30" y="60" width="120" height="50" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+                <text x="90" y="82" text-anchor="middle" fill="#81d4fa" font-size="11" font-weight="bold" font-family="Roboto Condensed, sans-serif">Producer</text>
+                <text x="90" y="98" text-anchor="middle" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">tx.send(chunk)</text>
+
+                <!-- Channel buffer — 8 slots -->
+                <rect x="200" y="55" width="320" height="60" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1.5"/>
+                <text x="360" y="50" text-anchor="middle" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">tokio::mpsc channel (capacity = 8)</text>
+
+                <!-- 8 slot boxes -->
+                <g id="cl-slots">
+                    <rect x="210" y="65" width="32" height="40" rx="3" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1" id="cl-slot-0"/>
+                    <rect x="248" y="65" width="32" height="40" rx="3" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1" id="cl-slot-1"/>
+                    <rect x="286" y="65" width="32" height="40" rx="3" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1" id="cl-slot-2"/>
+                    <rect x="324" y="65" width="32" height="40" rx="3" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1" id="cl-slot-3"/>
+                    <rect x="362" y="65" width="32" height="40" rx="3" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1" id="cl-slot-4"/>
+                    <rect x="400" y="65" width="32" height="40" rx="3" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1" id="cl-slot-5"/>
+                    <rect x="438" y="65" width="32" height="40" rx="3" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1" id="cl-slot-6"/>
+                    <rect x="476" y="65" width="32" height="40" rx="3" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1" id="cl-slot-7"/>
+                </g>
+
+                <!-- Consumer box -->
+                <rect x="570" y="60" width="120" height="50" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+                <text x="630" y="82" text-anchor="middle" fill="#2ecc71" font-size="11" font-weight="bold" font-family="Roboto Condensed, sans-serif">Consumer</text>
+                <text x="630" y="98" text-anchor="middle" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">rx.recv().await</text>
+
+                <!-- Arrows -->
+                <line x1="150" y1="85" x2="198" y2="85" stroke="#81d4fa" stroke-width="1.5" marker-end="url(#cl-arrow)"/>
+                <line x1="510" y1="85" x2="568" y2="85" stroke="#2ecc71" stroke-width="1.5" marker-end="url(#cl-arrow-g)"/>
+                <defs>
+                    <marker id="cl-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#81d4fa"/></marker>
+                    <marker id="cl-arrow-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#2ecc71"/></marker>
+                </defs>
+
+                <!-- Flowing dot (animated) -->
+                <circle r="5" fill="#81d4fa" opacity="0.9">
+                    <animateMotion dur="2s" repeatCount="indefinite" path="M155,85 L505,85"/>
+                </circle>
+
+                <!-- Phase descriptions -->
+                <g id="cl-phase-0">
+                    <text x="360" y="150" text-anchor="middle" fill="#e0e0e0" font-size="12" font-weight="bold" font-family="Roboto Condensed, sans-serif">Phase 1: Data flows</text>
+                    <text x="360" y="168" text-anchor="middle" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">Producer emits Data(Bytes) chunks. Channel buffers up to 8.</text>
+                    <text x="360" y="183" text-anchor="middle" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">Consumer reads and processes each chunk incrementally.</text>
+                </g>
+                <g id="cl-phase-1" opacity="0">
+                    <text x="360" y="150" text-anchor="middle" fill="#e0e0e0" font-size="12" font-weight="bold" font-family="Roboto Condensed, sans-serif">Phase 2: Backpressure</text>
+                    <text x="360" y="168" text-anchor="middle" fill="#f39c12" font-size="10" font-family="Roboto Condensed, sans-serif">Channel full (8/8 slots). Producer's send().await suspends.</text>
+                    <text x="360" y="183" text-anchor="middle" fill="#f39c12" font-size="10" font-family="Roboto Condensed, sans-serif">No data lost — producer resumes when consumer frees a slot.</text>
+                </g>
+                <g id="cl-phase-2" opacity="0">
+                    <text x="360" y="150" text-anchor="middle" fill="#e0e0e0" font-size="12" font-weight="bold" font-family="Roboto Condensed, sans-serif">Phase 3: End of stream</text>
+                    <text x="360" y="168" text-anchor="middle" fill="#2ecc71" font-size="10" font-family="Roboto Condensed, sans-serif">Producer sends StreamChunk::End — exactly one per stream.</text>
+                    <text x="360" y="183" text-anchor="middle" fill="#2ecc71" font-size="10" font-family="Roboto Condensed, sans-serif">Consumer sees End, finalizes output, drops receiver.</text>
+                </g>
+                <g id="cl-phase-3" opacity="0">
+                    <text x="360" y="150" text-anchor="middle" fill="#e0e0e0" font-size="12" font-weight="bold" font-family="Roboto Condensed, sans-serif">Phase 4: Error propagation</text>
+                    <text x="360" y="168" text-anchor="middle" fill="#e74c3c" font-size="10" font-family="Roboto Condensed, sans-serif">Producer sends StreamChunk::Error(e) — terminal, like End.</text>
+                    <text x="360" y="183" text-anchor="middle" fill="#e74c3c" font-size="10" font-family="Roboto Condensed, sans-serif">Consumer propagates error downstream. Pipeline tears down.</text>
+                </g>
+
+                <!-- Step indicator -->
+                <text id="cl-step" x="360" y="215" text-anchor="middle" fill="#3a3f5c" font-size="10" font-family="Roboto Condensed, sans-serif">● ○ ○ ○</text>
+
+                <!-- Hint -->
+                <text id="cl-hint" x="360" y="240" text-anchor="middle" fill="#b0bec5" font-size="10" font-family="Roboto Condensed, sans-serif">▶ click to step through the chunk lifecycle</text>
+            </svg>
+        </div>
+
+        <h3>3.4 Backpressure via Bounded Channels</h3>
+
+        <p>
+            Backpressure is implicit. Each inter-stage connection is a <code>tokio::mpsc::channel</code> with a fixed capacity (default: 8 chunks × 64 KB = 512 KB of buffered data per edge). The mechanism:
+        </p>
+
+        <ol>
+            <li>Producer calls <code>tx.send(chunk).await</code>.</li>
+            <li>If the channel has room, the send completes immediately.</li>
+            <li>If the channel is full, the <code>.await</code> suspends the producer's task until the consumer calls <code>rx.recv().await</code> and frees a slot.</li>
+            <li>If the consumer drops the receiver (cancellation), <code>send()</code> returns <code>Err</code>, and the producer stops.</li>
+        </ol>
+
+        <p>
+            This gives bounded memory without explicit backpressure signals, flow-control frames, or watermarks. The total memory ceiling for a pipeline with <em>N</em> edges is <em>N × capacity × chunk_size</em>. For a 5-stage pipeline: 5 × 8 × 64 KB = 2.5 MB — regardless of input size.
+        </p>
+
+        <h3>3.5 Cancellation</h3>
+
+        <p>
+            Cancellation is receiver-driven. When a consumer no longer needs data — because the client disconnected, a downstream error occurred, or a cache hit made the computation unnecessary — it drops its <code>mpsc::Receiver</code>. The next <code>tx.send()</code> in the producer returns <code>Err(SendError)</code>, and the producer's spawned task exits. This propagates backward through the pipeline: each stage drops its input receivers, causing upstream stages to terminate in turn.
+        </p>
+
+        <p>
+            No explicit cancel tokens, no poison pills, no shutdown coordination. Rust's ownership model and Tokio's channel semantics provide graceful teardown for free.
+        </p>
+
+        <h3>3.6 Helper Functions</h3>
+
+        <p>
+            Four utility functions bridge between batch and streaming worlds:
+        </p>
+
+        <div class="code-block">
+            <pre>
+<span class="rust-comment">/// Wraps a complete Bytes value as a chunked stream.</span>
+<span class="rust-keyword">fn</span> <span class="rust-function">batch_to_stream</span>(data: <span class="rust-type">Bytes</span>, chunk_size: <span class="rust-type">usize</span>) -&gt; <span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;
+
+<span class="rust-comment">/// Same as batch_to_stream with explicit channel capacity.</span>
+<span class="rust-keyword">fn</span> <span class="rust-function">value_to_stream</span>(data: <span class="rust-type">Bytes</span>, chunk_size: <span class="rust-type">usize</span>, capacity: <span class="rust-type">usize</span>) -&gt; <span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;
+
+<span class="rust-comment">/// Collects a stream back into a single Bytes value.</span>
+<span class="rust-keyword">async fn</span> <span class="rust-function">collect_stream</span>(rx: <span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;) -&gt; <span class="rust-type">Result</span>&lt;<span class="rust-type">Bytes</span>, <span class="rust-type">DerivaError</span>&gt;
+
+<span class="rust-comment">/// Splits one stream into two identical streams (clone each chunk).</span>
+<span class="rust-keyword">fn</span> <span class="rust-function">tee_stream</span>(input: <span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;, capacity: <span class="rust-type">usize</span>)
+    -&gt; (<span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;, <span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;)</pre>
+        </div>
+
+        <p>
+            <code>batch_to_stream</code> slices a <code>Bytes</code> buffer into 64 KB chunks and sends them followed by <code>End</code>. <code>collect_stream</code> does the inverse — accumulates all <code>Data</code> chunks, returns <code>Err</code> on <code>Error</code>, and returns the concatenated buffer on <code>End</code>. <code>tee_stream</code> clones each chunk to two outputs, enabling simultaneous cache-write and client-delivery (<a href="#pipeline-container">§6</a>).
+        </p>
+
+    </section>
+</div>

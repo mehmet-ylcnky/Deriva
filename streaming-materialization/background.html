@@ -1,0 +1,140 @@
+<div class="section-content">
+    <section id="background">
+        <h2>2. Background: Streaming Dataflow</h2>
+
+        <p>
+            Streaming dataflow — processing data incrementally as it arrives rather than waiting for the full input — is a well-studied paradigm in data processing systems. This section surveys the landscape and identifies the gap that Deriva's streaming materialization fills.
+        </p>
+
+        <h3>2.1 Dataflow Models</h3>
+
+        <p>
+            Two fundamental models govern how data moves through a pipeline:
+        </p>
+
+        <ul>
+            <li><strong>Push-based.</strong> Producers emit data as it becomes available. Consumers must keep up or apply backpressure. Examples: Flink, Kafka Streams, Unix pipes.</li>
+            <li><strong>Pull-based.</strong> Consumers request data when ready. Producers block until a request arrives. Examples: iterators, database cursors, Volcano-style query engines.</li>
+        </ul>
+
+        <p>
+            Deriva uses a <strong>push-based model with bounded-channel backpressure</strong>. Producers push <code>StreamChunk</code> values into <code>tokio::mpsc</code> channels. When the channel is full (default capacity: 8 chunks), the producer's <code>send().await</code> suspends until the consumer reads a chunk — providing natural flow control without explicit backpressure signaling.
+        </p>
+
+        <h3>2.2 Comparison with Existing Systems</h3>
+
+        <p>
+            The following comparison highlights where each system sits along two axes: whether it supports streaming execution, and whether it owns the storage layer with content-addressing semantics.
+        </p>
+
+        <div class="svg-container" style="margin: 1.5rem auto; text-align: center;">
+            <svg id="bg-compare-svg" viewBox="0 0 700 340" style="display: inline-block; max-width: 860px; width: 100%; border-radius: 8px; cursor: pointer;"
+                 xmlns="http://www.w3.org/2000/svg">
+                <rect width="700" height="340" rx="8" fill="#1a1e2e"/>
+
+                <text x="350" y="24" text-anchor="middle" fill="#e0e0e0" font-size="14" font-weight="bold" font-family="Roboto Condensed, sans-serif">Streaming × Content-Addressing Landscape</text>
+
+                <!-- Axes -->
+                <line x1="100" y1="280" x2="660" y2="280" stroke="#3a3f5c" stroke-width="1.5"/>
+                <line x1="100" y1="280" x2="100" y2="50" stroke="#3a3f5c" stroke-width="1.5"/>
+                <text x="380" y="300" text-anchor="middle" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">Content-Addressing / Storage Ownership →</text>
+                <text x="60" y="165" text-anchor="middle" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif" transform="rotate(-90 60 165)">Streaming Capability →</text>
+
+                <!-- Quadrant labels -->
+                <text x="200" y="68" fill="#3a3f5c" font-size="9" font-family="Roboto Condensed, sans-serif">streaming + external storage</text>
+                <text x="480" y="68" fill="#3a3f5c" font-size="9" font-family="Roboto Condensed, sans-serif">streaming + CAS</text>
+                <text x="200" y="270" fill="#3a3f5c" font-size="9" font-family="Roboto Condensed, sans-serif">batch + external storage</text>
+                <text x="480" y="270" fill="#3a3f5c" font-size="9" font-family="Roboto Condensed, sans-serif">batch + CAS</text>
+
+                <!-- System dots — each clickable group -->
+                <!-- Flink: high streaming, low CAS -->
+                <g id="bgc-flink" class="bgc-item">
+                    <circle cx="200" cy="90" r="16" fill="#81d4fa" opacity="0.8"/>
+                    <text x="200" y="94" text-anchor="middle" fill="#1a1e2e" font-size="8" font-weight="bold" font-family="Roboto Condensed, sans-serif">Flink</text>
+                </g>
+                <!-- Spark Structured Streaming: medium streaming, low CAS -->
+                <g id="bgc-spark" class="bgc-item">
+                    <circle cx="250" cy="130" r="16" fill="#ce93d8" opacity="0.8"/>
+                    <text x="250" y="134" text-anchor="middle" fill="#1a1e2e" font-size="8" font-weight="bold" font-family="Roboto Condensed, sans-serif">Spark</text>
+                </g>
+                <!-- Kafka Streams: high streaming, no CAS -->
+                <g id="bgc-kafka" class="bgc-item">
+                    <circle cx="160" cy="100" r="16" fill="#f39c12" opacity="0.8"/>
+                    <text x="160" y="104" text-anchor="middle" fill="#1a1e2e" font-size="8" font-weight="bold" font-family="Roboto Condensed, sans-serif">Kafka</text>
+                </g>
+                <!-- Unix pipes: high streaming, no CAS -->
+                <g id="bgc-unix" class="bgc-item">
+                    <circle cx="130" cy="80" r="16" fill="#90a4ae" opacity="0.8"/>
+                    <text x="130" y="84" text-anchor="middle" fill="#1a1e2e" font-size="8" font-weight="bold" font-family="Roboto Condensed, sans-serif">pipes</text>
+                </g>
+                <!-- Bazel: batch, high CAS -->
+                <g id="bgc-bazel" class="bgc-item">
+                    <circle cx="540" cy="230" r="16" fill="#e74c3c" opacity="0.8"/>
+                    <text x="540" y="234" text-anchor="middle" fill="#1a1e2e" font-size="8" font-weight="bold" font-family="Roboto Condensed, sans-serif">Bazel</text>
+                </g>
+                <!-- Nix: batch, high CAS -->
+                <g id="bgc-nix" class="bgc-item">
+                    <circle cx="590" cy="240" r="16" fill="#e74c3c" opacity="0.8"/>
+                    <text x="590" y="244" text-anchor="middle" fill="#1a1e2e" font-size="8" font-weight="bold" font-family="Roboto Condensed, sans-serif">Nix</text>
+                </g>
+                <!-- IPFS: no streaming, high CAS -->
+                <g id="bgc-ipfs" class="bgc-item">
+                    <circle cx="620" cy="210" r="16" fill="#f39c12" opacity="0.8"/>
+                    <text x="620" y="214" text-anchor="middle" fill="#1a1e2e" font-size="8" font-weight="bold" font-family="Roboto Condensed, sans-serif">IPFS</text>
+                </g>
+                <!-- DVC: batch, medium CAS -->
+                <g id="bgc-dvc" class="bgc-item">
+                    <circle cx="420" cy="240" r="16" fill="#ce93d8" opacity="0.8"/>
+                    <text x="420" y="244" text-anchor="middle" fill="#1a1e2e" font-size="8" font-weight="bold" font-family="Roboto Condensed, sans-serif">DVC</text>
+                </g>
+
+                <!-- DERIVA: high streaming + high CAS (top-right) -->
+                <g id="bgc-deriva">
+                    <circle cx="580" cy="90" r="20" fill="#2ecc71" opacity="0.9" stroke="#e0e0e0" stroke-width="2"/>
+                    <text x="580" y="94" text-anchor="middle" fill="#1a1e2e" font-size="9" font-weight="bold" font-family="Roboto Condensed, sans-serif">Deriva</text>
+                    <!-- Pulsing ring -->
+                    <circle cx="580" cy="90" r="20" fill="none" stroke="#2ecc71" stroke-width="1.5" opacity="0.6">
+                        <animate attributeName="r" values="20;28;20" dur="2s" repeatCount="indefinite"/>
+                        <animate attributeName="opacity" values="0.6;0;0.6" dur="2s" repeatCount="indefinite"/>
+                    </circle>
+                </g>
+
+                <!-- Info panel -->
+                <rect id="bgc-panel-bg" x="110" y="305" width="480" height="28" rx="4" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+                <text id="bgc-panel" x="350" y="323" text-anchor="middle" fill="#b0bec5" font-size="10" font-family="Roboto Condensed, sans-serif">▶ click any system to see details</text>
+            </svg>
+        </div>
+
+        <h4>Apache Flink</h4>
+        <p>
+            True streaming with event-time processing, exactly-once semantics, and sophisticated windowing. However, Flink is an external orchestrator — it does not own the storage layer. Intermediate state is managed through pluggable state backends (RocksDB, heap), and outputs are written to external sinks. There is no content-addressing, no structural caching, and no computation-aware eviction.
+        </p>
+
+        <h4>Spark Structured Streaming</h4>
+        <p>
+            Micro-batch streaming built on the Spark SQL engine. Each micro-batch is a small batch job, providing streaming semantics at the cost of higher latency than true streaming systems. Storage is external (HDFS, S3, Delta Lake), and there is no content-addressing of intermediate or final results.
+        </p>
+
+        <h4>Kafka Streams</h4>
+        <p>
+            Log-based stream processing embedded in the Kafka ecosystem. State is maintained in local RocksDB stores backed by Kafka changelog topics. While Kafka provides durable message storage, it has no concept of computation-addressing — messages are identified by topic-partition-offset, not by the computation that produced them.
+        </p>
+
+        <h4>Unix Pipes</h4>
+        <p>
+            The original streaming dataflow: processes connected by kernel-buffered pipes with natural backpressure. Simple and effective, but with no caching, no DAG awareness, no content-addressing, and no ability to skip computation when the result is already known. Each invocation recomputes from scratch.
+        </p>
+
+        <h4>Bazel / Nix</h4>
+        <p>
+            Content-addressed build systems that cache computation results. Bazel uses action graphs with remote caching; Nix uses derivation hashes for reproducible builds. Both are strictly batch — the entire output must be produced before it is stored and served. Neither supports streaming intermediate results through a pipeline.
+        </p>
+
+        <h3>2.3 The Gap</h3>
+
+        <p>
+            No existing system combines streaming execution with content-addressed storage. Streaming systems (Flink, Kafka Streams) treat storage as external. Content-addressed systems (Bazel, Nix, IPFS) are batch-only. Deriva's streaming materialization occupies the previously empty quadrant: <strong>streaming dataflow within a computation-addressed store</strong>, where intermediate chunks are processed incrementally while the final result is content-addressed, cached, and subject to the same invalidation and GC semantics as batch outputs.
+        </p>
+
+    </section>
+</div>

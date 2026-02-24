@@ -1,0 +1,49 @@
+<div class="section-content">
+    <section id="conclusion">
+        <h2>10. Conclusion</h2>
+
+        <p>
+            This paper presented the design and implementation of streaming materialization for a computation-addressed store. Where Paper 2 established robust batch materialization with content-addressed caching, Paper 2b extends the execution model to support chunk-at-a-time processing through concurrent pipeline stages — without breaking the CAddr invariants that make the store trustworthy.
+        </p>
+
+        <h3>10.1 Summary of Contributions</h3>
+
+        <ul>
+            <li><strong>StreamChunk protocol</strong> (<a href="#stream-chunk-container">§3</a>) — a four-variant enum (<code>Data</code>, <code>End</code>, <code>Error</code>, <code>Backpressure</code>) that provides a typed, bounded communication contract between pipeline stages.</li>
+            <li><strong>20 streaming built-in functions</strong> (<a href="#streaming-functions-container">§4</a>) — covering map transforms, accumulators, multi-input combiners, and utility operations, all implementing the <code>StreamingFunction</code> trait with <code>spawn_streaming</code>.</li>
+            <li><strong>Auto-wrapping</strong> (<a href="#auto-wrapping-container">§5</a>) — any existing batch <code>ComputeFunction</code> can participate in a streaming pipeline via automatic collect-execute-rechunk wrapping, enabling incremental migration.</li>
+            <li><strong>StreamPipeline executor</strong> (<a href="#pipeline-container">§6</a>) — topological sort, concurrent stage execution via Tokio tasks, and bounded <code>mpsc</code> channels with configurable capacity.</li>
+            <li><strong>CAddr invariant preservation</strong> (<a href="#cas-invariants-container">§7</a>) — cache-after-collect strategy ensures that streaming is a compute optimization only; the content-addressed store sees identical <code>Bytes</code> values regardless of execution path.</li>
+        </ul>
+
+        <h3>10.2 Key Results</h3>
+
+        <p>
+            Benchmarks on real hardware (<a href="#evaluation-container">§8</a>) demonstrate:
+        </p>
+
+        <ul>
+            <li><strong>Crossover at ~3 MB</strong> — for a 5-stage pipeline, streaming overtakes batch on wall-clock time above 3 MB of input data. At 32 MB, streaming is 2.7× faster.</li>
+            <li><strong>Constant TTFB</strong> — streaming delivers the first 64 KB chunk in ~1.6 ms regardless of input size (1 MB or 512 MB) or pipeline depth.</li>
+            <li><strong>Bounded memory</strong> — a 5-stage pipeline uses at most D × N × chunk_size = 2.5 MB of buffer memory, compared to 2.5 GB for batch on 512 MB input.</li>
+            <li><strong>64 KB optimal chunk size</strong> — balances channel overhead (1.50 ms at 64 KB vs 8.56 ms at 1 KB) with streaming responsiveness.</li>
+        </ul>
+
+        <h3>10.3 Future Directions</h3>
+
+        <ul>
+            <li><strong>Adaptive chunk sizing</strong> — dynamically adjust chunk size based on observed throughput and backpressure signals. Stages processing faster than their downstream could increase chunk size to reduce channel overhead; slow consumers could request smaller chunks for finer-grained backpressure.</li>
+            <li><strong>Streaming-aware caching</strong> — the current cache-after-collect strategy requires buffering the full result before caching. A chunk-level cache could store individual chunks keyed by (CAddr, offset), enabling partial cache hits and range reads without full materialization.</li>
+            <li><strong>Cross-node streaming</strong> — extend the pipeline model across network boundaries using gRPC streaming or QUIC, enabling distributed computation graphs where stages run on different machines with chunk-level flow control.</li>
+            <li><strong>Pipeline fusion</strong> — adjacent map stages (e.g., uppercase → lowercase) could be fused into a single stage that applies both transforms per chunk, eliminating intermediate channel hops. The optimizer would need to prove that fusion preserves semantics.</li>
+            <li><strong>Memory budget enforcement</strong> — the <code>PipelineConfig::memory_budget</code> field exists but is not yet enforced. A global memory controller could pause producers when total pipeline memory approaches the budget, providing system-wide backpressure beyond per-channel bounds.</li>
+        </ul>
+
+        <h3>10.4 Closing Remarks</h3>
+
+        <p>
+            Streaming materialization does not replace batch — it complements it. The auto-wrapping layer (<a href="#auto-wrapping-container">§5</a>) ensures backward compatibility, the CAddr invariants (<a href="#cas-invariants-container">§7</a>) ensure correctness, and the benchmark crossover at ~3 MB (<a href="#evaluation-container">§8</a>) provides a clear decision boundary. For the computation-addressed store, streaming is the natural next step: computations that are too large to materialize in one shot can now flow through bounded pipelines, chunk by chunk, without sacrificing the content-addressing guarantees that make the system trustworthy.
+        </p>
+
+    </section>
+</div>

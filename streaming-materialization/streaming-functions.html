@@ -1,0 +1,210 @@
+<div class="section-content">
+    <section id="streaming-functions">
+        <h2>4. Streaming Compute Functions</h2>
+
+        <p>
+            Deriva ships 20 built-in streaming functions organized into four categories. Each implements the <code>StreamingComputeFunction</code> trait — accepting one or more <code>Receiver&lt;StreamChunk&gt;</code> inputs and returning a single <code>Receiver&lt;StreamChunk&gt;</code> output. This section describes the trait contract, the internal helper patterns, and all 20 functions.
+        </p>
+
+        <h3>4.1 The Trait</h3>
+
+        <div class="code-block">
+            <pre>
+#[async_trait]
+<span class="rust-keyword">pub trait</span> <span class="rust-type">StreamingComputeFunction</span>: Send + Sync {
+    <span class="rust-comment">/// Process streaming inputs and produce streaming output.</span>
+    <span class="rust-keyword">async fn</span> <span class="rust-function">stream_execute</span>(
+        &amp;<span class="rust-keyword">self</span>,
+        inputs: <span class="rust-type">Vec</span>&lt;mpsc::<span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;&gt;,
+        params: &amp;<span class="rust-type">HashMap</span>&lt;<span class="rust-type">String</span>, <span class="rust-type">String</span>&gt;,
+    ) -&gt; mpsc::<span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;;
+
+    <span class="rust-comment">/// Preferred chunk size in bytes (default: 64 KB).</span>
+    <span class="rust-keyword">fn</span> <span class="rust-function">preferred_chunk_size</span>(&amp;<span class="rust-keyword">self</span>) -&gt; <span class="rust-type">usize</span> { DEFAULT_CHUNK_SIZE }
+
+    <span class="rust-comment">/// Output channel capacity (default: 8 chunks).</span>
+    <span class="rust-keyword">fn</span> <span class="rust-function">channel_capacity</span>(&amp;<span class="rust-keyword">self</span>) -&gt; <span class="rust-type">usize</span> { DEFAULT_CHANNEL_CAPACITY }
+}</pre>
+        </div>
+
+        <p>
+            The trait is intentionally minimal. A function receives its inputs as a vector of receivers (one per dependency in the DAG), a parameter map for configuration, and returns a single output receiver. The function spawns its own Tokio task internally — the caller never blocks.
+        </p>
+
+        <h3>4.2 Internal Helpers</h3>
+
+        <p>
+            Two helper patterns eliminate boilerplate across the 20 implementations:
+        </p>
+
+        <div class="code-block">
+            <pre>
+<span class="rust-comment">/// Map: read one input, transform each Data chunk, forward.</span>
+<span class="rust-keyword">fn</span> <span class="rust-function">spawn_map</span>(
+    rx: <span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;,
+    cap: <span class="rust-type">usize</span>,
+    f: <span class="rust-keyword">impl</span> <span class="rust-type">Fn</span>(&amp;[<span class="rust-type">u8</span>]) -&gt; <span class="rust-type">Result</span>&lt;<span class="rust-type">Bytes</span>, <span class="rust-type">String</span>&gt; + Send + <span class="rust-string">'static</span>,
+) -&gt; <span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;
+
+<span class="rust-comment">/// Accumulate: fold all chunks into state, emit single result.</span>
+<span class="rust-keyword">fn</span> <span class="rust-function">spawn_accumulate</span>&lt;S: Send + <span class="rust-string">'static</span>&gt;(
+    rx: <span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;,
+    init: S,
+    fold: <span class="rust-keyword">impl</span> <span class="rust-type">Fn</span>(&amp;<span class="rust-keyword">mut</span> S, &amp;[<span class="rust-type">u8</span>]) + Send + <span class="rust-string">'static</span>,
+    finalize: <span class="rust-keyword">impl</span> <span class="rust-type">FnOnce</span>(S) -&gt; <span class="rust-type">Bytes</span> + Send + <span class="rust-string">'static</span>,
+) -&gt; <span class="rust-type">Receiver</span>&lt;<span class="rust-type">StreamChunk</span>&gt;</pre>
+        </div>
+
+        <p>
+            <code>spawn_map</code> handles the 9 transforms (category 1): it reads chunks, applies a closure, and forwards the result. Error from the closure becomes <code>StreamChunk::Error</code>. <code>spawn_accumulate</code> handles the 3 accumulators (category 2): it folds all chunks into a state value, then emits a single <code>Data</code> chunk followed by <code>End</code>.
+        </p>
+
+        <h3>4.3 The 20 Built-in Functions</h3>
+
+        <p>
+            Click a category in the diagram below to see its functions. Each category uses a different execution pattern.
+        </p>
+
+        <div class="svg-container" style="margin: 1.5rem auto; text-align: center;">
+            <svg id="fn-category-svg" viewBox="0 0 720 420" style="display: inline-block; max-width: 860px; width: 100%; border-radius: 8px; cursor: pointer;"
+                 xmlns="http://www.w3.org/2000/svg">
+                <rect width="720" height="420" rx="8" fill="#1a1e2e"/>
+
+                <text x="360" y="24" text-anchor="middle" fill="#e0e0e0" font-size="13" font-weight="bold" font-family="Roboto Condensed, sans-serif">20 Streaming Functions — 4 Categories</text>
+
+                <!-- Category boxes (clickable) -->
+                <!-- Cat 1: Transforms -->
+                <g id="fnc-cat-1" style="cursor:pointer">
+                    <rect x="20" y="42" width="160" height="52" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+                    <text x="100" y="63" text-anchor="middle" fill="#81d4fa" font-size="11" font-weight="bold" font-family="Roboto Condensed, sans-serif">Transforms</text>
+                    <text x="100" y="80" text-anchor="middle" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">9 functions · spawn_map</text>
+                </g>
+                <!-- Cat 2: Accumulators -->
+                <g id="fnc-cat-2" style="cursor:pointer">
+                    <rect x="195" y="42" width="160" height="52" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="2"/>
+                    <text x="275" y="63" text-anchor="middle" fill="#2ecc71" font-size="11" font-weight="bold" font-family="Roboto Condensed, sans-serif">Accumulators</text>
+                    <text x="275" y="80" text-anchor="middle" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">3 functions · spawn_accumulate</text>
+                </g>
+                <!-- Cat 3: Combiners -->
+                <g id="fnc-cat-3" style="cursor:pointer">
+                    <rect x="370" y="42" width="160" height="52" rx="6" fill="#232840" stroke="#f39c12" stroke-width="2"/>
+                    <text x="450" y="63" text-anchor="middle" fill="#f39c12" font-size="11" font-weight="bold" font-family="Roboto Condensed, sans-serif">Combiners</text>
+                    <text x="450" y="80" text-anchor="middle" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">3 functions · multi-input</text>
+                </g>
+                <!-- Cat 4: Utilities -->
+                <g id="fnc-cat-4" style="cursor:pointer">
+                    <rect x="545" y="42" width="160" height="52" rx="6" fill="#232840" stroke="#ce93d8" stroke-width="2"/>
+                    <text x="625" y="63" text-anchor="middle" fill="#ce93d8" font-size="11" font-weight="bold" font-family="Roboto Condensed, sans-serif">Utilities</text>
+                    <text x="625" y="80" text-anchor="middle" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">5 functions · mixed patterns</text>
+                </g>
+
+                <!-- Detail panels (one per category, toggled) -->
+                <g id="fnc-detail-1" opacity="0">
+                    <rect x="20" y="108" width="680" height="295" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1"/>
+                    <text x="40" y="132" fill="#81d4fa" font-size="12" font-weight="bold" font-family="Roboto Condensed, sans-serif">Category 1: Single-Input Chunk-by-Chunk Transforms (spawn_map)</text>
+                    <text x="40" y="152" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">Each chunk is transformed independently. Output size ≈ input size. No buffering beyond one chunk.</text>
+
+                    <text x="40" y="178" fill="#e0e0e0" font-size="10" font-family="Roboto Condensed, sans-serif"> 1. StreamingIdentity</text>
+                    <text x="250" y="178" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— pass-through, useful for pipeline testing</text>
+                    <text x="40" y="198" fill="#e0e0e0" font-size="10" font-family="Roboto Condensed, sans-serif"> 2. StreamingUppercase</text>
+                    <text x="250" y="198" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— ASCII uppercase, chunk-by-chunk</text>
+                    <text x="40" y="218" fill="#e0e0e0" font-size="10" font-family="Roboto Condensed, sans-serif"> 3. StreamingLowercase</text>
+                    <text x="250" y="218" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— ASCII lowercase, chunk-by-chunk</text>
+                    <text x="40" y="238" fill="#e0e0e0" font-size="10" font-family="Roboto Condensed, sans-serif"> 4. StreamingReverse</text>
+                    <text x="250" y="238" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— reverse bytes within each chunk</text>
+                    <text x="40" y="258" fill="#e0e0e0" font-size="10" font-family="Roboto Condensed, sans-serif"> 5. StreamingBase64Encode</text>
+                    <text x="250" y="258" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— base64-encode each chunk independently</text>
+                    <text x="40" y="278" fill="#e0e0e0" font-size="10" font-family="Roboto Condensed, sans-serif"> 6. StreamingBase64Decode</text>
+                    <text x="250" y="278" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— base64-decode each chunk independently</text>
+                    <text x="40" y="298" fill="#e0e0e0" font-size="10" font-family="Roboto Condensed, sans-serif"> 7. StreamingXor</text>
+                    <text x="250" y="298" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— XOR each byte with params["key"] (single byte)</text>
+                    <text x="40" y="318" fill="#e0e0e0" font-size="10" font-family="Roboto Condensed, sans-serif"> 8. StreamingCompress</text>
+                    <text x="250" y="318" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— zlib-compress each chunk independently</text>
+                    <text x="40" y="338" fill="#e0e0e0" font-size="10" font-family="Roboto Condensed, sans-serif"> 9. StreamingDecompress</text>
+                    <text x="250" y="338" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— zlib-decompress each chunk independently</text>
+
+                    <text x="40" y="370" fill="#3a3f5c" font-size="9" font-family="Roboto Condensed, sans-serif">Pattern: chunk in → transform(chunk) → chunk out. O(chunk_size) memory.</text>
+                </g>
+
+                <g id="fnc-detail-2" opacity="0">
+                    <rect x="20" y="108" width="680" height="295" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+                    <text x="40" y="132" fill="#2ecc71" font-size="12" font-weight="bold" font-family="Roboto Condensed, sans-serif">Category 2: Accumulators (spawn_accumulate)</text>
+                    <text x="40" y="152" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">Fold all chunks into rolling state, emit single result on End. Streaming input, batch output.</text>
+
+                    <text x="40" y="185" fill="#e0e0e0" font-size="11" font-family="Roboto Condensed, sans-serif">10. StreamingSha256</text>
+                    <text x="250" y="185" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— rolling SHA-256 hash, emits 32-byte digest</text>
+                    <text x="40" y="215" fill="#e0e0e0" font-size="11" font-family="Roboto Condensed, sans-serif">11. StreamingByteCount</text>
+                    <text x="250" y="215" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— counts total bytes, emits u64 as 8-byte big-endian</text>
+                    <text x="40" y="245" fill="#e0e0e0" font-size="11" font-family="Roboto Condensed, sans-serif">12. StreamingChecksum</text>
+                    <text x="250" y="245" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— rolling CRC32, emits 4-byte big-endian checksum</text>
+
+                    <text x="40" y="290" fill="#3a3f5c" font-size="9" font-family="Roboto Condensed, sans-serif">Pattern: fold(state, chunk) for each Data → finalize(state) → single Data + End.</text>
+                    <text x="40" y="306" fill="#3a3f5c" font-size="9" font-family="Roboto Condensed, sans-serif">Memory: O(state_size) — 32 bytes for SHA-256, 8 bytes for count, 4 bytes for CRC.</text>
+                </g>
+
+                <g id="fnc-detail-3" opacity="0">
+                    <rect x="20" y="108" width="680" height="295" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+                    <text x="40" y="132" fill="#f39c12" font-size="12" font-weight="bold" font-family="Roboto Condensed, sans-serif">Category 3: Multi-Input Combiners</text>
+                    <text x="40" y="152" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">Merge N input streams into one output stream. Custom task logic per combiner.</text>
+
+                    <text x="40" y="185" fill="#e0e0e0" font-size="11" font-family="Roboto Condensed, sans-serif">13. StreamingConcat</text>
+                    <text x="250" y="185" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— reads inputs sequentially, emitting chunks as they arrive</text>
+                    <text x="40" y="215" fill="#e0e0e0" font-size="11" font-family="Roboto Condensed, sans-serif">14. StreamingInterleave</text>
+                    <text x="250" y="215" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— round-robin chunks from N inputs</text>
+                    <text x="40" y="245" fill="#e0e0e0" font-size="11" font-family="Roboto Condensed, sans-serif">15. StreamingZipConcat</text>
+                    <text x="250" y="245" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— pair-wise concatenate chunks from exactly 2 inputs</text>
+
+                    <text x="40" y="290" fill="#3a3f5c" font-size="9" font-family="Roboto Condensed, sans-serif">Pattern: custom multi-receiver loop. Concat drains sequentially; Interleave round-robins;</text>
+                    <text x="40" y="306" fill="#3a3f5c" font-size="9" font-family="Roboto Condensed, sans-serif">ZipConcat pairs chunks from two inputs. Memory: O(chunk_size) per active input.</text>
+                </g>
+
+                <g id="fnc-detail-4" opacity="0">
+                    <rect x="20" y="108" width="680" height="295" rx="6" fill="#232840" stroke="#ce93d8" stroke-width="1"/>
+                    <text x="40" y="132" fill="#ce93d8" font-size="12" font-weight="bold" font-family="Roboto Condensed, sans-serif">Category 4: Utilities</text>
+                    <text x="40" y="152" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">Reshape, slice, or augment streams. Mixed execution patterns.</text>
+
+                    <text x="40" y="185" fill="#e0e0e0" font-size="11" font-family="Roboto Condensed, sans-serif">16. StreamingChunkResizer</text>
+                    <text x="270" y="185" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— re-chunk to params["target_size"] (default 64 KB)</text>
+                    <text x="40" y="215" fill="#e0e0e0" font-size="11" font-family="Roboto Condensed, sans-serif">17. StreamingTake</text>
+                    <text x="270" y="215" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— emit first params["bytes"] bytes, then End</text>
+                    <text x="40" y="245" fill="#e0e0e0" font-size="11" font-family="Roboto Condensed, sans-serif">18. StreamingSkip</text>
+                    <text x="270" y="245" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— skip first params["bytes"] bytes, pass rest through</text>
+                    <text x="40" y="275" fill="#e0e0e0" font-size="11" font-family="Roboto Condensed, sans-serif">19. StreamingRepeat</text>
+                    <text x="270" y="275" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— repeat full input params["count"] times (buffers all)</text>
+                    <text x="40" y="305" fill="#e0e0e0" font-size="11" font-family="Roboto Condensed, sans-serif">20. StreamingTeeCount</text>
+                    <text x="270" y="305" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">— pass data through, append byte count as ASCII trailer</text>
+
+                    <text x="40" y="345" fill="#3a3f5c" font-size="9" font-family="Roboto Condensed, sans-serif">Mixed patterns: Resizer uses internal BytesMut buffer. Take/Skip track byte offset.</text>
+                    <text x="40" y="361" fill="#3a3f5c" font-size="9" font-family="Roboto Condensed, sans-serif">Repeat buffers entire input (O(n) memory). TeeCount combines map + accumulate.</text>
+                </g>
+
+                <!-- Hint -->
+                <text id="fnc-hint" x="360" y="412" text-anchor="middle" fill="#b0bec5" font-size="10" font-family="Roboto Condensed, sans-serif">▶ click a category to see its functions</text>
+            </svg>
+        </div>
+
+        <h4>Category 1: Transforms (9 functions)</h4>
+        <p>
+            All nine use <code>spawn_map</code>: read a chunk, apply a pure function, emit the result. Memory is O(chunk_size) — one chunk in, one chunk out. The transform closure is <code>Fn(&amp;[u8]) -&gt; Result&lt;Bytes, String&gt;</code>, so errors (e.g., invalid base64) become <code>StreamChunk::Error</code> and terminate the stream.
+        </p>
+        <p>
+            Notable: <code>StreamingCompress</code> and <code>StreamingDecompress</code> operate per-chunk, not across the full stream. This means each chunk is independently compressed — suitable for random-access decompression but with lower compression ratios than whole-stream compression.
+        </p>
+
+        <h4>Category 2: Accumulators (3 functions)</h4>
+        <p>
+            All three use <code>spawn_accumulate</code>: fold each chunk into a rolling state, then emit a single result on <code>End</code>. These are inherently non-streaming in output — they must see all input before producing any output — but they are streaming in <em>input</em>: they never buffer the full input, only the fixed-size state (32 bytes for SHA-256, 8 bytes for byte count, 4 bytes for CRC32).
+        </p>
+
+        <h4>Category 3: Combiners (3 functions)</h4>
+        <p>
+            These accept multiple input receivers. <code>StreamingConcat</code> drains inputs sequentially — all chunks from input 0, then input 1, etc. <code>StreamingInterleave</code> round-robins: one chunk from each input in turn. <code>StreamingZipConcat</code> reads one chunk from each of exactly two inputs and concatenates them pairwise.
+        </p>
+
+        <h4>Category 4: Utilities (5 functions)</h4>
+        <p>
+            Mixed patterns. <code>StreamingChunkResizer</code> maintains an internal <code>BytesMut</code> buffer and emits chunks of exactly the target size. <code>StreamingTake</code> and <code>StreamingSkip</code> track a byte offset and slice chunks at the boundary. <code>StreamingRepeat</code> is the only function that buffers the entire input — it must replay the full content <em>N</em> times. <code>StreamingTeeCount</code> combines pass-through with a rolling byte counter, appending the count as a decimal ASCII trailer after the final data chunk.
+        </p>
+
+    </section>
+</div>

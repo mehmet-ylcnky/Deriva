@@ -1,0 +1,135 @@
+<div class="section-content">
+    <section id="cas-invariants">
+        <h2>7. Integration with CAS Invariants</h2>
+
+        <p>
+            Streaming materialization must not break the invariants that make content-addressed storage useful. This section shows how each core CAS property — deterministic addressing, caching, invalidation, and verification — is preserved when computation happens incrementally through chunks rather than atomically on full values.
+        </p>
+
+        <h3>7.1 Deterministic CAddr</h3>
+
+        <p>
+            The fundamental CAS invariant: <strong>the same recipe always produces the same CAddr</strong>. Streaming does not change this. The CAddr is computed from the recipe (function ID + input addresses + parameters), not from the output bytes. Whether the output is produced in one batch or 1,000 chunks, the recipe is identical, so the CAddr is identical.
+        </p>
+
+        <p>
+            Streaming is a <em>compute optimization</em>, not a <em>storage optimization</em>. The pipeline changes how bytes flow through the system, but the logical computation — and therefore the address — remains the same.
+        </p>
+
+        <h3>7.2 Caching Strategy: Cache-After-Collect</h3>
+
+        <p>
+            Three caching strategies were considered:
+        </p>
+
+        <div class="svg-container" style="margin: 1.5rem auto; text-align: center;">
+            <svg id="cas-cache-svg" viewBox="0 0 720 310" style="display: inline-block; max-width: 860px; width: 100%; border-radius: 8px; cursor: pointer;"
+                 xmlns="http://www.w3.org/2000/svg">
+                <rect width="720" height="310" rx="8" fill="#1a1e2e"/>
+
+                <text x="360" y="22" text-anchor="middle" fill="#e0e0e0" font-size="13" font-weight="bold" font-family="Roboto Condensed, sans-serif">Caching Strategy Comparison</text>
+
+                <!-- Option A: Cache-after-collect (chosen) -->
+                <g id="cas-opt-a" style="cursor:pointer">
+                    <rect x="20" y="40" width="215" height="52" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="2"/>
+                    <text x="127" y="60" text-anchor="middle" fill="#2ecc71" font-size="11" font-weight="bold" font-family="Roboto Condensed, sans-serif">A: Cache-After-Collect ✓</text>
+                    <text x="127" y="78" text-anchor="middle" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">chosen — collect → cache full Bytes</text>
+                </g>
+                <!-- Option B -->
+                <g id="cas-opt-b" style="cursor:pointer">
+                    <rect x="252" y="40" width="215" height="52" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+                    <text x="360" y="60" text-anchor="middle" fill="#e74c3c" font-size="11" font-weight="bold" font-family="Roboto Condensed, sans-serif">B: Cache Chunks ✗</text>
+                    <text x="360" y="78" text-anchor="middle" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">rejected — per-chunk cache entries</text>
+                </g>
+                <!-- Option C -->
+                <g id="cas-opt-c" style="cursor:pointer">
+                    <rect x="484" y="40" width="215" height="52" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+                    <text x="592" y="60" text-anchor="middle" fill="#e74c3c" font-size="11" font-weight="bold" font-family="Roboto Condensed, sans-serif">C: No Caching ✗</text>
+                    <text x="592" y="78" text-anchor="middle" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">rejected — always recompute</text>
+                </g>
+
+                <!-- Detail panels -->
+                <g id="cas-detail-a" opacity="0">
+                    <rect x="20" y="105" width="680" height="180" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+                    <text x="40" y="130" fill="#2ecc71" font-size="11" font-weight="bold" font-family="Roboto Condensed, sans-serif">Cache-After-Collect (chosen)</text>
+                    <text x="40" y="150" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">After streaming completes, tee_stream sends chunks to both client and a collector.</text>
+                    <text x="40" y="168" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">The collector calls collect_stream() → Bytes, then stores in the existing cache.</text>
+                    <text x="40" y="186" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">Future requests get a cache hit — returned as batch, no recompute.</text>
+                    <text x="40" y="212" fill="#2ecc71" font-size="10" font-family="Roboto Condensed, sans-serif">✓ Compatible with existing cache (stores full Bytes)</text>
+                    <text x="40" y="228" fill="#2ecc71" font-size="10" font-family="Roboto Condensed, sans-serif">✓ Simple — no new cache data structures</text>
+                    <text x="40" y="244" fill="#2ecc71" font-size="10" font-family="Roboto Condensed, sans-serif">✓ GC and invalidation work unchanged</text>
+                    <text x="40" y="264" fill="#f39c12" font-size="10" font-family="Roboto Condensed, sans-serif">△ Must buffer full result for caching (one-time cost per computation)</text>
+                </g>
+                <g id="cas-detail-b" opacity="0">
+                    <rect x="20" y="105" width="680" height="180" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1"/>
+                    <text x="40" y="130" fill="#e74c3c" font-size="11" font-weight="bold" font-family="Roboto Condensed, sans-serif">Cache Individual Chunks (rejected)</text>
+                    <text x="40" y="150" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">Cache each chunk separately with sequence numbers. Replay from cache on hit.</text>
+                    <text x="40" y="176" fill="#2ecc71" font-size="10" font-family="Roboto Condensed, sans-serif">✓ No full-result buffering</text>
+                    <text x="40" y="196" fill="#e74c3c" font-size="10" font-family="Roboto Condensed, sans-serif">✗ Complex cache management — chunk ordering, sequence gaps</text>
+                    <text x="40" y="212" fill="#e74c3c" font-size="10" font-family="Roboto Condensed, sans-serif">✗ Cache fragmentation — thousands of small entries per value</text>
+                    <text x="40" y="228" fill="#e74c3c" font-size="10" font-family="Roboto Condensed, sans-serif">✗ GC must track chunk-to-value relationships</text>
+                    <text x="40" y="244" fill="#e74c3c" font-size="10" font-family="Roboto Condensed, sans-serif">✗ Verification must reassemble chunks before hashing</text>
+                </g>
+                <g id="cas-detail-c" opacity="0">
+                    <rect x="20" y="105" width="680" height="180" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1"/>
+                    <text x="40" y="130" fill="#e74c3c" font-size="11" font-weight="bold" font-family="Roboto Condensed, sans-serif">No Caching for Streaming Results (rejected)</text>
+                    <text x="40" y="150" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">Always recompute streaming functions. Never cache their output.</text>
+                    <text x="40" y="176" fill="#2ecc71" font-size="10" font-family="Roboto Condensed, sans-serif">✓ Zero memory overhead</text>
+                    <text x="40" y="196" fill="#e74c3c" font-size="10" font-family="Roboto Condensed, sans-serif">✗ Defeats the purpose of content-addressed caching</text>
+                    <text x="40" y="212" fill="#e74c3c" font-size="10" font-family="Roboto Condensed, sans-serif">✗ Repeated requests recompute from scratch</text>
+                    <text x="40" y="228" fill="#e74c3c" font-size="10" font-family="Roboto Condensed, sans-serif">✗ Invalidation has nothing to invalidate</text>
+                </g>
+
+                <!-- Hint -->
+                <text id="cas-hint" x="360" y="300" text-anchor="middle" fill="#b0bec5" font-size="10" font-family="Roboto Condensed, sans-serif">▶ click an option to see details</text>
+            </svg>
+        </div>
+
+        <p>
+            <strong>Decision: Option A.</strong> The cache stores full <code>Bytes</code> values, exactly as in batch mode. Streaming is a compute-path optimization — the storage layer is unchanged. After a streaming pipeline completes, the result is collected via <code>tee_stream</code> + <code>collect_stream</code> and cached normally. Future requests for the same CAddr get a cache hit and return the full value without recomputation.
+        </p>
+
+        <h3>7.3 Invalidation</h3>
+
+        <p>
+            Cascade invalidation (Paper 2, §4) traverses reverse edges in the dependency DAG and evicts dependents. Streaming does not change the DAG structure — the same recipes, the same edges, the same reverse-edge index. When an input is invalidated:
+        </p>
+
+        <ol>
+            <li>The cached <code>Bytes</code> for all transitive dependents are evicted.</li>
+            <li>The next request for any evicted CAddr triggers a fresh materialization — which may now use the streaming pipeline instead of batch.</li>
+        </ol>
+
+        <p>
+            No streaming-specific invalidation logic is needed. The invariant holds: <em>if any input changes, the cached output is evicted, and recomputation produces the correct new result</em>.
+        </p>
+
+        <h3>7.4 Verification</h3>
+
+        <p>
+            Verification re-executes a recipe and compares the output hash against the stored CAddr. With streaming, the verification path is:
+        </p>
+
+        <ol>
+            <li>Build a streaming pipeline for the recipe.</li>
+            <li>Collect the output stream into <code>Bytes</code>.</li>
+            <li>Hash the collected bytes.</li>
+            <li>Compare against the expected CAddr.</li>
+        </ol>
+
+        <p>
+            The collected bytes are identical whether produced by batch or streaming execution — the <code>StreamChunk</code> protocol guarantees that concatenating all <code>Data</code> chunks yields the same <code>Bytes</code> as the batch function's output. This is a testable invariant: the test suite (<a href="#evaluation-container">§8</a>) verifies batch/streaming equivalence for all 20 built-in functions.
+        </p>
+
+        <h3>7.5 Garbage Collection</h3>
+
+        <p>
+            GC operates on cached <code>Bytes</code> values identified by CAddr. Since streaming results are cached as full <code>Bytes</code> (<a href="#cas-invariants-container">§7</a>.2), GC sees no difference between a value produced by batch and one produced by streaming. The cost-aware eviction model, reference counting, and LRU policies all work unchanged.
+        </p>
+
+        <p>
+            The only streaming-specific consideration: if a streaming pipeline is <em>in progress</em> when GC runs, the intermediate chunks in transit through channels are not visible to GC. They exist only as Tokio task state and channel buffers — not in the cache. GC cannot and need not evict them. Once the pipeline completes and the result is cached, it becomes a normal cache entry subject to normal eviction.
+        </p>
+
+    </section>
+</div>

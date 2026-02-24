@@ -1,0 +1,17 @@
+<div class="section-content">
+    <div class="abstract">
+        <h1>Abstract</h1>
+        <p>
+            Computation-addressed storage systems identify derived data by the computation that produces it, enabling content-addressing, caching, and deterministic recomputation. However, existing implementations — including the batch materialization model described in the companion papers — require full input assembly before computation begins and full output generation before any byte reaches the client. This forces O(input size) memory consumption and sequential stage execution, making large-pipeline workloads impractical.
+        </p>
+        <p>
+            This paper presents a <strong>streaming materialization layer</strong> for the Deriva computation-addressed store. Data flows through multi-stage compute pipelines as 64 KB chunks over bounded <code>tokio::mpsc</code> channels, enabling concurrent stage execution with predictable memory usage of O(stages × channel_capacity × chunk_size). A <strong>StreamChunk</strong> protocol (<code>Data</code>/<code>End</code>/<code>Error</code>) provides end-of-stream and error propagation semantics. Twenty built-in streaming functions span four categories — chunk-by-chunk transforms, rolling accumulators, multi-input combiners, and pipeline utilities — while a <strong>batch-to-stream adapter</strong> allows existing batch functions to participate in streaming pipelines without modification. The <strong>StreamPipeline</strong> builder constructs pipelines from the persistent DAG via topological sort, with a tee mechanism that simultaneously streams results to the client and collects them for caching.
+        </p>
+        <p>
+            All content-addressing invariants are preserved: streaming pipelines produce the same CAddr as batch materialization, cached results bypass the pipeline entirely, and cascade invalidation applies uniformly to streaming and batch outputs. Benchmarks on <a href="https://github.com/bheisler/criterion.rs" target="_blank">Criterion.rs</a> measure time-to-first-byte, pipeline throughput, auto-wrap overhead, and memory consumption across varying pipeline depths and input sizes.
+        </p>
+        <p>
+            <strong>Keywords:</strong> streaming dataflow, computation-addressed storage, backpressure, chunk-level processing, pipeline parallelism, async Rust
+        </p>
+    </div>
+</div>

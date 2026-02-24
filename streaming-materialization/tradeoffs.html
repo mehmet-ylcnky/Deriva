@@ -1,0 +1,148 @@
+<div class="section-content">
+    <section id="tradeoffs">
+        <h2>9. Tradeoffs &amp; Design Decisions</h2>
+
+        <p>
+            Streaming materialization is not a free upgrade over batch. It introduces new complexity axes that system designers must navigate. This section maps the five key tradeoffs, explains when each matters, and provides concrete guidance for choosing between batch and streaming paths.
+        </p>
+
+        <p style="font-size:0.85rem; color:#6a737d;">▶ Click a tradeoff dimension to expand details.</p>
+
+        <svg id="tradeoff-radar-svg" viewBox="0 0 860 420" style="display:block;max-width:860px;width:100%;margin:1.5rem auto;background:#1a1e2e;border-radius:10px;cursor:pointer" xmlns="http://www.w3.org/2000/svg">
+          <text x="430" y="28" text-anchor="middle" fill="#e0e0e0" font-size="14" font-weight="600">Figure 6: Streaming Tradeoff Map</text>
+
+          <!-- 5 tradeoff boxes arranged in a ring -->
+          <g id="td-throughput" cursor="pointer">
+            <rect x="340" y="45" width="180" height="44" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+            <text x="430" y="65" text-anchor="middle" fill="#81d4fa" font-size="12" font-weight="600">① Throughput vs TTFB</text>
+            <text x="430" y="80" text-anchor="middle" fill="#90a4ae" font-size="10">batch wins &lt;3 MB</text>
+          </g>
+          <g id="td-memory" cursor="pointer">
+            <rect x="610" y="130" width="200" height="44" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+            <text x="710" y="150" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="600">② Memory Predictability</text>
+            <text x="710" y="165" text-anchor="middle" fill="#90a4ae" font-size="10">D × N × chunk_size</text>
+          </g>
+          <g id="td-chunk" cursor="pointer">
+            <rect x="560" y="270" width="200" height="44" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+            <text x="660" y="290" text-anchor="middle" fill="#f39c12" font-size="12" font-weight="600">③ Chunk Size Selection</text>
+            <text x="660" y="305" text-anchor="middle" fill="#90a4ae" font-size="10">64 KB default, 1 KB–1 MB range</text>
+          </g>
+          <g id="td-autowrap" cursor="pointer">
+            <rect x="100" y="270" width="200" height="44" rx="6" fill="#232840" stroke="#ce93d8" stroke-width="1.5"/>
+            <text x="200" y="290" text-anchor="middle" fill="#ce93d8" font-size="12" font-weight="600">④ Auto-Wrap Buffering</text>
+            <text x="200" y="305" text-anchor="middle" fill="#90a4ae" font-size="10">compatibility vs true streaming</text>
+          </g>
+          <g id="td-accumulator" cursor="pointer">
+            <rect x="50" y="130" width="200" height="44" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+            <text x="150" y="150" text-anchor="middle" fill="#e74c3c" font-size="12" font-weight="600">⑤ Stateful Accumulators</text>
+            <text x="150" y="165" text-anchor="middle" fill="#90a4ae" font-size="10">sha256, count — must see all data</text>
+          </g>
+
+          <!-- connecting lines -->
+          <line x1="430" y1="89" x2="610" y2="145" stroke="#3a3f5c" stroke-width="1" stroke-dasharray="4"/>
+          <line x1="710" y1="174" x2="660" y2="270" stroke="#3a3f5c" stroke-width="1" stroke-dasharray="4"/>
+          <line x1="300" y1="292" x2="560" y2="292" stroke="#3a3f5c" stroke-width="1" stroke-dasharray="4"/>
+          <line x1="150" y1="174" x2="200" y2="270" stroke="#3a3f5c" stroke-width="1" stroke-dasharray="4"/>
+          <line x1="250" y1="145" x2="340" y2="67" stroke="#3a3f5c" stroke-width="1" stroke-dasharray="4"/>
+
+          <!-- detail panels (hidden by default) -->
+          <g id="td-detail-throughput" opacity="0">
+            <rect x="130" y="340" width="600" height="65" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1"/>
+            <text x="145" y="358" fill="#e0e0e0" font-size="11" font-weight="600">① Throughput vs Time-to-First-Byte</text>
+            <text x="145" y="374" fill="#90a4ae" font-size="10">Below ~3 MB, batch is faster on wall-clock (0.17 ms vs 1.59 ms at 1 MB). Streaming's fixed overhead</text>
+            <text x="145" y="388" fill="#90a4ae" font-size="10">(channel creation, task spawning) dominates. Above 3 MB, pipeline parallelism wins. TTFB is always ~1.6 ms.</text>
+          </g>
+          <g id="td-detail-memory" opacity="0">
+            <rect x="130" y="340" width="600" height="65" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+            <text x="145" y="358" fill="#e0e0e0" font-size="11" font-weight="600">② Bounded Memory = D × N × chunk_size</text>
+            <text x="145" y="374" fill="#90a4ae" font-size="10">A 5-stage pipeline with 8-slot channels and 64 KB chunks uses at most 2.5 MB — regardless of input size.</text>
+            <text x="145" y="388" fill="#90a4ae" font-size="10">Batch must buffer the full input at each stage: 5 × 512 MB = 2.5 GB for the same pipeline on 512 MB data.</text>
+          </g>
+          <g id="td-detail-chunk" opacity="0">
+            <rect x="130" y="340" width="600" height="65" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+            <text x="145" y="358" fill="#e0e0e0" font-size="11" font-weight="600">③ Chunk Size: Latency vs Channel Overhead</text>
+            <text x="145" y="374" fill="#90a4ae" font-size="10">1 KB chunks → 1,000 channel round-trips per MB → 8.56 ms. 64 KB → 16 round-trips → 1.50 ms.</text>
+            <text x="145" y="388" fill="#90a4ae" font-size="10">1 MB chunks → 1 round-trip → 1.33 ms but no streaming benefit (TTFB = total time). 64 KB is the sweet spot.</text>
+          </g>
+          <g id="td-detail-autowrap" opacity="0">
+            <rect x="130" y="340" width="600" height="65" rx="6" fill="#232840" stroke="#ce93d8" stroke-width="1"/>
+            <text x="145" y="358" fill="#e0e0e0" font-size="11" font-weight="600">④ Auto-Wrap: Compatibility at the Cost of Buffering</text>
+            <text x="145" y="374" fill="#90a4ae" font-size="10">Wrapped batch functions collect all chunks → run batch → re-chunk output. This preserves the streaming</text>
+            <text x="145" y="388" fill="#90a4ae" font-size="10">pipeline interface but loses bounded memory. Use native StreamingFunction implementations where possible.</text>
+          </g>
+          <g id="td-detail-accumulator" opacity="0">
+            <rect x="130" y="340" width="600" height="65" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1"/>
+            <text x="145" y="358" fill="#e0e0e0" font-size="11" font-weight="600">⑤ Accumulators Must See All Data Before Emitting</text>
+            <text x="145" y="374" fill="#90a4ae" font-size="10">SHA-256, byte count, and checksum consume all input chunks, updating internal state, then emit one</text>
+            <text x="145" y="388" fill="#90a4ae" font-size="10">summary chunk on End. They stream input (bounded memory) but block downstream until complete.</text>
+          </g>
+        </svg>
+
+        <h3>9.1 When to Use Batch</h3>
+
+        <p>
+            Batch materialization remains the right choice when:
+        </p>
+
+        <ul>
+            <li><strong>Data is small (&lt;3 MB)</strong> — streaming's fixed overhead (channel creation, Tokio task spawning, chunk framing) exceeds the benefit of pipeline parallelism. At 1 MB, batch is 9.3× faster.</li>
+            <li><strong>Single-stage computation</strong> — with no pipeline parallelism to exploit, streaming adds overhead with no upside. A direct <code>blob_store_get</code> returns 1 MB in 398 µs; streaming identity takes 1.59 ms.</li>
+            <li><strong>Result will be immediately cached</strong> — if the output is small and will be served from cache on subsequent reads, the streaming infrastructure cost is wasted.</li>
+        </ul>
+
+        <h3>9.2 When to Use Streaming</h3>
+
+        <p>
+            Streaming materialization wins when:
+        </p>
+
+        <ul>
+            <li><strong>Multi-stage pipelines on data &gt;3 MB</strong> — pipeline parallelism overlaps stages. At 32 MB with 5 stages, streaming is 2.7× faster than batch.</li>
+            <li><strong>Time-to-first-byte matters</strong> — streaming delivers the first 64 KB chunk in ~1.6 ms regardless of data size or pipeline depth. Batch must complete all stages first.</li>
+            <li><strong>Memory must be bounded</strong> — a 5-stage streaming pipeline on 512 MB data uses at most 2.5 MB of buffer memory (D × N × chunk_size = 5 × 8 × 64 KB). Batch would buffer 5 × 512 MB = 2.5 GB.</li>
+            <li><strong>Graceful cancellation</strong> — streaming pipelines can be cancelled mid-stream by dropping the receiver. Batch is all-or-nothing.</li>
+        </ul>
+
+        <h3>9.3 Chunk Size Selection Guide</h3>
+
+        <p>
+            The default 64 KB chunk size balances three concerns:
+        </p>
+
+        <ul>
+            <li><strong>Channel overhead</strong> — each chunk requires one <code>mpsc::send</code> + <code>recv</code> (~100 ns uncontended). At 1 KB chunks, a 1 MB input generates 1,000 round-trips (8.56 ms). At 64 KB, only 16 round-trips (1.50 ms).</li>
+            <li><strong>First-byte latency</strong> — smaller chunks mean faster TTFB. At 64 KB, the first chunk arrives after ~94 µs of compute. At 1 MB, TTFB equals total latency.</li>
+            <li><strong>Memory footprint</strong> — per-stage buffer = channel_capacity × chunk_size. At 64 KB with 8 slots: 512 KB per stage. At 1 MB: 8 MB per stage.</li>
+        </ul>
+
+        <p>
+            Override the default only when you have a specific reason: use smaller chunks (16 KB) for latency-sensitive interactive responses, larger chunks (256 KB+) for bulk ETL where throughput dominates.
+        </p>
+
+        <h3>9.4 The Auto-Wrap Tax</h3>
+
+        <p>
+            Auto-wrapping (<a href="#auto-wrapping-container">§5</a>) lets any batch <code>ComputeFunction</code> participate in a streaming pipeline by collecting all input chunks, running the batch function, and re-chunking the output. This preserves API compatibility but defeats two key streaming benefits:
+        </p>
+
+        <ul>
+            <li><strong>Bounded memory</strong> — the wrapper must buffer the entire input before calling the batch function, reverting to O(n) memory for that stage.</li>
+            <li><strong>Pipeline parallelism</strong> — the wrapped stage cannot overlap with its predecessor because it waits for all input before starting. Downstream stages are blocked until the batch function completes.</li>
+        </ul>
+
+        <p>
+            Auto-wrap is a migration tool, not a long-term solution. For performance-critical pipelines, implement native <code>StreamingFunction</code> variants. The 20 built-in streaming functions (<a href="#streaming-functions-container">§4</a>) cover the most common operations.
+        </p>
+
+        <h3>9.5 Accumulator Stages</h3>
+
+        <p>
+            Accumulators (SHA-256, byte count, checksum) are inherently non-streaming in their output — they must consume all input before emitting a result. However, they still benefit from streaming <em>input</em>: instead of buffering the full input in memory, they update internal state chunk-by-chunk (e.g., <code>Sha256::update(chunk)</code>) and emit one summary chunk on <code>StreamChunk::End</code>.
+        </p>
+
+        <p>
+            An accumulator in the middle of a pipeline creates a <strong>pipeline bubble</strong>: downstream stages stall until the accumulator finishes. Place accumulators at the end of pipelines when possible, or use <code>StreamingTeeCount</code> / <code>StreamingTeeChecksum</code> to compute metadata in parallel with the main data flow without blocking downstream.
+        </p>
+
+    </section>
+</div>

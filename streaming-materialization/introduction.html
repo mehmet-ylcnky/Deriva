@@ -1,0 +1,282 @@
+<div class="section-content">
+    <section id="introduction">
+        <h2>1. Introduction</h2>
+
+        <p>
+            The Deriva computation-addressed store, introduced in the <a href="../computation-addressed-storage/">companion paper</a>, addresses derived data by the computation that produces it — a cryptographic hash of the function, its input addresses, and its parameters. A <strong>CAddr</strong> encodes not where data lives, but <em>how it was derived</em>: the BLAKE3 hash of a function identifier, its input addresses, and its parameters. This makes caching automatic (identical computations produce identical addresses), deduplication free (two clients requesting the same derivation share one result), and provenance intrinsic (every value carries its full computation history).
+        </p>
+
+        <p>
+            The <a href="../robust-materialization/">robustness paper</a> extended this model with a persistent DAG backed by sled, async parallel materialization with broadcast-channel deduplication, cascade invalidation that walks reverse edges to find stale dependents, and mark-and-sweep garbage collection. Together, these features transformed Deriva from a prototype into a system that survives restarts, exploits multi-core parallelism, and reclaims storage from orphaned computations.
+        </p>
+
+        <p>
+            Both papers, however, share a fundamental limitation: <strong>batch materialization</strong>. Every <code>ComputeFunction</code> receives its inputs as fully materialized <code>Vec&lt;Bytes&gt;</code> and must produce the entire output as a single <code>Bytes</code> value before any downstream consumer — or the requesting client — sees a single byte. This all-or-nothing execution model creates three concrete problems as data sizes grow:
+        </p>
+
+    <div class="highlight-box">
+        <h3>The Batch Ceiling</h3>
+        <ul>
+            <li><strong>Memory amplification:</strong> A three-stage pipeline on 100 MB of data must hold up to 300 MB simultaneously — one full copy per stage — because each stage's output becomes the next stage's input and both must coexist during the handoff.</li>
+
+            <li><strong>Sequential bottleneck:</strong> Stages execute one after another. The total wall-clock time is the <em>sum</em> of all stages, even when the stages could logically overlap — stage 2 could start processing the first megabyte while stage 1 is still producing the last.</li>
+
+            <li><strong>Delayed first byte:</strong> The client must wait for the entire pipeline to complete before receiving any output. For a pipeline that takes 132 ms to process 100 MB (<a href="#evaluation-container">§8</a>), the time-to-first-byte equals the total processing time — 132 ms of silence followed by a single bulk response.</li>
+        </ul>
+    </div>
+
+        <p>
+            This paper introduces <strong>streaming materialization</strong>: a chunk-at-a-time execution model that runs pipeline stages concurrently, bounds memory to a small constant regardless of data size, and delivers the first output chunk within milliseconds. The key design constraint is that streaming must not break the CAddr invariants that make the store trustworthy — the same computation address must always resolve to the same bytes, whether materialized via batch or streaming. We achieve this through a <em>cache-after-collect</em> strategy (<a href="#cas-invariants-container">§7</a>): streaming is a compute-path optimization only, and the content-addressed store never sees partial results.
+        </p>
+
+        <h3>Contributions</h3>
+
+        <p>This paper presents:</p>
+
+        <ol>
+            <li>A <code>StreamChunk</code> protocol (<a href="#stream-chunk-container">§3</a>) with four variants — <code>Data</code>, <code>End</code>, <code>Error</code>, <code>Backpressure</code> — that provides typed, bounded communication between pipeline stages.</li>
+            <li>A <code>StreamingFunction</code> trait and 20 built-in implementations (<a href="#streaming-functions-container">§4</a>) covering map transforms, accumulators, multi-input combiners, and utility operations.</li>
+            <li>An auto-wrapping layer (<a href="#auto-wrapping-container">§5</a>) that lets any existing batch <code>ComputeFunction</code> participate in streaming pipelines without modification — enabling incremental migration.</li>
+            <li>A <code>StreamPipeline</code> executor (<a href="#pipeline-container">§6</a>) with topological sort, concurrent Tokio task execution, and bounded <code>mpsc</code> channels with configurable capacity and backpressure.</li>
+            <li>A cache-after-collect strategy (<a href="#cas-invariants-container">§7</a>) that preserves CAddr invariants: streaming results are collected into <code>Bytes</code> and cached through the existing store — identical to batch from the cache's perspective.</li>
+            <li>Empirical evaluation (<a href="#evaluation-container">§8</a>) showing that streaming overtakes batch at ~3 MB for a 5-stage pipeline (2.7× faster at 32 MB), delivers constant ~1.6 ms time-to-first-byte regardless of data size, and bounds pipeline memory to D × N × chunk_size (2.5 MB for 5 stages vs 2.5 GB for batch on 512 MB input).</li>
+        </ol>
+
+        <p>
+            The rest of this paper is organized as follows: <a href="#background-container">§2</a> provides background and compares Deriva with related streaming systems. <a href="#stream-chunk-container">§3</a>–<a href="#cas-invariants-container">§7</a> describe the five core streaming components. <a href="#evaluation-container">§8</a> presents evaluation results with benchmarks against batch baselines. <a href="#tradeoffs-container">§9</a> discusses tradeoffs and design decisions. <a href="#conclusion-container">§10</a> concludes.
+        </p>
+
+        <h3>1.1 The Batch Bottleneck</h3>
+
+        <p>
+            In batch mode, every <code>ComputeFunction</code> receives its inputs as fully materialized <code>Vec&lt;Bytes&gt;</code> and must produce a complete <code>Bytes</code> output before the next stage can begin. This design is simple and correct — but it forces a rigid execution pattern that scales poorly with data size and pipeline depth.
+        </p>
+
+        <p>
+            Consider a concrete example: a three-stage pipeline that uppercases text, computes a checksum, and compresses the result, processing 100 MB of input. In batch mode, stage 1 allocates 100 MB to hold its output. Stage 2 cannot begin until stage 1 has finished writing all 100 MB — it then allocates another 100 MB for its own output. Stage 3 waits again. At peak, the system holds three full copies of the data (~300 MB), the wall-clock time is the <em>sum</em> of all three stages (132 ms in our benchmarks — <a href="#evaluation-container">§8</a>), and the client sees nothing until the final stage completes. Every byte of output is delayed by the slowest stage in the chain, even though stage 2 could have started processing the first megabyte while stage 1 was still working on the ninety-ninth.
+        </p>
+
+        <p>
+            The problem compounds with pipeline depth. A five-stage pipeline on 512 MB of data requires up to 2.5 GB of intermediate buffers — five full copies coexisting in memory. On a 16 GB machine, that's 15% of total RAM consumed by a single materialization request. And because stages run sequentially, adding a stage adds its full latency to the total, with no opportunity for overlap. The batch model turns pipeline depth from a composability feature into a performance liability.
+        </p>
+
+        <p>
+            The following visualization contrasts this with streaming execution. In streaming mode, all stages run concurrently as independent Tokio tasks connected by bounded <code>mpsc</code> channels. Data flows through the pipeline chunk by chunk (64 KB default), and the client receives the first output chunk as soon as the first input chunk has traversed all stages — typically within ~1.6 ms regardless of total data size. Wall-clock time approaches the latency of the <em>slowest</em> stage (not the sum), and memory is bounded to D × N × chunk_size (e.g., 2.5 MB for a 5-stage pipeline — over 1,000× less than batch on the same 512 MB input).
+        </p>
+
+        <div class="svg-container" style="margin: 1.5rem auto; text-align: center;">
+            <svg id="batch-vs-stream-svg" viewBox="0 0 700 340" style="display: inline-block; max-width: 860px; width: 100%; border-radius: 8px; cursor: pointer;"
+                 xmlns="http://www.w3.org/2000/svg">
+                <rect width="700" height="340" rx="8" fill="#1a1e2e"/>
+
+                <text x="350" y="26" text-anchor="middle" fill="#e0e0e0" font-size="14" font-weight="bold" font-family="Roboto Condensed, sans-serif">Batch vs Streaming Execution</text>
+
+                <!-- ===== STATE 0: BATCH ===== -->
+                <g id="bvs-s0">
+                    <text x="20" y="52" fill="#e74c3c" font-size="12" font-weight="bold" font-family="Roboto Condensed, sans-serif">BATCH MODE</text>
+                    <rect x="20" y="60" width="660" height="115" rx="4" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+
+                    <!-- Sequential stage boxes -->
+                    <rect x="32" y="72" width="190" height="26" rx="3" fill="#e74c3c" opacity="0.85"/>
+                    <text x="127" y="89" text-anchor="middle" fill="#1a1e2e" font-size="10" font-weight="bold" font-family="Roboto Condensed, sans-serif">Stage 1: encode (200 ms)</text>
+
+                    <rect x="252" y="72" width="190" height="26" rx="3" fill="#f39c12" opacity="0.85"/>
+                    <text x="347" y="89" text-anchor="middle" fill="#1a1e2e" font-size="10" font-weight="bold" font-family="Roboto Condensed, sans-serif">Stage 2: package (200 ms)</text>
+
+                    <rect x="472" y="72" width="190" height="26" rx="3" fill="#2ecc71" opacity="0.85"/>
+                    <text x="567" y="89" text-anchor="middle" fill="#1a1e2e" font-size="10" font-weight="bold" font-family="Roboto Condensed, sans-serif">Stage 3: encrypt (200 ms)</text>
+
+                    <!-- Arrows -->
+                    <line x1="222" y1="85" x2="250" y2="85" stroke="#90a4ae" stroke-width="1.5"/>
+                    <polygon points="248,82 254,85 248,88" fill="#90a4ae"/>
+                    <line x1="442" y1="85" x2="470" y2="85" stroke="#90a4ae" stroke-width="1.5"/>
+                    <polygon points="468,82 474,85 468,88" fill="#90a4ae"/>
+
+                    <!-- Client wait indicator -->
+                    <text x="672" y="89" text-anchor="end" fill="#e74c3c" font-size="9" font-family="Roboto Condensed, sans-serif">client</text>
+                    <text x="672" y="100" text-anchor="end" fill="#e74c3c" font-size="8" font-family="Roboto Condensed, sans-serif">waits...</text>
+
+                    <!-- Memory bar -->
+                    <text x="32" y="120" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">Peak memory</text>
+                    <rect x="110" y="112" width="560" height="12" rx="2" fill="#3a3f5c"/>
+                    <rect x="110" y="112" width="400" height="12" rx="2" fill="#e74c3c" opacity="0.4"/>
+                    <text x="310" y="122" text-anchor="middle" fill="#e0e0e0" font-size="8" font-family="Roboto Condensed, sans-serif">~2.2 GB (full input + output buffered per stage)</text>
+
+                    <!-- Wall time bar -->
+                    <text x="32" y="144" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">Wall time</text>
+                    <rect x="110" y="136" width="560" height="12" rx="2" fill="#3a3f5c"/>
+                    <rect x="110" y="136" width="560" height="12" rx="2" fill="#e74c3c" opacity="0.25"/>
+                    <text x="390" y="146" text-anchor="middle" fill="#e0e0e0" font-size="8" font-family="Roboto Condensed, sans-serif">T₁ + T₂ + T₃ = 600 ms (sequential)</text>
+
+                    <!-- First byte indicator -->
+                    <text x="32" y="168" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">First byte</text>
+                    <rect x="110" y="160" width="560" height="12" rx="2" fill="#3a3f5c"/>
+                    <rect x="110" y="160" width="560" height="12" rx="2" fill="#e74c3c" opacity="0.15"/>
+                    <text x="390" y="170" text-anchor="middle" fill="#e0e0e0" font-size="8" font-family="Roboto Condensed, sans-serif">600 ms — client blocked until full computation completes</text>
+                </g>
+
+                <!-- ===== STATE 1: STREAMING ===== -->
+                <g id="bvs-s1">
+                    <text x="20" y="198" fill="#2ecc71" font-size="12" font-weight="bold" font-family="Roboto Condensed, sans-serif">STREAMING MODE</text>
+                    <rect x="20" y="206" width="660" height="115" rx="4" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+
+                    <!-- Concurrent stage bars (overlapping in time) -->
+                    <rect x="32" y="216" width="560" height="18" rx="3" fill="#e74c3c" opacity="0.55"/>
+                    <text x="312" y="229" text-anchor="middle" fill="#e0e0e0" font-size="9" font-weight="bold" font-family="Roboto Condensed, sans-serif">Stage 1: encode (chunks flow →)</text>
+
+                    <rect x="58" y="238" width="560" height="18" rx="3" fill="#f39c12" opacity="0.55"/>
+                    <text x="338" y="251" text-anchor="middle" fill="#e0e0e0" font-size="9" font-weight="bold" font-family="Roboto Condensed, sans-serif">Stage 2: package (chunks flow →)</text>
+
+                    <rect x="84" y="260" width="560" height="18" rx="3" fill="#2ecc71" opacity="0.55"/>
+                    <text x="364" y="273" text-anchor="middle" fill="#e0e0e0" font-size="9" font-weight="bold" font-family="Roboto Condensed, sans-serif">Stage 3: encrypt (chunks flow →)</text>
+
+                    <!-- Animated flowing dots -->
+                    <circle r="3" fill="#e74c3c"><animate attributeName="cx" values="32;592" dur="2.5s" repeatCount="indefinite"/><animate attributeName="cy" values="225;225" dur="2.5s" repeatCount="indefinite"/></circle>
+                    <circle r="3" fill="#f39c12"><animate attributeName="cx" values="58;618" dur="2.5s" repeatCount="indefinite"/><animate attributeName="cy" values="247;247" dur="2.5s" repeatCount="indefinite"/></circle>
+                    <circle r="3" fill="#2ecc71"><animate attributeName="cx" values="84;644" dur="2.5s" repeatCount="indefinite"/><animate attributeName="cy" values="269;269" dur="2.5s" repeatCount="indefinite"/></circle>
+
+                    <!-- Client streaming indicator -->
+                    <text x="656" y="273" text-anchor="end" fill="#2ecc71" font-size="9" font-family="Roboto Condensed, sans-serif">client</text>
+                    <text x="656" y="283" text-anchor="end" fill="#2ecc71" font-size="8" font-family="Roboto Condensed, sans-serif">streaming!</text>
+
+                    <!-- Memory bar -->
+                    <text x="32" y="298" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">Peak memory</text>
+                    <rect x="110" y="290" width="560" height="12" rx="2" fill="#3a3f5c"/>
+                    <rect x="110" y="290" width="16" height="12" rx="2" fill="#2ecc71" opacity="0.6"/>
+                    <text x="260" y="300" text-anchor="middle" fill="#e0e0e0" font-size="8" font-family="Roboto Condensed, sans-serif">~1.5 MB (3 stages × 8 chunks × 64 KB)</text>
+
+                    <!-- Wall time bar -->
+                    <text x="32" y="314" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">Wall time</text>
+                    <rect x="110" y="306" width="560" height="12" rx="2" fill="#3a3f5c"/>
+                    <rect x="110" y="306" width="195" height="12" rx="2" fill="#2ecc71" opacity="0.25"/>
+                    <text x="300" y="316" text-anchor="middle" fill="#e0e0e0" font-size="8" font-family="Roboto Condensed, sans-serif">max(T₁,T₂,T₃) ≈ 200 ms (pipelined) · first byte &lt; 0.1 ms</text>
+                </g>
+
+                <!-- Step indicator -->
+                <text id="bvs-hint" x="350" y="336" text-anchor="middle" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">▶ click to highlight each mode</text>
+            </svg>
+        </div>
+
+        <h3>1.2 Why Streaming Matters for CAS</h3>
+
+        <p>
+            A Computation-Addressed Store (CAS) derives its power from a simple invariant: every value is identified by the computation that produced it, and identical computations always yield identical results. This means the store can cache aggressively, deduplicate automatically, and invalidate precisely. But this invariant says nothing about <em>how</em> a computation executes — only that the final result must be deterministic. Streaming exploits this gap: it changes the execution strategy (chunk-at-a-time, concurrent stages) without changing the observable result (the same <code>Bytes</code> value, cached under the same <code>CAddr</code>).
+        </p>
+
+        <p>
+            This distinction is critical. A naive streaming implementation might cache partial results, expose intermediate chunks through the CAddr interface, or produce different byte sequences depending on chunk boundaries. Any of these would violate the CAS invariant and break the trust model. Deriva's streaming layer avoids all three pitfalls through the cache-after-collect strategy described in <a href="#cas-invariants-container">§7</a>: the streaming pipeline runs internally, but the store only ever sees the fully collected result — identical to what batch would have produced.
+        </p>
+
+        <p>
+            With that invariant preserved, streaming changes the operational characteristics of the store in three fundamental ways:
+        </p>
+
+        <ul>
+            <li><strong>Memory predictability.</strong> A streaming pipeline with <em>D</em> stages, channel capacity <em>N</em>, and chunk size <em>C</em> consumes at most D × N × C bytes of buffer memory, regardless of input size. A 5-stage pipeline with default settings (N = 8, C = 64 KB) uses at most 2.5 MB — whether the input is 1 MB or 10 GB. This transforms memory consumption from a function of data size (O(n) per stage in batch) to a fixed constant determined at pipeline construction time. For a multi-tenant store serving concurrent materialization requests, this predictability is the difference between stable operation and OOM kills.</li>
+            <li><strong>Time-to-first-byte (TTFB).</strong> The client receives the first output chunk after only one chunk has traversed the pipeline, rather than waiting for the entire computation to complete. Our benchmarks (<a href="#evaluation-container">§8</a>) show a constant ~1.6 ms TTFB regardless of input size — from 1 MB to 512 MB — while batch TTFB equals total processing time (132 ms for 100 MB through 5 stages). For interactive applications or downstream consumers that can begin processing partial results, this is the difference between perceived responsiveness and perceived stalling.</li>
+            <li><strong>Pipeline parallelism.</strong> All stages execute concurrently as independent Tokio tasks. When stage 1 emits its second chunk, stage 2 is already processing the first — and stage 3 may be processing an even earlier chunk from a previous iteration. Backpressure propagates naturally through bounded channels: when a downstream stage is slow, upstream stages block on <code>send()</code>, preventing unbounded memory growth without any explicit flow-control protocol. The result is that wall-clock time approaches the latency of the <em>slowest</em> stage rather than the sum of all stages — a 5-stage pipeline on 32 MB runs in 14.4 ms (streaming) vs 38.7 ms (batch), a 2.7× improvement (<a href="#evaluation-container">§8</a>).</li>
+        </ul>
+
+        <h3>1.3 Scope and Relationship to Companion Papers</h3>
+
+        <p>
+            This paper builds on the persistent DAG and async executor from the <a href="../robust-materialization/">robustness paper</a> and the core addressing model from the <a href="../computation-addressed-storage/">architecture paper</a>. The streaming layer is <strong>additive</strong> — all existing batch functions continue to work unchanged, and the system automatically selects the best execution path for each node in the computation graph.
+        </p>
+
+        <p>
+            The selection mechanism is a per-node decision made during pipeline construction. When the <code>StreamingExecutor</code> walks the topological order of a recipe's dependency graph, it consults the <code>FunctionRegistry</code> for each node:
+        </p>
+
+        <ol>
+            <li><strong>Cache check first.</strong> If the node's CAddr is already cached, the executor inserts a <code>Cached</code> source node that emits the stored <code>Bytes</code> as a stream — no computation needed regardless of function type.</li>
+            <li><strong>Streaming preferred.</strong> If <code>registry.get_streaming(func_id)</code> returns a <code>StreamingComputeFunction</code>, the executor inserts a <code>StreamingStage</code> — a native streaming node that processes chunks concurrently with its neighbors.</li>
+            <li><strong>Batch fallback.</strong> If no streaming implementation exists but <code>registry.get(func_id)</code> returns a batch <code>ComputeFunction</code>, the executor inserts a <code>BatchStage</code> — an auto-wrapped node that collects all input chunks, runs the batch function, and re-chunks the output (<a href="#auto-wrapping-container">§5</a>).</li>
+            <li><strong>Error.</strong> If neither implementation is registered, the executor returns <code>FunctionNotFound</code>.</li>
+        </ol>
+
+        <p>
+            This means a single pipeline can mix streaming and batch stages freely. A 5-stage pipeline might have 3 native streaming stages and 2 auto-wrapped batch stages — the streaming stages run with bounded memory and pipeline parallelism, while the batch stages act as pipeline bubbles that collect-then-emit. As functions are migrated to native streaming implementations, the pipeline gets faster without any changes to the recipe graph or client code.
+        </p>
+
+        <p>
+            One important nuance: the current selection is purely <em>capability-based</em> — if a streaming implementation exists, the executor uses it. But our benchmarks (<a href="#evaluation-container">§8</a>) reveal that this isn't always optimal. Below approximately 3 MB of input data, batch execution is actually faster — up to 9.3× at 1 MB — because streaming's fixed overhead (channel creation, Tokio task spawning, chunk framing) dominates the actual compute work. Above 3 MB, pipeline parallelism takes over and streaming wins decisively (2.7× faster at 32 MB). A future optimization could make the selection <em>size-aware</em>: when the executor knows the input size at construction time, it could fall back to the batch path for small inputs even when a streaming implementation is registered — combining the simplicity of batch for small data with the throughput of streaming for large data.
+        </p>
+
+        <p style="font-size:0.85rem; color:#6a737d;">▶ Click each node to see the selection decision.</p>
+
+        <svg id="mode-select-svg" viewBox="0 0 860 310" style="display:block;max-width:860px;width:100%;margin:1.5rem auto;background:#1a1e2e;border-radius:10px;cursor:pointer" xmlns="http://www.w3.org/2000/svg">
+          <text x="430" y="26" text-anchor="middle" fill="#e0e0e0" font-size="13" font-weight="600">Per-Node Execution Mode Selection</text>
+
+          <!-- registry box -->
+          <rect x="330" y="42" width="200" height="36" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="430" y="65" text-anchor="middle" fill="#90a4ae" font-size="11">FunctionRegistry</text>
+
+          <!-- arrows from registry down -->
+          <line x1="370" y1="78" x2="140" y2="115" stroke="#3a3f5c" stroke-width="1" stroke-dasharray="4"/>
+          <line x1="430" y1="78" x2="430" y2="115" stroke="#3a3f5c" stroke-width="1" stroke-dasharray="4"/>
+          <line x1="490" y1="78" x2="720" y2="115" stroke="#3a3f5c" stroke-width="1" stroke-dasharray="4"/>
+
+          <!-- Node A: cached -->
+          <g id="ms-cached" cursor="pointer">
+            <rect x="50" y="115" width="180" height="50" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+            <text x="140" y="137" text-anchor="middle" fill="#81d4fa" font-size="12" font-weight="600">Node A: sha256(img)</text>
+            <text x="140" y="155" text-anchor="middle" fill="#90a4ae" font-size="10">cache.get() → Some(bytes)</text>
+          </g>
+
+          <!-- Node B: streaming -->
+          <g id="ms-streaming" cursor="pointer">
+            <rect x="290" y="115" width="280" height="50" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+            <text x="430" y="137" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="600">Node B: uppercase(text)</text>
+            <text x="430" y="155" text-anchor="middle" fill="#90a4ae" font-size="10">get_streaming() → Some(StreamingUppercase)</text>
+          </g>
+
+          <!-- Node C: batch fallback -->
+          <g id="ms-batch" cursor="pointer">
+            <rect x="630" y="115" width="180" height="50" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+            <text x="720" y="137" text-anchor="middle" fill="#f39c12" font-size="12" font-weight="600">Node C: custom_fn(x)</text>
+            <text x="720" y="155" text-anchor="middle" fill="#90a4ae" font-size="10">get() → Some(CustomFn)</text>
+          </g>
+
+          <!-- result labels -->
+          <g id="ms-result-cached" opacity="0">
+            <rect x="30" y="180" width="220" height="55" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1"/>
+            <text x="140" y="200" text-anchor="middle" fill="#81d4fa" font-size="11" font-weight="600">→ Cached source node</text>
+            <text x="140" y="216" text-anchor="middle" fill="#90a4ae" font-size="10">Emits stored Bytes as stream.</text>
+            <text x="140" y="228" text-anchor="middle" fill="#90a4ae" font-size="10">No computation. Zero overhead.</text>
+          </g>
+          <g id="ms-result-streaming" opacity="0">
+            <rect x="260" y="180" width="340" height="55" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+            <text x="430" y="200" text-anchor="middle" fill="#2ecc71" font-size="11" font-weight="600">→ StreamingStage (native)</text>
+            <text x="430" y="216" text-anchor="middle" fill="#90a4ae" font-size="10">Processes chunks concurrently. Bounded memory.</text>
+            <text x="430" y="228" text-anchor="middle" fill="#90a4ae" font-size="10">Pipeline parallelism with neighbors.</text>
+          </g>
+          <g id="ms-result-batch" opacity="0">
+            <rect x="610" y="180" width="220" height="55" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+            <text x="720" y="200" text-anchor="middle" fill="#f39c12" font-size="11" font-weight="600">→ BatchStage (auto-wrapped)</text>
+            <text x="720" y="216" text-anchor="middle" fill="#90a4ae" font-size="10">Collects all chunks → runs batch →</text>
+            <text x="720" y="228" text-anchor="middle" fill="#90a4ae" font-size="10">re-chunks output. Pipeline bubble.</text>
+          </g>
+
+          <!-- pipeline result -->
+          <rect x="130" y="255" width="600" height="40" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="430" y="272" text-anchor="middle" fill="#e0e0e0" font-size="11">Resulting pipeline:  </text>
+          <text x="260" y="286" fill="#81d4fa" font-size="10">A (cached)</text>
+          <text x="340" y="286" fill="#90a4ae" font-size="10">→</text>
+          <text x="380" y="286" fill="#2ecc71" font-size="10">B (streaming)</text>
+          <text x="480" y="286" fill="#90a4ae" font-size="10">→</text>
+          <text x="520" y="286" fill="#f39c12" font-size="10">C (batch-wrapped)</text>
+          <text x="640" y="286" fill="#90a4ae" font-size="10">— mixed pipeline</text>
+        </svg>
+
+        <h3>1.4 Contributions</h3>
+
+        <ul>
+            <li>A <strong>StreamChunk protocol</strong> with <code>Data</code>/<code>End</code>/<code>Error</code> semantics and bounded-channel backpressure (<a href="#stream-chunk-container">§3</a>)</li>
+            <li>A <strong>StreamingComputeFunction</strong> trait with 20 built-in implementations across four categories (<a href="#streaming-functions-container">§4</a>)</li>
+            <li>An <strong>auto-wrapping mechanism</strong> that allows batch functions to participate in streaming pipelines transparently (<a href="#auto-wrapping-container">§5</a>)</li>
+            <li>A <strong>DAG-aware pipeline builder</strong> that constructs streaming pipelines from recipe graphs with cache-aware stage selection (<a href="#pipeline-container">§6</a>)</li>
+            <li>Preservation of all <strong>CAS invariants</strong> — identical CAddrs, cache behavior, and invalidation semantics for streaming and batch outputs (<a href="#cas-invariants-container">§7</a>)</li>
+        </ul>
+
+    </section>
+</div>

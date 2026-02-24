@@ -1,0 +1,252 @@
+<div class="section-content">
+    <section id="pipeline">
+        <h2>6. StreamPipeline & DAG-Aware Construction</h2>
+
+        <p>
+            The <code>StreamPipeline</code> is the execution engine that wires streaming stages together. Unlike traditional stream processors that operate on flat topologies, Deriva's pipeline is constructed directly from the dependency DAG — the same graph that drives batch materialization. This section describes the pipeline data structures, the topological construction algorithm, and the tee mechanism for fan-out.
+        </p>
+
+        <h3>6.1 Pipeline Configuration</h3>
+
+        <div class="code-block">
+            <pre>
+<span class="rust-keyword">pub struct</span> <span class="rust-type">PipelineConfig</span> {
+    <span class="rust-keyword">pub</span> chunk_size: <span class="rust-type">usize</span>,           <span class="rust-comment">// default: 64 KB</span>
+    <span class="rust-keyword">pub</span> channel_capacity: <span class="rust-type">usize</span>,    <span class="rust-comment">// default: 8 chunks</span>
+    <span class="rust-keyword">pub</span> cache_intermediates: <span class="rust-type">bool</span>,  <span class="rust-comment">// default: true</span>
+    <span class="rust-keyword">pub</span> memory_budget: <span class="rust-type">usize</span>,      <span class="rust-comment">// 0 = unlimited</span>
+}</pre>
+        </div>
+
+        <p>
+            <code>chunk_size</code> controls the granularity of data flow. <code>channel_capacity</code> sets the backpressure threshold per edge. <code>cache_intermediates</code> enables tee-to-cache for intermediate results. <code>memory_budget</code> is reserved for future use — currently all pipelines run with bounded-channel backpressure as the only memory control.
+        </p>
+
+        <h3>6.2 Pipeline Nodes</h3>
+
+        <div class="code-block">
+            <pre>
+<span class="rust-keyword">enum</span> <span class="rust-type">PipelineNode</span> {
+    Source   { addr: <span class="rust-type">CAddr</span>, data: <span class="rust-type">Bytes</span> },                  <span class="rust-comment">// leaf data</span>
+    Cached   { addr: <span class="rust-type">CAddr</span>, data: <span class="rust-type">Bytes</span> },                  <span class="rust-comment">// cache hit</span>
+    StreamingStage { addr: <span class="rust-type">CAddr</span>, function: ..., input_indices: ... },
+    BatchStage     { addr: <span class="rust-type">CAddr</span>, function: ..., input_indices: ... },
+}</pre>
+        </div>
+
+        <p>
+            Four node types. <code>Source</code> and <code>Cached</code> both emit their <code>Bytes</code> through <code>value_to_stream</code> — the distinction exists only for metrics and debugging. <code>StreamingStage</code> wires inputs directly. <code>BatchStage</code> collects inputs, runs batch, and re-chunks (<a href="#auto-wrapping-container">§5</a>). Each node references its inputs by index into the pipeline's node array — indices are assigned during topological construction.
+        </p>
+
+        <h3>6.3 DAG-to-Pipeline Construction</h3>
+
+        <p>
+            The <code>StreamingExecutor</code> builds the pipeline in three phases. Click through the diagram below to see each phase.
+        </p>
+
+        <div class="svg-container" style="margin: 1.5rem auto; text-align: center;">
+            <svg id="pipeline-build-svg" viewBox="0 0 720 360" style="display: inline-block; max-width: 860px; width: 100%; border-radius: 8px; cursor: pointer;"
+                 xmlns="http://www.w3.org/2000/svg">
+                <rect width="720" height="360" rx="8" fill="#1a1e2e"/>
+
+                <text x="360" y="22" text-anchor="middle" fill="#e0e0e0" font-size="13" font-weight="bold" font-family="Roboto Condensed, sans-serif">DAG → Pipeline Construction</text>
+
+                <!-- Phase 1: Topo sort -->
+                <g id="pb-phase-0">
+                    <text x="360" y="48" text-anchor="middle" fill="#81d4fa" font-size="12" font-weight="bold" font-family="Roboto Condensed, sans-serif">Phase 1: Topological Sort</text>
+                    <text x="360" y="66" text-anchor="middle" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">Walk the DAG depth-first from the target CAddr. Produce a linear order: leaves first, target last.</text>
+
+                    <!-- DAG visualization -->
+                    <rect x="120" y="85" width="70" height="30" rx="4" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+                    <text x="155" y="104" text-anchor="middle" fill="#2ecc71" font-size="9" font-family="Roboto Condensed, sans-serif">leaf A</text>
+
+                    <rect x="260" y="85" width="70" height="30" rx="4" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+                    <text x="295" y="104" text-anchor="middle" fill="#2ecc71" font-size="9" font-family="Roboto Condensed, sans-serif">leaf B</text>
+
+                    <rect x="190" y="145" width="80" height="30" rx="4" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+                    <text x="230" y="164" text-anchor="middle" fill="#81d4fa" font-size="9" font-family="Roboto Condensed, sans-serif">upper(A)</text>
+
+                    <rect x="350" y="85" width="70" height="30" rx="4" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+                    <text x="385" y="104" text-anchor="middle" fill="#2ecc71" font-size="9" font-family="Roboto Condensed, sans-serif">leaf C</text>
+
+                    <rect x="300" y="145" width="100" height="30" rx="4" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+                    <text x="350" y="164" text-anchor="middle" fill="#81d4fa" font-size="9" font-family="Roboto Condensed, sans-serif">concat(B, C)</text>
+
+                    <rect x="240" y="210" width="120" height="30" rx="4" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+                    <text x="300" y="229" text-anchor="middle" fill="#f39c12" font-size="9" font-weight="bold" font-family="Roboto Condensed, sans-serif">sha256(↑, ↑)</text>
+
+                    <!-- Edges -->
+                    <line x1="155" y1="115" x2="215" y2="145" stroke="#3a3f5c" stroke-width="1"/>
+                    <line x1="295" y1="115" x2="330" y2="145" stroke="#3a3f5c" stroke-width="1"/>
+                    <line x1="385" y1="115" x2="370" y2="145" stroke="#3a3f5c" stroke-width="1"/>
+                    <line x1="230" y1="175" x2="275" y2="210" stroke="#3a3f5c" stroke-width="1"/>
+                    <line x1="350" y1="175" x2="325" y2="210" stroke="#3a3f5c" stroke-width="1"/>
+
+                    <!-- Topo order arrow -->
+                    <text x="500" y="100" fill="#90a4ae" font-size="10" font-weight="bold" font-family="Roboto Condensed, sans-serif">Topo order:</text>
+                    <text x="500" y="118" fill="#2ecc71" font-size="10" font-family="Roboto Condensed, sans-serif">0: leaf A</text>
+                    <text x="500" y="134" fill="#2ecc71" font-size="10" font-family="Roboto Condensed, sans-serif">1: leaf B</text>
+                    <text x="500" y="150" fill="#2ecc71" font-size="10" font-family="Roboto Condensed, sans-serif">2: leaf C</text>
+                    <text x="500" y="166" fill="#81d4fa" font-size="10" font-family="Roboto Condensed, sans-serif">3: upper(A)</text>
+                    <text x="500" y="182" fill="#81d4fa" font-size="10" font-family="Roboto Condensed, sans-serif">4: concat(B,C)</text>
+                    <text x="500" y="198" fill="#f39c12" font-size="10" font-family="Roboto Condensed, sans-serif">5: sha256(3,4)</text>
+                </g>
+
+                <!-- Phase 2: Node creation -->
+                <g id="pb-phase-1" opacity="0">
+                    <text x="360" y="48" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold" font-family="Roboto Condensed, sans-serif">Phase 2: Node Creation</text>
+                    <text x="360" y="66" text-anchor="middle" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">For each addr in topo order: check cache → resolve leaf → pick streaming or batch function.</text>
+
+                    <!-- Pipeline nodes as linear array -->
+                    <rect x="50" y="90" width="90" height="50" rx="4" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+                    <text x="95" y="110" text-anchor="middle" fill="#2ecc71" font-size="9" font-weight="bold" font-family="Roboto Condensed, sans-serif">Source</text>
+                    <text x="95" y="126" text-anchor="middle" fill="#90a4ae" font-size="8" font-family="Roboto Condensed, sans-serif">leaf A [idx 0]</text>
+
+                    <rect x="155" y="90" width="90" height="50" rx="4" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+                    <text x="200" y="110" text-anchor="middle" fill="#2ecc71" font-size="9" font-weight="bold" font-family="Roboto Condensed, sans-serif">Source</text>
+                    <text x="200" y="126" text-anchor="middle" fill="#90a4ae" font-size="8" font-family="Roboto Condensed, sans-serif">leaf B [idx 1]</text>
+
+                    <rect x="260" y="90" width="90" height="50" rx="4" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+                    <text x="305" y="110" text-anchor="middle" fill="#2ecc71" font-size="9" font-weight="bold" font-family="Roboto Condensed, sans-serif">Cached</text>
+                    <text x="305" y="126" text-anchor="middle" fill="#90a4ae" font-size="8" font-family="Roboto Condensed, sans-serif">leaf C [idx 2]</text>
+
+                    <rect x="365" y="90" width="90" height="50" rx="4" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+                    <text x="410" y="110" text-anchor="middle" fill="#81d4fa" font-size="9" font-weight="bold" font-family="Roboto Condensed, sans-serif">Streaming</text>
+                    <text x="410" y="126" text-anchor="middle" fill="#90a4ae" font-size="8" font-family="Roboto Condensed, sans-serif">upper [idx 3]</text>
+
+                    <rect x="470" y="90" width="90" height="50" rx="4" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+                    <text x="515" y="110" text-anchor="middle" fill="#81d4fa" font-size="9" font-weight="bold" font-family="Roboto Condensed, sans-serif">Streaming</text>
+                    <text x="515" y="126" text-anchor="middle" fill="#90a4ae" font-size="8" font-family="Roboto Condensed, sans-serif">concat [idx 4]</text>
+
+                    <rect x="575" y="90" width="90" height="50" rx="4" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+                    <text x="620" y="110" text-anchor="middle" fill="#f39c12" font-size="9" font-weight="bold" font-family="Roboto Condensed, sans-serif">Streaming</text>
+                    <text x="620" y="126" text-anchor="middle" fill="#90a4ae" font-size="8" font-family="Roboto Condensed, sans-serif">sha256 [idx 5]</text>
+
+                    <!-- Input wiring -->
+                    <text x="360" y="168" text-anchor="middle" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">Input wiring (by index):</text>
+                    <text x="360" y="186" fill="#81d4fa" font-size="10" font-family="Roboto Condensed, sans-serif">  upper[3].inputs = [0]      concat[4].inputs = [1, 2]      sha256[5].inputs = [3, 4]</text>
+
+                    <text x="360" y="218" text-anchor="middle" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">Cache check: leaf C was cached → PipelineNode::Cached (no recompute)</text>
+                    <text x="360" y="236" text-anchor="middle" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">Registry: all three functions found as StreamingComputeFunction</text>
+                </g>
+
+                <!-- Phase 3: Execution -->
+                <g id="pb-phase-2" opacity="0">
+                    <text x="360" y="48" text-anchor="middle" fill="#f39c12" font-size="12" font-weight="bold" font-family="Roboto Condensed, sans-serif">Phase 3: Execution</text>
+                    <text x="360" y="66" text-anchor="middle" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">Walk nodes in order. Each node takes() input receivers, spawns its task, produces output receiver.</text>
+
+                    <!-- Execution flow -->
+                    <rect x="40" y="85" width="80" height="34" rx="4" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+                    <text x="80" y="106" text-anchor="middle" fill="#2ecc71" font-size="8" font-family="Roboto Condensed, sans-serif">A → chunks</text>
+
+                    <rect x="135" y="85" width="80" height="34" rx="4" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+                    <text x="175" y="106" text-anchor="middle" fill="#2ecc71" font-size="8" font-family="Roboto Condensed, sans-serif">B → chunks</text>
+
+                    <rect x="230" y="85" width="80" height="34" rx="4" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+                    <text x="270" y="106" text-anchor="middle" fill="#2ecc71" font-size="8" font-family="Roboto Condensed, sans-serif">C → chunks</text>
+
+                    <rect x="100" y="145" width="100" height="34" rx="4" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+                    <text x="150" y="166" text-anchor="middle" fill="#81d4fa" font-size="8" font-family="Roboto Condensed, sans-serif">upper(rx[0])</text>
+
+                    <rect x="260" y="145" width="120" height="34" rx="4" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+                    <text x="320" y="166" text-anchor="middle" fill="#81d4fa" font-size="8" font-family="Roboto Condensed, sans-serif">concat(rx[1],rx[2])</text>
+
+                    <rect x="180" y="210" width="160" height="34" rx="4" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+                    <text x="260" y="231" text-anchor="middle" fill="#f39c12" font-size="8" font-weight="bold" font-family="Roboto Condensed, sans-serif">sha256(rx[3], rx[4]) → output</text>
+
+                    <!-- Arrows with flowing dots -->
+                    <line x1="80" y1="119" x2="130" y2="145" stroke="#3a3f5c" stroke-width="1"/>
+                    <line x1="175" y1="119" x2="300" y2="145" stroke="#3a3f5c" stroke-width="1"/>
+                    <line x1="270" y1="119" x2="340" y2="145" stroke="#3a3f5c" stroke-width="1"/>
+                    <line x1="150" y1="179" x2="220" y2="210" stroke="#3a3f5c" stroke-width="1"/>
+                    <line x1="320" y1="179" x2="300" y2="210" stroke="#3a3f5c" stroke-width="1"/>
+
+                    <circle r="3" fill="#2ecc71" opacity="0.8"><animateMotion dur="1.2s" repeatCount="indefinite" path="M80,119 L130,145"/></circle>
+                    <circle r="3" fill="#2ecc71" opacity="0.8"><animateMotion dur="1.2s" repeatCount="indefinite" path="M175,119 L300,145"/></circle>
+                    <circle r="3" fill="#81d4fa" opacity="0.8"><animateMotion dur="1.2s" repeatCount="indefinite" path="M150,179 L220,210"/></circle>
+                    <circle r="3" fill="#81d4fa" opacity="0.8"><animateMotion dur="1.2s" repeatCount="indefinite" path="M320,179 L300,210"/></circle>
+
+                    <text x="460" y="100" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">All stages run concurrently.</text>
+                    <text x="460" y="116" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">Backpressure flows upstream</text>
+                    <text x="460" y="132" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">through bounded channels.</text>
+                    <text x="460" y="160" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">outputs[i].take() ensures each</text>
+                    <text x="460" y="176" fill="#90a4ae" font-size="9" font-family="Roboto Condensed, sans-serif">receiver is consumed exactly once.</text>
+                    <text x="460" y="204" fill="#e74c3c" font-size="9" font-family="Roboto Condensed, sans-serif">Fan-out (same output used by</text>
+                    <text x="460" y="220" fill="#e74c3c" font-size="9" font-family="Roboto Condensed, sans-serif">two stages) requires tee_stream</text>
+                    <text x="460" y="236" fill="#e74c3c" font-size="9" font-family="Roboto Condensed, sans-serif">to clone chunks to both consumers.</text>
+                </g>
+
+                <!-- Step indicator -->
+                <text id="pb-step" x="360" y="310" text-anchor="middle" fill="#3a3f5c" font-size="10" font-family="Roboto Condensed, sans-serif">● ○ ○</text>
+                <text id="pb-hint" x="360" y="330" text-anchor="middle" fill="#b0bec5" font-size="10" font-family="Roboto Condensed, sans-serif">▶ click to step through pipeline construction</text>
+            </svg>
+        </div>
+
+        <h4>Topological Sort</h4>
+
+        <p>
+            The executor walks the DAG depth-first from the target <code>CAddr</code>, producing a topological order where every node appears after all its dependencies. This is the same traversal used by the batch materializer — the streaming executor reuses the <code>DagReader</code> trait.
+        </p>
+
+        <div class="code-block">
+            <pre>
+<span class="rust-keyword">fn</span> <span class="rust-function">resolve_order</span>(dag: &amp;<span class="rust-keyword">dyn</span> <span class="rust-type">DagReader</span>, addr: &amp;<span class="rust-type">CAddr</span>) -&gt; <span class="rust-type">Result</span>&lt;<span class="rust-type">Vec</span>&lt;<span class="rust-type">CAddr</span>&gt;, <span class="rust-type">DerivaError</span>&gt; {
+    <span class="rust-keyword">let mut</span> order = <span class="rust-type">Vec</span>::new();
+    <span class="rust-keyword">let mut</span> visited = <span class="rust-type">HashSet</span>::new();
+    <span class="rust-function">topo_visit</span>(dag, addr, &amp;<span class="rust-keyword">mut</span> visited, &amp;<span class="rust-keyword">mut</span> order)?;
+    <span class="rust-type">Ok</span>(order)
+}</pre>
+        </div>
+
+        <h4>Node Creation Loop</h4>
+
+        <p>
+            For each address in topological order, the executor:
+        </p>
+
+        <ol>
+            <li><strong>Checks the cache.</strong> If the value is already materialized, insert a <code>Cached</code> node — no computation needed.</li>
+            <li><strong>Resolves leaf inputs.</strong> Any input not yet in the pipeline is looked up in the cache or leaf store and added as a <code>Source</code> or <code>Cached</code> node.</li>
+            <li><strong>Picks the function variant.</strong> Streaming-native if available, batch fallback otherwise (<a href="#auto-wrapping-container">§5</a>).</li>
+            <li><strong>Records the index.</strong> The node's position in the pipeline array becomes its identifier for downstream references.</li>
+        </ol>
+
+        <h3>6.4 Execution</h3>
+
+        <p>
+            The <code>execute()</code> method walks the node array in order. Each node <code>take()</code>s its input receivers from the outputs array, spawns its processing task, and stores its output receiver. Because nodes are in topological order, every input is guaranteed to be available when needed.
+        </p>
+
+        <p>
+            The <code>take()</code> semantics enforce single-consumer: each <code>Receiver</code> can only be consumed once. If a DAG has fan-out — one node's output feeds two downstream stages — the pipeline must use <code>tee_stream</code> (<a href="#stream-chunk-container">§3</a>.6) to clone chunks to both consumers. The current implementation panics on double-take as a safety check; the pipeline builder is responsible for inserting tee nodes where needed.
+        </p>
+
+        <h3>6.5 Metrics Wrapper</h3>
+
+        <p>
+            The final output stream is wrapped in a metrics-collecting proxy that counts chunks, bytes, and pipeline duration:
+        </p>
+
+        <div class="code-block">
+            <pre>
+<span class="rust-comment">// Wrap output stream to track chunks, bytes, and pipeline duration.</span>
+<span class="rust-keyword">while let</span> <span class="rust-type">Some</span>(chunk) = raw.<span class="rust-function">recv</span>().<span class="rust-keyword">await</span> {
+    <span class="rust-keyword">match</span> &amp;chunk {
+        <span class="rust-type">StreamChunk</span>::Data(d) =&gt; {
+            metrics::STREAM_CHUNKS_TOTAL.<span class="rust-function">inc</span>();
+            metrics::STREAM_BYTES_TOTAL.<span class="rust-function">inc_by</span>(d.<span class="rust-function">len</span>() <span class="rust-keyword">as</span> <span class="rust-type">u64</span>);
+        }
+        <span class="rust-type">StreamChunk</span>::End | <span class="rust-type">StreamChunk</span>::Error(_) =&gt; {
+            metrics::STREAM_PIPELINE_DURATION.<span class="rust-function">observe</span>(start.<span class="rust-function">elapsed</span>());
+        }
+    }
+    tx.<span class="rust-function">send</span>(chunk).<span class="rust-keyword">await</span>?;
+}</pre>
+        </div>
+
+        <p>
+            This adds one extra channel hop but zero copying — the chunk is forwarded by move. The overhead is negligible compared to the compute work in each stage.
+        </p>
+
+    </section>
+</div>

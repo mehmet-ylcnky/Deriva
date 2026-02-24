@@ -96,7 +96,179 @@ if use_streaming {
 
 ---
 
-## 6. Channel Capacity Sweep Study — ✅ COMPLETED
+## 6. Expanded Streaming Function Library
+
+**Current state:** 20 built-in streaming functions across 4 categories (9 transforms, 3 accumulators, 3 combiners, 5 utilities). The `StreamingComputeFunction` trait and `spawn_map`/`spawn_accumulate` helpers make adding new functions straightforward.
+
+**Goal:** Grow the library to cover common data processing, cryptographic, encoding, validation, and analytics patterns. Each function below includes its category, execution pattern, memory profile, and implementation complexity estimate.
+
+### Existing 20 Functions (for reference)
+
+| # | Function | Category | Pattern |
+|---|----------|----------|---------|
+| 1 | `StreamingIdentity` | Transform | map |
+| 2 | `StreamingUppercase` | Transform | map |
+| 3 | `StreamingLowercase` | Transform | map |
+| 4 | `StreamingReverse` | Transform | map |
+| 5 | `StreamingBase64Encode` | Transform | map |
+| 6 | `StreamingBase64Decode` | Transform | map |
+| 7 | `StreamingXor` | Transform | map |
+| 8 | `StreamingCompress` | Transform | map |
+| 9 | `StreamingDecompress` | Transform | map |
+| 10 | `StreamingSha256` | Accumulator | fold |
+| 11 | `StreamingByteCount` | Accumulator | fold |
+| 12 | `StreamingChecksum` | Accumulator | fold |
+| 13 | `StreamingConcat` | Combiner | multi-recv sequential |
+| 14 | `StreamingInterleave` | Combiner | multi-recv round-robin |
+| 15 | `StreamingZipConcat` | Combiner | multi-recv pairwise |
+| 16 | `StreamingChunkResizer` | Utility | buffered |
+| 17 | `StreamingTake` | Utility | offset-tracking |
+| 18 | `StreamingSkip` | Utility | offset-tracking |
+| 19 | `StreamingRepeat` | Utility | buffer-all |
+| 20 | `StreamingTeeCount` | Utility | pass-through + state |
+
+### New Functions — Cryptography & Security
+
+| # | Function | Category | Pattern | Memory | Complexity | Description |
+|---|----------|----------|---------|--------|------------|-------------|
+| 21 | `StreamingEncrypt` | Transform | map | O(chunk) | Medium | AES-256-CTR per-chunk encryption. Counter state carried across chunks. Params: `key`, `nonce`. |
+| 22 | `StreamingDecrypt` | Transform | map | O(chunk) | Medium | AES-256-CTR per-chunk decryption. Inverse of `StreamingEncrypt`. |
+| 23 | `StreamingAeadEncrypt` | Transform | buffered | O(chunk+16) | Medium | AES-256-GCM authenticated encryption. Appends 16-byte auth tag per chunk. |
+| 24 | `StreamingAeadDecrypt` | Transform | buffered | O(chunk+16) | Medium | AES-256-GCM authenticated decryption. Verifies tag per chunk, emits `Error` on tamper. |
+| 25 | `StreamingHmacSha256` | Accumulator | fold | O(64B) | Low | HMAC-SHA256 keyed hash. Params: `key`. Emits 32-byte MAC on `End`. |
+| 26 | `StreamingMd5` | Accumulator | fold | O(16B) | Low | MD5 digest (for legacy compatibility / S3 ETag matching, not security). |
+| 27 | `StreamingSha512` | Accumulator | fold | O(64B) | Low | SHA-512 digest. Emits 64-byte hash on `End`. |
+| 28 | `StreamingBlake3` | Accumulator | fold | O(1.8KB) | Low | BLAKE3 hash — faster than SHA-256 on modern CPUs. Emits 32-byte hash. |
+| 29 | `StreamingRedact` | Transform | map | O(chunk) | Medium | Regex-based PII redaction. Replaces matches with `[REDACTED]`. Params: `patterns[]`. |
+
+### New Functions — Encoding & Format Conversion
+
+| # | Function | Category | Pattern | Memory | Complexity | Description |
+|---|----------|----------|---------|--------|------------|-------------|
+| 30 | `StreamingHexEncode` | Transform | map | O(2×chunk) | Low | Encode each byte as 2 hex chars. Output is 2× input size. |
+| 31 | `StreamingHexDecode` | Transform | map | O(chunk/2) | Low | Decode hex string to bytes. Emits `Error` on invalid hex. |
+| 32 | `StreamingUtf8Validate` | Transform | map | O(chunk) | Low | Pass-through that validates UTF-8. Emits `Error` on invalid sequences. Boundary-aware: buffers up to 3 trailing bytes for multi-byte chars split across chunks. |
+| 33 | `StreamingLineEnding` | Transform | map | O(chunk) | Low | Convert line endings: `\r\n` → `\n` or vice versa. Params: `target` (`lf` or `crlf`). |
+| 34 | `StreamingJsonPrettyPrint` | Utility | buffered | O(input) | Medium | Buffer full JSON, parse, re-emit pretty-printed. Non-streaming output. |
+| 35 | `StreamingJsonMinify` | Utility | buffered | O(input) | Medium | Buffer full JSON, strip whitespace, re-emit compact. |
+| 36 | `StreamingJsonLines` | Transform | map | O(chunk) | Low | Ensure each chunk ends with `\n`. For NDJSON/JSONL formatting. |
+| 37 | `StreamingCsvToJson` | Utility | buffered | O(header+chunk) | High | Parse CSV header, then convert each row to JSON object. Stateful: remembers header across chunks. |
+| 38 | `StreamingBase32Encode` | Transform | map | O(chunk×8/5) | Low | Base32 encoding per chunk. |
+| 39 | `StreamingBase32Decode` | Transform | map | O(chunk×5/8) | Low | Base32 decoding per chunk. |
+
+### New Functions — Data Processing & Analytics
+
+| # | Function | Category | Pattern | Memory | Complexity | Description |
+|---|----------|----------|---------|--------|------------|-------------|
+| 40 | `StreamingFilter` | Transform | map | O(chunk) | Low | Drop chunks where a predicate returns false. Params: `predicate` (e.g., `non_empty`, `contains:pattern`). |
+| 41 | `StreamingLineCount` | Accumulator | fold | O(8B) | Low | Count `\n` bytes across all chunks. Emit count as u64 on `End`. |
+| 42 | `StreamingWordCount` | Accumulator | fold | O(8B+1B) | Low | Count whitespace-delimited words. Tracks in-word state (1 byte) + counter (8 bytes). |
+| 43 | `StreamingMinMax` | Accumulator | fold | O(2B) | Low | Track min and max byte values across the stream. Emit `[min, max]` on `End`. |
+| 44 | `StreamingHistogram` | Accumulator | fold | O(256×8B) | Low | 256-bucket byte frequency histogram. Emit 2KB histogram on `End`. |
+| 45 | `StreamingSample` | Utility | offset-tracking | O(chunk) | Medium | Reservoir sampling: emit every Nth chunk. Params: `rate` (e.g., 10 = keep 1 in 10). |
+| 46 | `StreamingHead` | Utility | offset-tracking | O(chunk) | Low | Emit first N chunks (not bytes — unlike `StreamingTake`). Params: `chunks`. |
+| 47 | `StreamingTail` | Utility | ring-buffer | O(N×chunk) | Medium | Emit last N chunks. Requires ring buffer of size N. Params: `chunks`. |
+| 48 | `StreamingDeduplicate` | Utility | set | O(seen_hashes) | Medium | Drop duplicate chunks (by content hash). Memory grows with unique chunk count. |
+| 49 | `StreamingSort` | Utility | buffer-all | O(input) | Medium | Buffer all chunks, sort by byte order, re-emit. Non-streaming output. |
+| 50 | `StreamingUnique` | Utility | buffer-all | O(input) | Medium | Buffer all, deduplicate, re-emit sorted unique chunks. |
+
+### New Functions — Compression & Transformation
+
+| # | Function | Category | Pattern | Memory | Complexity | Description |
+|---|----------|----------|---------|--------|------------|-------------|
+| 51 | `StreamingZstdCompress` | Transform | map | O(chunk) | Medium | Zstandard compression per chunk. Better ratios than zlib at similar speed. |
+| 52 | `StreamingZstdDecompress` | Transform | map | O(chunk) | Medium | Zstandard decompression per chunk. |
+| 53 | `StreamingLz4Compress` | Transform | map | O(chunk) | Low | LZ4 compression — fastest compression, lower ratio. |
+| 54 | `StreamingLz4Decompress` | Transform | map | O(chunk) | Low | LZ4 decompression. |
+| 55 | `StreamingSnappyCompress` | Transform | map | O(chunk) | Low | Snappy compression — Google's fast compressor. |
+| 56 | `StreamingSnappyDecompress` | Transform | map | O(chunk) | Low | Snappy decompression. |
+| 57 | `StreamingBrotliCompress` | Transform | map | O(chunk) | Medium | Brotli compression — best ratio for text/web content. |
+| 58 | `StreamingBrotliDecompress` | Transform | map | O(chunk) | Medium | Brotli decompression. |
+| 59 | `StreamingPad` | Transform | map | O(chunk+pad) | Low | Pad each chunk to a fixed size. Params: `block_size`, `padding_byte`. |
+| 60 | `StreamingTrim` | Transform | map | O(chunk) | Low | Strip leading/trailing whitespace bytes from each chunk. |
+
+### New Functions — Flow Control & Pipeline Utilities
+
+| # | Function | Category | Pattern | Memory | Complexity | Description |
+|---|----------|----------|---------|--------|------------|-------------|
+| 61 | `StreamingRateLimit` | Utility | pass-through | O(chunk) | Medium | Throttle output to target bytes/sec. Uses `tokio::time::sleep` between sends. Params: `bytes_per_sec`. |
+| 62 | `StreamingDelay` | Utility | pass-through | O(chunk) | Low | Add fixed delay before each chunk. Params: `delay_ms`. For testing backpressure. |
+| 63 | `StreamingTimeout` | Utility | pass-through | O(chunk) | Medium | Emit `Error` if no chunk arrives within deadline. Params: `timeout_ms`. |
+| 64 | `StreamingRetry` | Utility | wrapper | O(chunk) | High | On upstream `Error`, restart the upstream function up to N times. Params: `max_retries`. |
+| 65 | `StreamingTee` | Utility | fan-out | O(chunk×N) | Medium | Duplicate input to N output receivers. Each output gets a clone of every chunk. |
+| 66 | `StreamingMerge` | Combiner | multi-recv | O(N×chunk) | Medium | Select-based merge: emit whichever input has a chunk ready first (non-deterministic order). |
+| 67 | `StreamingBroadcast` | Combiner | fan-out | O(chunk×N) | Medium | Like `Tee` but with backpressure: slowest consumer gates the producer. |
+| 68 | `StreamingPartition` | Utility | fan-out | O(chunk×2) | Medium | Route chunks to one of 2 outputs based on a predicate. Params: `predicate`. |
+| 69 | `StreamingBatch` | Utility | buffered | O(N×chunk) | Low | Collect N chunks into one large chunk. Inverse of `ChunkResizer`. Params: `batch_size`. |
+| 70 | `StreamingDebounce` | Utility | pass-through | O(chunk) | Medium | Suppress rapid consecutive chunks; emit only after a quiet period. Params: `window_ms`. |
+
+### New Functions — Validation & Integrity
+
+| # | Function | Category | Pattern | Memory | Complexity | Description |
+|---|----------|----------|---------|--------|------------|-------------|
+| 71 | `StreamingJsonValidate` | Utility | buffered | O(input) | Medium | Buffer full input, parse as JSON, emit unchanged if valid, `Error` if not. |
+| 72 | `StreamingSchemaValidate` | Utility | buffered | O(input) | High | Validate JSON against a JSON Schema. Params: `schema`. |
+| 73 | `StreamingMagicBytes` | Transform | map (first chunk) | O(chunk) | Low | Check first chunk starts with expected magic bytes. Params: `expected`. Emit `Error` on mismatch. |
+| 74 | `StreamingSizeLimit` | Utility | offset-tracking | O(8B) | Low | Track total bytes; emit `Error` if limit exceeded. Params: `max_bytes`. |
+| 75 | `StreamingChecksumVerify` | Accumulator | fold | O(4B) | Low | Compute CRC32 and compare against expected value. Params: `expected_crc32`. Emit `Error` on mismatch. |
+| 76 | `StreamingSha256Verify` | Accumulator | fold | O(32B) | Low | Compute SHA-256 and compare against expected hash. Params: `expected_hash`. |
+| 77 | `StreamingNonEmpty` | Transform | map | O(1B) | Low | Emit `Error` if stream ends with zero data chunks. Pass-through otherwise. |
+
+### New Functions — Text Processing
+
+| # | Function | Category | Pattern | Memory | Complexity | Description |
+|---|----------|----------|---------|--------|------------|-------------|
+| 78 | `StreamingReplace` | Transform | map | O(chunk) | Medium | Byte pattern replacement within each chunk. Params: `find`, `replace`. Boundary-aware for patterns split across chunks. |
+| 79 | `StreamingPrefix` | Transform | map (first) | O(prefix) | Low | Prepend a fixed byte sequence before the first data chunk. Params: `prefix`. |
+| 80 | `StreamingSuffix` | Utility | pass-through | O(suffix) | Low | Append a fixed byte sequence after the last data chunk (before `End`). Params: `suffix`. |
+| 81 | `StreamingLinePrefix` | Transform | map | O(chunk) | Medium | Prepend a string to each line (e.g., line numbers, timestamps). Params: `prefix_fn`. |
+| 82 | `StreamingGrep` | Transform | map | O(chunk) | Medium | Keep only lines matching a regex. Params: `pattern`. Boundary-aware for lines split across chunks. |
+| 83 | `StreamingSed` | Transform | map | O(chunk) | Medium | Regex find-and-replace per line. Params: `pattern`, `replacement`. |
+| 84 | `StreamingTruncateLines` | Transform | map | O(chunk) | Low | Truncate each line to max N bytes. Params: `max_line_bytes`. |
+| 85 | `StreamingCharsetConvert` | Transform | map | O(chunk) | Medium | Convert between character encodings (e.g., Latin-1 → UTF-8). Params: `from`, `to`. |
+
+### New Functions — CAS-Specific Operations
+
+| # | Function | Category | Pattern | Memory | Complexity | Description |
+|---|----------|----------|---------|--------|------------|-------------|
+| 86 | `StreamingCAddrEmbed` | Utility | pass-through + state | O(chunk) | Medium | Compute CAddr (content hash) of the stream and embed it as a trailing metadata chunk. Combines pass-through with SHA-256 accumulation. |
+| 87 | `StreamingCAddrVerify` | Accumulator | fold | O(32B) | Medium | Compute CAddr and verify against an expected address. Params: `expected_caddr`. Emit `Error` on mismatch. Ensures content integrity in CAS pipelines. |
+| 88 | `StreamingDiff` | Combiner | multi-recv pairwise | O(chunk×2) | High | Read two inputs chunk-by-chunk, emit a binary diff (byte-level XOR or edit script). For CAS deduplication analysis. |
+| 89 | `StreamingPatch` | Combiner | multi-recv | O(chunk×2) | High | Apply a binary patch stream to a base stream. Inverse of `StreamingDiff`. |
+| 90 | `StreamingMerkleTree` | Accumulator | fold | O(depth×32B) | High | Build a Merkle tree over chunks. Emit root hash on `End`. Enables chunk-level integrity verification for CAS. |
+| 91 | `StreamingContentType` | Transform | map (first chunk) | O(chunk) | Medium | Detect content type from magic bytes (first chunk) and prepend a metadata chunk with MIME type string. |
+| 92 | `StreamingChunkHash` | Transform | map | O(chunk+32B) | Low | Append a 32-byte SHA-256 hash to each chunk. Enables per-chunk integrity verification without full-stream accumulation. |
+
+### New Functions — Numeric & Scientific
+
+| # | Function | Category | Pattern | Memory | Complexity | Description |
+|---|----------|----------|---------|--------|------------|-------------|
+| 93 | `StreamingSum` | Accumulator | fold | O(8B) | Low | Interpret chunks as newline-delimited decimal numbers, sum them. Emit total on `End`. |
+| 94 | `StreamingAverage` | Accumulator | fold | O(16B) | Low | Running sum + count, emit average on `End`. |
+| 95 | `StreamingBitwiseAnd` | Transform | map | O(chunk) | Low | Bitwise AND each byte with a mask. Params: `mask`. |
+| 96 | `StreamingBitwiseOr` | Transform | map | O(chunk) | Low | Bitwise OR each byte with a mask. Params: `mask`. |
+| 97 | `StreamingBitwiseNot` | Transform | map | O(chunk) | Low | Bitwise NOT (complement) of each byte. |
+| 98 | `StreamingByteSwap` | Transform | map | O(chunk) | Low | Swap byte order within 2/4/8-byte words. Params: `word_size`. For endianness conversion. |
+| 99 | `StreamingEntropy` | Accumulator | fold | O(256×8B) | Low | Compute Shannon entropy of the byte stream. Uses byte histogram (same as `StreamingHistogram`), computes entropy on `End`. |
+| 100 | `StreamingRollingHash` | Transform | map | O(chunk+window) | Medium | Compute rolling hash (Rabin fingerprint) over a sliding window. Params: `window_size`. Useful for content-defined chunking in CAS. |
+
+### Summary
+
+| Status | Count | Categories |
+|--------|-------|------------|
+| **Existing (implemented)** | 20 | 9 transforms, 3 accumulators, 3 combiners, 5 utilities |
+| **New proposed** | 80 | See above: crypto (9), encoding (10), analytics (11), compression (10), flow control (10), validation (7), text (8), CAS-specific (7), numeric (8) |
+| **Total library target** | **100** | Full coverage of common streaming data operations |
+
+### Implementation Priority
+
+1. **High priority** (most useful, low complexity): `StreamingBlake3`, `StreamingFilter`, `StreamingHexEncode/Decode`, `StreamingSizeLimit`, `StreamingTimeout`, `StreamingTee`, `StreamingMerge`, `StreamingPrefix/Suffix`, `StreamingCAddrVerify`
+2. **Medium priority** (useful, moderate complexity): `StreamingEncrypt/Decrypt`, `StreamingZstdCompress/Decompress`, `StreamingGrep`, `StreamingReplace`, `StreamingMerkleTree`, `StreamingRollingHash`, `StreamingPartition`
+3. **Low priority** (niche or high complexity): `StreamingJsonPrettyPrint`, `StreamingCsvToJson`, `StreamingSchemaValidate`, `StreamingDiff/Patch`, `StreamingSort`
+
+---
+
+## 7. Channel Capacity Sweep Study — ✅ COMPLETED
 
 > **Status:** Implemented and benchmarked. Results published in Paper 2b §8.7. The §3.4 backpressure section now references empirical data instead of informal claims.
 

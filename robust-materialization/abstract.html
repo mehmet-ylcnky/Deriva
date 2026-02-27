@@ -1,0 +1,17 @@
+<div class="section-content">
+    <div class="abstract">
+        <h1>Abstract</h1>
+        <p>
+            Computation-addressed storage systems address data by the computation that produces it, enabling intrinsic provenance, recomputability, and cost-aware eviction. Practical deployment, however, demands three robustness features rarely combined in a single system: deadlock-free parallel materialization, transitive cache invalidation, and computation-aware garbage collection. This paper presents the robustness layer of the Deriva project, built on a single architectural foundation — a <strong>persistent DAG store</strong> backed by <a href="https://github.com/spacejam/sled" target="_blank">sled</a> — whose bidirectional adjacency lists enable all three features while surviving restarts with O(1) startup time.
+        </p>
+        <p>
+            An <strong>async executor</strong> resolves independent DAG branches concurrently via Tokio tasks with broadcast-channel deduplication and compute-only semaphore acquisition to prevent deadlock in diamond DAGs. A <strong>verification mode</strong> detects non-deterministic functions through dual-compute hash comparison. <strong>Cascade invalidation</strong> walks reverse edges to evict transitive dependents with policy-driven depth limits, while <strong>mark-and-sweep GC</strong> reclaims orphaned blobs, recipes, and cache entries using DAG-derived live sets and a pin-based protection mechanism. Forty-plus Prometheus metrics provide operational observability across all subsystems.
+        </p>
+        <p>
+            <a href="https://github.com/bheisler/criterion.rs" target="_blank">Criterion.rs</a> benchmarks show cascade invalidation completing in 2.9–27µs for 10–100 dependents, GC sweeping 2,500 orphans in 234ms, parallel materialization achieving 341–382ns cache-hit latency, and broadcast deduplication resolving 10 concurrent consumers in 2.85µs.
+        </p>
+        <p>
+            <strong>Keywords:</strong> computation-addressed storage, dependency DAG, parallel materialization, cache invalidation, garbage collection, async Rust
+        </p>
+    </div>
+</div>

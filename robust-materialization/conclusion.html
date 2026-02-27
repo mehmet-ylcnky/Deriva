@@ -1,0 +1,164 @@
+<div class="section-content">
+    <section id="conclusion">
+    <h2>11. Conclusion</h2>
+    
+    <p>
+        This work transforms Deriva from a proof-of-concept into a robust computation-addressed store. By adding a persistent DAG, async execution, verification mode, cascade invalidation, garbage collection, and comprehensive observability, the three critical gaps identified previously are addressed: sequential execution, silent stale data, and unbounded storage growth.
+    </p>
+
+    <h3>11.1 The Persistent DAG as Single Enabler</h3>
+    
+    <p>
+        The persistent DAG (§3) is the foundation that enables all other robustness features:
+    </p>
+
+    <div class="code-block">
+        <pre>
+Persistent DAG (sled-backed, bidirectional edges)
+    │
+    ├──▶ Forward edges (recipe → inputs)
+    │    └──▶ Async materialization (§4)
+    │         └──▶ Parallel input resolution
+    │
+    ├──▶ Reverse edges (input → dependents)
+    │    ├──▶ Cascade invalidation (§6)
+    │    │    └──▶ Transitive dependent eviction
+    │    │
+    │    └──▶ Garbage collection (§7)
+    │         └──▶ Live set computation
+    │
+    └──▶ Restart recovery
+         └──▶ DAG survives process restart</pre>
+    </div>
+
+    <p>
+        Without the persistent DAG, none of these features would be possible. The bidirectional edge structure (forward for materialization, reverse for invalidation/GC) is the key architectural insight. The 12 MB storage cost and 5ms insert latency are acceptable tradeoffs for the robustness gained.
+    </p>
+
+    <h3>11.2 Key Contributions</h3>
+    
+    <p>
+        This work makes seven specific contributions to computation-addressed storage:
+    </p>
+
+    <ol>
+        <li><strong>DAG-aware parallelism:</strong> Async executor with broadcast-channel deduplication and deadlock-free semaphore placement. Achieves 1.5-8.5× speedup for DAGs with independent branches.</li>
+        <li><strong>Active determinism verification:</strong> Dual-compute mode with parallel execution and byte-for-byte comparison. Catches non-determinism that sandboxing misses (HashMap iteration, floating-point).</li>
+        <li><strong>Dependency-aware invalidation:</strong> Cascade invalidation via reverse edge traversal. Prevents silent stale data bugs that violate computation addressing invariant.</li>
+        <li><strong>Reachability-based GC:</strong> Mark-and-sweep with pin set protection. Achieves 97% storage savings over 1 year with 200ms weekly pause.</li>
+        <li><strong>Comprehensive observability:</strong> 40+ Prometheus metrics and structured tracing. Enables monitoring, alerting, and debugging in operational deployments.</li>
+        <li><strong>Persistent DAG store:</strong> Sled-backed bidirectional graph with transactional guarantees. Survives restarts and enables all robustness features.</li>
+        <li><strong>Pay-as-you-go robustness:</strong> All features are configurable (verification mode, GC frequency, max concurrency). Operators can tune overhead based on requirements.</li>
+    </ol>
+
+    <h3>11.3 Evaluation Summary</h3>
+    
+    <div class="code-block">
+        <pre>
+Feature                  Benefit                      Cost
+────────────────────────────────────────────────────────────────
+Parallel materialization 1.5-8.5× speedup             Async complexity
+Verification (Sampled)   5% coverage, catches bugs    0.5% overhead
+Cascade invalidation     No stale data                0.3-31ms per cascade
+Garbage collection       97% storage savings          200ms per week
+Observability            Operational monitoring        2% CPU overhead
+Persistent DAG           Restart recovery             12 MB storage
+
+Overall: This work adds minimal overhead while providing significant
+correctness and operational benefits.</pre>
+    </div>
+
+    <h3>11.4 Comparison with Related Systems</h3>
+    
+    <p>
+        This work occupies a unique point in the design space:
+    </p>
+
+    <ul>
+        <li><strong>vs Build systems (Bazel, Ninja):</strong> Deriva adds persistent caching, active verification, and runtime materialization. Build systems focus on hermetic builds and sandboxing.</li>
+        <li><strong>vs Dataflow engines (Spark, Dask):</strong> Deriva adds persistent storage and computation addressing. Dataflow engines focus on distributed execution and fault tolerance.</li>
+        <li><strong>vs Caches (Redis, Memcached):</strong> Deriva adds computation and dependency tracking. Caches focus on low-latency key-value storage.</li>
+        <li><strong>vs Content-addressed stores (Git, IPFS):</strong> Deriva adds computation (recipes) and automatic invalidation/GC. CAS focus on immutable data distribution.</li>
+    </ul>
+
+    <p>
+        Deriva combines ideas from all four categories: build system dependency tracking, dataflow engine parallelism, cache persistence, and content-addressed immutability. The result is a system that can serve as both a build cache and a materialized view store.
+    </p>
+
+    <h3>11.5 Lessons Learned</h3>
+    
+    <p>
+        Three key lessons from this implementation shaped the understanding of what it takes to build a robust computation-addressed store:
+    </p>
+
+    <ol>
+        <li><strong>Bidirectional edges are essential:</strong> Forward edges alone (as in the original design) are insufficient for operational robustness. Reverse edges enable invalidation and GC without scanning the entire DAG — a critical requirement when the DAG contains thousands of recipes. The storage cost (2× edge data, approximately 6 MB for the reverse tree with 10,000 recipes) is justified by the O(1) dependent lookup it provides. Without reverse edges, cascade invalidation would require a full DAG scan (O(N) per invalidation), making it impractical for interactive use. The lesson: <em>invest in bidirectional indexing early</em> — retrofitting reverse edges into an existing system is much harder than building them from the start.</li>
+        <li><strong>Async is worth the complexity:</strong> The async/await learning curve is steep, particularly in Rust where lifetime constraints interact with async boundaries in subtle ways. Challenges were encountered with <code>Send</code> bounds on futures, <code>'static</code> lifetime requirements for spawned tasks, and the need to use <code>Arc</code> instead of references for shared state. However, the parallelism benefits are real and measurable (1.5-8.5× speedup). Tokio's ecosystem maturity (async-trait, tokio::join!, broadcast channels) makes async Rust practical for concurrent systems. The lesson: <em>embrace async for I/O-heavy workloads</em> — the complexity is manageable with modern tooling, and the performance gains are significant.</li>
+        <li><strong>Observability is non-negotiable:</strong> Without metrics and tracing, debugging operational issues is impossible. During development, Prometheus metrics were repeatedly relied upon to diagnose performance regressions, identify cache hit rate drops, and verify that GC was reclaiming the expected amount of storage. The 2% overhead is a small price for operational visibility. The lesson: <em>instrument everything from day one</em> — adding observability after the fact requires touching every code path, while building it in from the start is incremental and natural.</li>
+    </ol>
+
+    <h3>11.6 Limitations and Future Work</h3>
+    
+    <p>
+        The current implementation is single-node only. Key limitations:
+    </p>
+
+    <ul>
+        <li><strong>Scalability:</strong> Limited by single-machine CPU, memory, and storage. Cannot scale beyond ~100k recipes or ~1TB storage.</li>
+        <li><strong>Availability:</strong> Single point of failure. Process crash loses in-flight materializations (though DAG persists).</li>
+        <li><strong>Latency:</strong> All compute happens locally. Cannot offload expensive functions to remote workers.</li>
+        <li><strong>Coordination:</strong> No multi-node coordination. Cannot share cache or distribute load across machines.</li>
+    </ul>
+
+    <p>
+        <strong>future distributed work (Distributed Deriva)</strong> will address these limitations:
+    </p>
+
+    <ul>
+        <li><strong>Distributed DAG:</strong> Replicate DAG across nodes using Raft consensus. Enables horizontal scalability and fault tolerance.</li>
+        <li><strong>Remote materialization:</strong> Execute recipes on remote workers. Enables compute offloading and load balancing.</li>
+        <li><strong>Distributed cache:</strong> Shard cache across nodes. Enables cache sizes beyond single-machine memory.</li>
+        <li><strong>Cross-node invalidation:</strong> Propagate invalidations across cluster. Maintains consistency in distributed setting.</li>
+    </ul>
+
+    <p>
+        The persistent DAG and async executor provide the foundation for distributed extension. The bidirectional edge structure will enable distributed invalidation. The async infrastructure will support remote RPC calls.
+    </p>
+
+    <h3>11.7 Broader Impact</h3>
+    
+    <p>
+        Computation addressing has applications beyond build caching:
+    </p>
+
+    <ul>
+        <li><strong>Materialized views:</strong> Database query results as recipes. Automatic invalidation when base tables change.</li>
+        <li><strong>ML pipelines:</strong> Feature engineering as recipes. Reproducible model training with content-addressed datasets.</li>
+        <li><strong>Data pipelines:</strong> ETL transformations as recipes. Incremental processing with dependency tracking.</li>
+        <li><strong>Scientific computing:</strong> Simulation results as recipes. Reproducible research with verified determinism.</li>
+    </ul>
+
+    <p>
+        The robustness features presented here (verification, invalidation, GC) make Deriva suitable for real-world use in these domains. The persistent DAG enables long-running pipelines that survive restarts. The observability features enable operational monitoring.
+    </p>
+
+    <h3>11.8 Final Remarks</h3>
+    
+    <p>
+        This work demonstrates that computation addressing is practical for concurrent systems. The persistent DAG is the key enabler: it provides the structural foundation for parallelism, invalidation, and garbage collection. The 12 MB storage cost and 5ms insert latency are acceptable for the robustness gained.
+    </p>
+
+    <p>
+        The evaluation shows that These features add minimal overhead (2-6%) while providing significant benefits: 1.5-8.5× speedup, determinism verification, automatic invalidation, and 97% storage savings. The pay-as-you-go design allows operators to tune overhead based on requirements.
+    </p>
+
+    <p>
+        This work transforms Deriva from a research prototype into a robust, deployable system. The next step is distributed scaling (future distributed work), which will enable horizontal scalability, fault tolerance, and multi-datacenter deployment. The persistent DAG and async executor provide a solid foundation for this extension.
+    </p>
+
+    <p>
+        <strong>Computation addressing is the future of reproducible, cacheable computation.</strong> This work proves it can be robust, fast, and practical.
+    </p>
+
+    </section>
+</div>

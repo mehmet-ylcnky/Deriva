@@ -1,0 +1,76 @@
+<div class="section-content">
+    <section id="introduction">
+    <h2>1. Introduction</h2>
+    
+    <p>
+        In the <a href="../computation-addressed-storage/" target="_blank">introduction paper</a>, Deriva's core model was introduced: a storage system where data is addressed by <em>how it's computed</em> rather than by name or location. A <strong>CAddr</strong> (Computation Address) is the <a href="https://github.com/BLAKE3-team/BLAKE3" target="_blank">BLAKE3</a> hash of either raw data (a <em>leaf</em>) or a <strong>Recipe</strong> — a canonical encoding of a function identifier, input CAddrs, and parameters. This model enables structural properties that external metadata cannot provide: provenance is intrinsic (every derived result carries its computation history), recomputability is guaranteed (recipes can always be re-executed), and eviction becomes cost-aware (the system knows which cached results are expensive to recompute).
+    </p>
+
+    <p>
+        The initial implementation demonstrated the viability of this model with a single-node implementation: 244 tests, 6 crates, a complete gRPC API, and a CLI client. However, it had three critical limitations that prevented practical deployment:
+    </p>
+
+    <div class="highlight-box">
+        <h3>The Robustness Gap</h3>
+        <ul>
+            <li><strong>Sequential materialization:</strong> The original <code>Executor</code> resolved dependencies one at a time. For a recipe with two unmaterialized inputs, it would compute the first, wait for completion, then compute the second — even when both inputs were independent and could run concurrently. This left CPU cores idle and made deep DAGs prohibitively slow.</li>
+            
+            <li><strong>No invalidation mechanism:</strong> When a leaf changed (e.g., updated source data), all transitive dependents had stale cached materializations. The system had no way to identify or evict these stale entries. Users had to manually track dependencies and clear caches — defeating the purpose of a computation-addressed store.</li>
+            
+            <li><strong>No garbage collection:</strong> Orphaned blobs (leaf data no longer referenced by any recipe), orphaned recipes (whose inputs had been GC'd), and stale cache entries accumulated indefinitely. The only cleanup mechanism was <code>EvictableCache::maybe_evict</code>, which handled cache pressure but not storage reclamation.</li>
+        </ul>
+    </div>
+
+    <p>
+        This work addresses all three limitations through a single architectural foundation: the <strong>persistent DAG</strong>. Unlike The original in-memory <code>DagStore</code>, the persistent DAG is backed by <a href="https://github.com/spacejam/sled" target="_blank">sled</a> (an embedded transactional key-value store) and survives process restarts. More importantly, it provides the structural information needed for three interlocking robustness features:
+    </p>
+
+    <ul>
+        <li><strong>Async materialization (§4):</strong> The <code>AsyncExecutor</code> uses the DAG to detect independent branches and spawn concurrent Tokio tasks. When multiple clients request the same unmaterialized CAddr simultaneously, a broadcast channel deduplicates the computation — only one task executes, and all subscribers receive the result. A semaphore bounds concurrency, but critically, it's acquired <em>only at the compute step</em> (not during input resolution) to prevent deadlock in diamond DAGs.</li>
+        
+        <li><strong>Cascade invalidation (§6):</strong> The <code>CascadeInvalidator</code> walks the DAG's reverse edges (dependents) to find all transitive consumers of a changed leaf. A <code>CascadePolicy</code> controls depth limits and whether to invalidate or just report. Dry-run mode shows what would be evicted without actually clearing caches — essential for understanding blast radius before triggering a cascade.</li>
+        
+        <li><strong>Garbage collection (§7):</strong> The GC engine performs mark-and-sweep: the live set is <code>dag.live_addr_set()</code> (all CAddrs reachable from recipes) ∪ pinned addrs (protected via gRPC <code>Pin</code>/<code>Unpin</code> RPCs). Orphaned blobs are swept first, then orphaned recipes, then stale cache entries, then dangling DAG edges. A grace period prevents premature deletion of recently-added data.</li>
+    </ul>
+
+    <h3>Why DAG-Aware Parallelism is Different</h3>
+    
+    <p>
+        Generic task parallelism (e.g., Tokio's <code>spawn</code>, Rayon's <code>par_iter</code>) treats tasks as independent units. DAG-aware parallelism exploits <em>structural dependencies</em>: the system knows that recipe <code>R</code> depends on inputs <code>A</code> and <code>B</code>, and if both are unmaterialized, it can compute them concurrently. This is fundamentally different from:
+    </p>
+
+    <ul>
+        <li><strong>Build systems (Bazel, Ninja):</strong> They parallelize action execution but don't own the storage. Cached results live in external systems (remote cache servers, S3), so the build system can't perform structural invalidation or GC. When a source file changes, Bazel must recompute all transitive dependents — it has no way to selectively evict only the affected cached actions.</li>
+        
+        <li><strong>Dataflow engines (Spark, Dask, Ray):</strong> They parallelize task graphs but treat storage as external. Spark's RDD lineage enables recomputation but doesn't provide cache invalidation (if an input DataFrame changes, Spark doesn't know which cached RDDs are stale). Dask's task graph is ephemeral — it doesn't persist across sessions, so there's no way to GC orphaned intermediate results.</li>
+    </ul>
+
+    <p>
+        Deriva's persistent DAG is the single enabler for all three robustness features. It's not just a performance optimization (parallelism) or a convenience feature (invalidation) — it's the structural foundation that makes computation-addressed storage viable for real-world workloads.
+    </p>
+
+    <h3>Contributions</h3>
+    
+    <p>This paper presents:</p>
+    
+    <ol>
+        <li>A persistent DAG design (§3) that survives restarts and provides <code>O(1)</code> forward/reverse edge lookups via sled's transactional key-value interface.</li>
+        
+        <li>An async materialization engine (§4) with broadcast-channel deduplication and deadlock-free semaphore placement — combining DAG-aware parallelism with in-storage computation.</li>
+        
+        <li>A verification mode (§5) that detects non-deterministic functions at runtime via dual-compute and hash comparison — essential for maintaining CAS invariants in practice.</li>
+        
+        <li>A cascade invalidation mechanism (§6) that walks the DAG to find all transitive dependents of a changed leaf — no external orchestrator needed.</li>
+        
+        <li>A mark-and-sweep GC (§7) that reclaims orphaned blobs, recipes, and cache entries while respecting pin-based protection — the first computation-aware storage GC.</li>
+        
+        <li>A comprehensive observability layer (§8) with 40+ Prometheus metrics across all subsystems, enabling operators to monitor cache hit rates, materialization latency, GC efficiency, and cascade blast radius.</li>
+        
+        <li>Empirical evaluation (§9) showing that parallel materialization achieves near-linear speedup on independent branches, cascade invalidation is 100-1000× faster than manual cache clearing, and GC sweep time scales linearly with blob count (I/O-bound, dominated by <code>list_addrs</code>).</li>
+    </ol>
+
+    <p>
+        The rest of this paper is organized as follows: §2 provides background on DAG scheduling and compares Deriva with related systems. §3–§7 describe the five core robustness features. §8 covers observability. §9 presents evaluation results. §10 discusses tradeoffs. §11 concludes.
+    </p>
+    </section>
+</div>

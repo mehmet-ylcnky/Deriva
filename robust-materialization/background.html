@@ -1,0 +1,355 @@
+<div class="section-content">
+    <section id="background">
+    <h2>2. Background</h2>
+    
+    <p>
+        Parallel execution of dependency graphs is a well-studied problem in build systems, dataflow engines, and task schedulers. However, existing systems treat storage as external — they parallelize <em>computation</em> but don't own the <em>data</em>. This section positions Deriva's approach against three categories of related work and explains why DAG-aware parallelism within the storage layer is fundamentally different.
+    </p>
+
+    <h3>2.1 Critical Path Analysis in Dependency Graphs</h3>
+    
+    <p>
+        A dependency DAG defines a partial order: task <code>T</code> must complete before task <code>U</code> if <code>U</code> depends on <code>T</code>'s output. The <strong>critical path</strong> is the longest chain of dependent tasks — it determines the minimum wall-clock time even with infinite parallelism. Consider this diamond DAG:
+    </p>
+
+    <div style="text-align: center; margin: 1.5em 0;">
+      <svg id="par-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 550" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 80%; border-radius: 8px; cursor: pointer;">
+        <defs>
+          <marker id="arr-seq" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#e74c3c"/></marker>
+          <marker id="arr-par" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#2ecc71"/></marker>
+        </defs>
+
+        <rect width="900" height="550" rx="12" fill="#1a1e2e"/>
+
+        <!-- DAG nodes -->
+        <circle cx="450" cy="60" r="30" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="450" y="66" text-anchor="middle" fill="#e0e0e0" font-size="16" font-weight="bold">A</text>
+        <text x="450" y="82" text-anchor="middle" fill="#90a4ae" font-size="9">leaf, 0s</text>
+
+        <circle cx="300" cy="200" r="30" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="300" y="196" text-anchor="middle" fill="#e0e0e0" font-size="16" font-weight="bold">B</text>
+        <text x="300" y="212" text-anchor="middle" fill="#90a4ae" font-size="9">f(A), 2s</text>
+
+        <circle cx="600" cy="200" r="30" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="600" y="196" text-anchor="middle" fill="#e0e0e0" font-size="16" font-weight="bold">C</text>
+        <text x="600" y="212" text-anchor="middle" fill="#90a4ae" font-size="9">g(A), 3s</text>
+
+        <circle cx="450" cy="340" r="30" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="450" y="336" text-anchor="middle" fill="#e0e0e0" font-size="16" font-weight="bold">D</text>
+        <text x="450" y="352" text-anchor="middle" fill="#90a4ae" font-size="9">h(B,C), 1s</text>
+
+        <!-- Static DAG edges (dim base) -->
+        <line x1="430" y1="86" x2="315" y2="172" stroke="#3a3f5c" stroke-width="1.5"/>
+        <line x1="470" y1="86" x2="585" y2="172" stroke="#3a3f5c" stroke-width="1.5"/>
+        <line x1="320" y1="226" x2="435" y2="314" stroke="#3a3f5c" stroke-width="1.5"/>
+        <line x1="580" y1="226" x2="465" y2="314" stroke="#3a3f5c" stroke-width="1.5"/>
+
+        <!-- SEQUENTIAL: A->B (0-2s), then B->D (2-3s), then A->C (3-6s), then C->D (6-7s) = 7s cycle -->
+        <g id="seq-view" opacity="1">
+          <!-- Dot: A to B -->
+          <circle r="6" fill="#e74c3c">
+            <animateMotion dur="2s" begin="0s" repeatCount="indefinite" path="M430,86 L315,172">
+              <set attributeName="fill" to="#e74c3c"/>
+            </animateMotion>
+            <animate attributeName="opacity" values="1;1;0;0;0;0;0" dur="7s" repeatCount="indefinite"/>
+          </circle>
+          <!-- Dot: B to D -->
+          <circle r="6" fill="#e74c3c">
+            <animateMotion dur="1s" begin="2s" repeatCount="indefinite" path="M320,226 L435,314"/>
+            <animate attributeName="opacity" values="0;0;1;0;0;0;0" dur="7s" repeatCount="indefinite"/>
+          </circle>
+          <!-- Dot: A to C -->
+          <circle r="6" fill="#e74c3c" opacity="0.7">
+            <animateMotion dur="3s" begin="3s" repeatCount="indefinite" path="M470,86 L585,172"/>
+            <animate attributeName="opacity" values="0;0;0;0.7;0.7;0.7;0" dur="7s" repeatCount="indefinite"/>
+          </circle>
+          <!-- Dot: C to D -->
+          <circle r="6" fill="#e74c3c" opacity="0.7">
+            <animateMotion dur="1s" begin="6s" repeatCount="indefinite" path="M580,226 L465,314"/>
+            <animate attributeName="opacity" values="0;0;0;0;0;0;0.7" dur="7s" repeatCount="indefinite"/>
+          </circle>
+
+          <!-- Edge highlights that pulse in sequence -->
+          <line x1="430" y1="86" x2="315" y2="172" stroke="#e74c3c" stroke-width="2.5" opacity="0.7">
+            <animate attributeName="opacity" values="0.7;0.7;0.2;0.2;0.2;0.2;0.2" dur="7s" repeatCount="indefinite"/>
+          </line>
+          <line x1="320" y1="226" x2="435" y2="314" stroke="#e74c3c" stroke-width="2.5" opacity="0.2">
+            <animate attributeName="opacity" values="0.2;0.2;0.7;0.2;0.2;0.2;0.2" dur="7s" repeatCount="indefinite"/>
+          </line>
+          <line x1="470" y1="86" x2="585" y2="172" stroke="#e74c3c" stroke-width="2.5" opacity="0.2">
+            <animate attributeName="opacity" values="0.2;0.2;0.2;0.7;0.7;0.7;0.2" dur="7s" repeatCount="indefinite"/>
+          </line>
+          <line x1="580" y1="226" x2="465" y2="314" stroke="#e74c3c" stroke-width="2.5" opacity="0.2">
+            <animate attributeName="opacity" values="0.2;0.2;0.2;0.2;0.2;0.2;0.7" dur="7s" repeatCount="indefinite"/>
+          </line>
+
+          <!-- Step numbers -->
+          <text x="348" y="122" fill="#e74c3c" font-size="12" font-weight="bold">①</text>
+          <text x="358" y="278" fill="#e74c3c" font-size="12" font-weight="bold">②</text>
+          <text x="552" y="122" fill="#e74c3c" font-size="12" font-weight="bold">③</text>
+          <text x="532" y="278" fill="#e74c3c" font-size="12" font-weight="bold">④</text>
+
+          <text x="450" y="410" text-anchor="middle" fill="#e74c3c" font-size="15" font-weight="bold">Sequential Execution</text>
+          <text x="450" y="430" text-anchor="middle" fill="#b0bec5" font-size="12">A → B → C → D = 6s total</text>
+
+          <rect x="200" y="448" width="500" height="22" rx="4" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <rect x="200" y="450" width="167" height="18" rx="3" fill="#e74c3c" opacity="0.7"/>
+          <text x="283" y="463" text-anchor="middle" fill="#fff" font-size="10">B: 2s</text>
+          <rect x="367" y="450" width="250" height="18" rx="3" fill="#e74c3c" opacity="0.5"/>
+          <text x="492" y="463" text-anchor="middle" fill="#fff" font-size="10">C: 3s</text>
+          <rect x="617" y="450" width="83" height="18" rx="3" fill="#e74c3c" opacity="0.3"/>
+          <text x="658" y="463" text-anchor="middle" fill="#fff" font-size="10">D: 1s</text>
+        </g>
+
+        <!-- PARALLEL: A->(B,C) simultaneously (0-1.5s), then (B,C)->D together (1.5-2.5s) = 3s cycle -->
+        <g id="par-view" opacity="0">
+          <!-- Dot: A to B -->
+          <circle r="6" fill="#2ecc71">
+            <animateMotion dur="1.5s" begin="0s" repeatCount="indefinite" path="M430,86 L315,172"/>
+            <animate attributeName="opacity" values="1;1;0;0" dur="4s" repeatCount="indefinite"/>
+          </circle>
+          <!-- Dot: A to C (same time!) -->
+          <circle r="6" fill="#2ecc71">
+            <animateMotion dur="1.5s" begin="0s" repeatCount="indefinite" path="M470,86 L585,172"/>
+            <animate attributeName="opacity" values="1;1;0;0" dur="4s" repeatCount="indefinite"/>
+          </circle>
+          <!-- Dot: B to D -->
+          <circle r="6" fill="#2ecc71">
+            <animateMotion dur="1s" begin="1.5s" repeatCount="indefinite" path="M320,226 L435,314"/>
+            <animate attributeName="opacity" values="0;0;1;0" dur="4s" repeatCount="indefinite"/>
+          </circle>
+          <!-- Dot: C to D (same time!) -->
+          <circle r="6" fill="#2ecc71">
+            <animateMotion dur="1s" begin="1.5s" repeatCount="indefinite" path="M580,226 L465,314"/>
+            <animate attributeName="opacity" values="0;0;1;0" dur="4s" repeatCount="indefinite"/>
+          </circle>
+
+          <!-- Both top edges lit together, then both bottom edges -->
+          <line x1="430" y1="86" x2="315" y2="172" stroke="#2ecc71" stroke-width="2.5">
+            <animate attributeName="opacity" values="0.8;0.8;0.2;0.2" dur="4s" repeatCount="indefinite"/>
+          </line>
+          <line x1="470" y1="86" x2="585" y2="172" stroke="#2ecc71" stroke-width="2.5">
+            <animate attributeName="opacity" values="0.8;0.8;0.2;0.2" dur="4s" repeatCount="indefinite"/>
+          </line>
+          <line x1="320" y1="226" x2="435" y2="314" stroke="#2ecc71" stroke-width="2.5">
+            <animate attributeName="opacity" values="0.2;0.2;0.8;0.2" dur="4s" repeatCount="indefinite"/>
+          </line>
+          <line x1="580" y1="226" x2="465" y2="314" stroke="#2ecc71" stroke-width="2.5">
+            <animate attributeName="opacity" values="0.2;0.2;0.8;0.2" dur="4s" repeatCount="indefinite"/>
+          </line>
+
+          <!-- Step numbers: both top = 1, both bottom = 2 -->
+          <text x="348" y="122" fill="#2ecc71" font-size="12" font-weight="bold">①</text>
+          <text x="552" y="122" fill="#2ecc71" font-size="12" font-weight="bold">①</text>
+          <text x="358" y="278" fill="#2ecc71" font-size="12" font-weight="bold">②</text>
+          <text x="532" y="278" fill="#2ecc71" font-size="12" font-weight="bold">②</text>
+
+          <text x="450" y="410" text-anchor="middle" fill="#2ecc71" font-size="15" font-weight="bold">Parallel Execution — 1.5× speedup</text>
+          <text x="450" y="430" text-anchor="middle" fill="#b0bec5" font-size="12">A → (B ∥ C) → D = 4s total</text>
+
+          <rect x="200" y="443" width="500" height="32" rx="4" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <rect x="200" y="445" width="250" height="13" rx="3" fill="#2ecc71" opacity="0.7"/>
+          <text x="325" y="455" text-anchor="middle" fill="#fff" font-size="9">B: 2s</text>
+          <rect x="200" y="460" width="375" height="13" rx="3" fill="#2ecc71" opacity="0.5"/>
+          <text x="387" y="470" text-anchor="middle" fill="#fff" font-size="9">C: 3s (critical path)</text>
+          <rect x="575" y="445" width="125" height="28" rx="3" fill="#2ecc71" opacity="0.3"/>
+          <text x="637" y="463" text-anchor="middle" fill="#fff" font-size="10">D: 1s</text>
+        </g>
+
+        <!-- Explanations -->
+        <g id="seq-explain" opacity="1">
+          <text x="450" y="497" text-anchor="middle" fill="#e74c3c" font-size="12">Each computation waits for the previous one to finish — no parallelism.</text>
+        </g>
+        <g id="par-explain" opacity="0">
+          <text x="450" y="497" text-anchor="middle" fill="#2ecc71" font-size="12">B and C are independent branches — computed concurrently, saving 2s.</text>
+        </g>
+
+        <rect x="280" y="514" width="340" height="28" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text id="par-hint" x="450" y="533" text-anchor="middle" fill="#90a4ae" font-size="12">Click to see parallel execution →</text>
+      </svg>
+      <p class="figure-caption">Figure 1: Diamond DAG execution — sequential vs parallel scheduling with critical-path analysis.</p>
+    </div>
+
+    <p>
+        The key insight: <strong>independent branches can be computed concurrently</strong>. When <code>D</code> requests inputs <code>B</code> and <code>C</code>, and both are unmaterialized, the system should spawn two parallel tasks rather than computing them sequentially. This is <em>structural parallelism</em> — the DAG topology dictates the schedule.
+    </p>
+
+    <h3>2.2 Build Systems: Bazel and Ninja</h3>
+    
+    <p>
+        <strong><a href="https://bazel.build/" target="_blank">Bazel</a></strong> constructs an action graph where each action (compile, link, test) depends on input files and produces output files. Bazel's scheduler detects independent actions and executes them in parallel, respecting the action graph's partial order <a href="#ref-bazel-remote-caching">[1]</a>. However:
+    </p>
+
+    <ul>
+        <li><strong>External cache:</strong> Bazel's remote cache is a separate service (typically backed by S3 or a dedicated cache server) <a href="#ref-bazel-remote-caching">[1]</a>. When a source file changes, Bazel must recompute all transitive dependents — it has no way to query the cache for "which cached actions depend on this file?" The cache is a black box that stores <code>(action_hash → output_bytes)</code> mappings.</li>
+        
+        <li><strong>No GC:</strong> Cached actions accumulate indefinitely. Bazel provides <code>bazel clean</code> to wipe the entire cache, but there's no selective GC based on action reachability <a href="#ref-bazel-clean">[2]</a>. If an action's inputs are deleted, the cached output becomes orphaned but remains in storage.</li>
+        
+        <li><strong>Parallelism without ownership:</strong> Bazel parallelizes action execution but doesn't own the storage layer. It can't perform structural invalidation (walk reverse edges to find dependents) or structural GC (mark-and-sweep based on action reachability) because the cache doesn't expose the action graph.</li>
+    </ul>
+
+    <p>
+        <strong><a href="https://ninja-build.org/" target="_blank">Ninja</a></strong> is similar but more minimal: it reads a build graph from a <code>.ninja</code> file and executes commands in parallel <a href="#ref-ninja-manual">[3]</a>. Ninja has no remote cache — it relies on filesystem timestamps for incremental builds. When a source file's mtime changes, Ninja recomputes all transitive dependents by walking the build graph. This is <em>structural invalidation</em>, but it's limited to the local filesystem and doesn't apply to distributed caches.
+    </p>
+
+    <h3>2.3 Dataflow Engines: Spark, Dask, Ray</h3>
+    
+    <p>
+        <strong><a href="https://spark.apache.org/" target="_blank">Apache Spark</a></strong> represents computations as RDD (Resilient Distributed Dataset) lineage graphs. Each RDD transformation (map, filter, join) creates a new RDD with a pointer to its parent. When an action (collect, count) is triggered, Spark's DAG scheduler constructs a task graph and executes stages in parallel <a href="#ref-spark-rdd">[4]</a>. However:
+    </p>
+
+    <ul>
+        <li><strong>Ephemeral lineage:</strong> RDD lineage exists only for the duration of a Spark session. When the session ends, the lineage is lost. If an input DataFrame changes, Spark has no way to identify which cached RDDs are stale — the user must manually call <code>unpersist()</code> or restart the session <a href="#ref-spark-unpersist">[5]</a>.</li>
+        
+        <li><strong>External storage:</strong> Spark's <code>cache()</code> stores RDDs in memory or on disk, but this cache is separate from the input data (which lives in HDFS, S3, etc.). Spark can't perform structural invalidation because it doesn't own the input storage — it can't detect when a Parquet file in S3 has been updated.</li>
+        
+        <li><strong>No content-addressing:</strong> Cached RDDs are identified by RDD ID (an integer), not by their computation. If two Spark jobs compute the same transformation on the same input, they produce separate cached RDDs — no deduplication.</li>
+    </ul>
+
+    <p>
+        <strong><a href="https://www.dask.org/" target="_blank">Dask</a></strong> and <strong><a href="https://www.ray.io/" target="_blank">Ray</a></strong> have similar limitations: they parallelize task graphs but treat storage as external. Dask's task graph is ephemeral (rebuilt on each <code>compute()</code> call) <a href="#ref-dask-delayed">[6]</a>, and Ray's object store is a distributed shared memory without computation awareness — objects are identified by random IDs, not by how they were computed <a href="#ref-ray-objects">[7]</a>.
+    </p>
+
+    <h3>2.4 Cache Invalidation: Redis and Memcached</h3>
+    
+    <p>
+        Traditional caches (<a href="https://redis.io/" target="_blank">Redis</a>, <a href="https://memcached.org/" target="_blank">Memcached</a>) provide <code>SET</code>/<code>GET</code>/<code>DELETE</code> operations but have no notion of dependencies <a href="#ref-redis-invalidation">[8]</a>. When a cached value becomes stale, the application must manually delete it. For transitive invalidation (e.g., "delete all cached values that depend on key X"), the application must maintain a separate dependency graph and walk it to find dependents. This is error-prone and requires external orchestration.
+    </p>
+
+    <p>
+        Some systems (e.g., <a href="https://varnish-cache.org/" target="_blank">Varnish</a>, Squid) support <strong>cache tags</strong>: each cached entry is tagged with one or more labels, and invalidating a tag clears all entries with that tag <a href="#ref-varnish-purging">[9]</a>. However, tags are flat — they don't capture transitive dependencies. If <code>A</code> depends on <code>B</code> and <code>B</code> depends on <code>C</code>, invalidating <code>C</code> requires manually tagging both <code>B</code> and <code>A</code> with <code>C</code>'s tag, which doesn't scale to deep DAGs.
+    </p>
+
+    <h3>2.5 Storage GC: Git and HDFS</h3>
+    
+    <p>
+        <strong><a href="https://git-scm.com/docs/git-gc" target="_blank">Git's <code>gc</code></a></strong> performs mark-and-sweep on the object store: it marks all objects reachable from refs (branches, tags), then sweeps unreachable objects <a href="#ref-git-gc">[10]</a>. However, Git's objects are content-addressed (by SHA-1 hash of raw data), not computation-addressed. Git has no notion of "this blob was derived from these inputs via this function" — it only knows "this blob has this hash."
+    </p>
+
+    <p>
+        <strong><a href="https://hadoop.apache.org/docs/stable/hadoop-project-dist/hadoop-hdfs/HdfsDesign.html" target="_blank">HDFS block scanner</a></strong> periodically verifies block checksums and replicates under-replicated blocks <a href="#ref-hdfs-scanner">[11]</a>. It's a <em>replica-aware</em> GC (ensures replication factor is maintained) but not <em>computation-aware</em> (doesn't know which blocks are derived vs raw, or which blocks are orphaned because their computation recipe was deleted).
+    </p>
+
+    <h3>2.6 The Gap: No System Combines DAG-Aware Parallelism with Storage Ownership</h3>
+    
+    <p>
+        The common thread: <strong>existing systems parallelize computation but don't own the storage</strong>. This creates three fundamental limitations:
+    </p>
+
+    <div class="comparison-table">
+        <table>
+            <tr>
+                <th>System</th>
+                <th>Parallel Execution</th>
+                <th>Persistent Cache</th>
+                <th>Structural Invalidation</th>
+                <th>Computation-Aware GC</th>
+                <th>Content Addressing</th>
+            </tr>
+            <tr>
+                <td><strong>Bazel</strong></td>
+                <td class="cell-green">Action graph</td>
+                <td class="cell-green">Remote cache</td>
+                <td class="cell-red">Full rebuild</td>
+                <td class="cell-red">Manual clean</td>
+                <td class="cell-green">Action hash</td>
+            </tr>
+            <tr>
+                <td><strong>Ninja</strong></td>
+                <td class="cell-green">Build graph</td>
+                <td class="cell-red">Local only</td>
+                <td class="cell-orange">mtime-based</td>
+                <td class="cell-red">None</td>
+                <td class="cell-red">File paths</td>
+            </tr>
+            <tr>
+                <td><strong>Spark</strong></td>
+                <td class="cell-green">DAG scheduler</td>
+                <td class="cell-orange">Session-only</td>
+                <td class="cell-red">Manual unpersist</td>
+                <td class="cell-red">None</td>
+                <td class="cell-red">RDD IDs</td>
+            </tr>
+            <tr>
+                <td><strong>Dask</strong></td>
+                <td class="cell-green">Task graph</td>
+                <td class="cell-red">Ephemeral</td>
+                <td class="cell-red">Rebuild graph</td>
+                <td class="cell-red">None</td>
+                <td class="cell-red">Task keys</td>
+            </tr>
+            <tr>
+                <td><strong>Redis</strong></td>
+                <td class="cell-red">No compute</td>
+                <td class="cell-green">Persistent</td>
+                <td class="cell-red">Manual delete</td>
+                <td class="cell-red">TTL-based</td>
+                <td class="cell-red">User keys</td>
+            </tr>
+            <tr>
+                <td><strong>Git</strong></td>
+                <td class="cell-red">No compute</td>
+                <td class="cell-green">Object store</td>
+                <td class="cell-red">N/A</td>
+                <td class="cell-orange">Ref-based GC</td>
+                <td class="cell-green">SHA-1</td>
+            </tr>
+            <tr>
+                <td><strong>Deriva (this work)</strong></td>
+                <td class="cell-green">DAG-aware async</td>
+                <td class="cell-green">Persistent DAG</td>
+                <td class="cell-green">Cascade (reverse edges)</td>
+                <td class="cell-green">Mark-and-sweep</td>
+                <td class="cell-green">CAddr (BLAKE3)</td>
+            </tr>
+        </table>
+    </div>
+
+    <p>
+        The table above highlights Deriva's position: among the surveyed systems, none combines all five capabilities. Build systems (Bazel, Ninja) have parallel execution and some form of caching but lack structural invalidation and GC. Dataflow engines (Spark, Dask) have parallel execution but ephemeral caches. Caches (Redis) have persistence but no computation or dependency awareness. Content-addressed stores (Git) have content addressing and GC but no computation. Deriva unifies all five by making the storage layer own the dependency DAG.
+    </p>
+
+    <div class="highlight-box">
+        <h4>Why External Storage Breaks Structural Operations</h4>
+        <ol>
+            <li><strong>No structural invalidation:</strong> The cache doesn't know the dependency graph, so it can't walk reverse edges to find dependents. Invalidation requires external orchestration (the application must maintain a separate dependency graph and manually delete stale entries).</li>
+            
+            <li><strong>No structural GC:</strong> The storage system doesn't know which data is derived vs raw, or which derived data is reachable from active computations. GC is either time-based (delete after N days) or manual (user runs a cleanup script).</li>
+            
+            <li><strong>No deduplication across sessions:</strong> Build systems and dataflow engines rebuild the dependency graph on each run. If two runs compute the same transformation on the same input, they produce separate cached results — no sharing.</li>
+        </ol>
+    </div>
+
+    <p>
+        Deriva's approach is fundamentally different: <strong>the storage layer owns the dependency DAG</strong>. The persistent DAG is not an external metadata store — it's the primary index for both recipes and cached materializations. This enables three structural operations that no external orchestrator can provide:
+    </p>
+
+    <ul>
+        <li><strong>Parallel materialization (§4):</strong> When resolving a recipe's inputs, the executor queries the DAG to detect independent branches and spawns concurrent tasks. The DAG is the source of truth for "which inputs are unmaterialized and can be computed in parallel."</li>
+        
+        <li><strong>Cascade invalidation (§6):</strong> When a leaf changes, the invalidator walks the DAG's reverse edges (dependents) to find all transitive consumers. No external dependency tracking needed — the DAG <em>is</em> the dependency graph.</li>
+        
+        <li><strong>Garbage collection (§7):</strong> The GC computes the live set as <code>dag.live_addr_set()</code> (all CAddrs reachable from recipes) ∪ pinned addrs. Orphaned blobs are those in <code>BlobStore</code> but not in the live set. This is <em>computation-aware</em> GC — the system knows which blobs are derived and which are orphaned.</li>
+    </ul>
+
+    <p>
+        The rest of this paper describes how these three features are implemented on top of the persistent DAG. The key insight: <strong>the DAG is not just a performance optimization — it's the structural foundation that makes computation-addressed storage viable for real-world workloads</strong>.
+    </p>
+
+    <h3>References</h3>
+    <ol class="references">
+        <li id="ref-bazel-remote-caching">Bazel Documentation, "Remote Caching," <a href="https://bazel.build/remote/caching" target="_blank">https://bazel.build/remote/caching</a></li>
+        <li id="ref-bazel-clean">Stack Overflow, "Clean up unreachable generated files in Bazel," <a href="https://stackoverflow.com/questions/55079892" target="_blank">https://stackoverflow.com/questions/55079892</a></li>
+        <li id="ref-ninja-manual">E. Martin, "The Ninja build system — Manual," <a href="https://ninja-build.org/manual.html" target="_blank">https://ninja-build.org/manual.html</a></li>
+        <li id="ref-spark-rdd">M. Zaharia et al., "Resilient Distributed Datasets: A Fault-Tolerant Abstraction for In-Memory Cluster Computing," NSDI 2012. See also: <a href="https://spark.apache.org/docs/latest/rdd-programming-guide.html" target="_blank">Spark RDD Programming Guide</a></li>
+        <li id="ref-spark-unpersist">Apache Spark Documentation, "RDD.unpersist()," <a href="https://spark.apache.org/docs/latest/api/python/reference/api/pyspark.RDD.unpersist.html" target="_blank">PySpark API Reference</a></li>
+        <li id="ref-dask-delayed">Dask Documentation, "Dask Delayed," <a href="https://docs.dask.org/en/stable/delayed.html" target="_blank">https://docs.dask.org/en/stable/delayed.html</a></li>
+        <li id="ref-ray-objects">Ray Documentation, "Objects," <a href="https://docs.ray.io/en/latest/ray-core/objects.html" target="_blank">https://docs.ray.io/en/latest/ray-core/objects.html</a></li>
+        <li id="ref-redis-invalidation">Redis Documentation, "Client-side caching," <a href="https://redis.io/docs/manual/client-side-caching/" target="_blank">https://redis.io/docs/manual/client-side-caching/</a></li>
+        <li id="ref-varnish-purging">Varnish Documentation, "Purging and banning," <a href="https://varnish-cache.org/docs/7.6/users-guide/purging.html" target="_blank">https://varnish-cache.org/docs/7.6/users-guide/purging.html</a></li>
+        <li id="ref-git-gc">Git Documentation, "git-gc — Cleanup unnecessary files and optimize the local repository," <a href="https://git-scm.com/docs/git-gc" target="_blank">https://git-scm.com/docs/git-gc</a></li>
+        <li id="ref-hdfs-scanner">Cloudera, "HDFS DataNode Scanners and Disk Checker Explained," <a href="https://www.cloudera.com/blog/technical/hdfs-datanode-scanners-and-disk-checker-explained.html" target="_blank">https://www.cloudera.com/blog/technical/hdfs-datanode-scanners-and-disk-checker-explained.html</a></li>
+    </ol>
+
+    </section>
+</div>

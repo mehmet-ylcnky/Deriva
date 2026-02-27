@@ -155,9 +155,8 @@
                 <!-- Step indicator -->
                 <text id="bvs-hint" x="350" y="336" text-anchor="middle" fill="#90a4ae" font-size="10" font-family="Roboto Condensed, sans-serif">▶ click to highlight each mode</text>
             </svg>
+            <p class="figure-caption">Figure 1: Batch vs streaming execution — sequential stage processing vs concurrent chunk-at-a-time pipeline.</p>
         </div>
-
-        <h3>1.2 Why Streaming Matters for CAS</h3>
 
         <p>
             A Computation-Addressed Store (CAS) derives its power from a simple invariant: every value is identified by the computation that produced it, and identical computations always yield identical results. This means the store can cache aggressively, deduplicate automatically, and invalidate precisely. But this invariant says nothing about <em>how</em> a computation executes — only that the final result must be deterministic. Streaming exploits this gap: it changes the execution strategy (chunk-at-a-time, concurrent stages) without changing the observable result (the same <code>Bytes</code> value, cached under the same <code>CAddr</code>).
@@ -267,6 +266,7 @@
           <text x="520" y="286" fill="#f39c12" font-size="10">C (batch-wrapped)</text>
           <text x="640" y="286" fill="#90a4ae" font-size="10">— mixed pipeline</text>
         </svg>
+        <p class="figure-caption">Figure 2: Execution mode selection — registry resolution preferring streaming over batch with auto-wrap fallback.</p>
 
         <h3>1.4 Contributions</h3>
 

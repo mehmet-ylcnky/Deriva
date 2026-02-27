@@ -210,9 +210,8 @@
                 <!-- Hint -->
                 <text id="fnc-hint" x="360" y="412" text-anchor="middle" fill="#b0bec5" font-size="10" font-family="Roboto Condensed, sans-serif">▶ click a category to see its functions</text>
             </svg>
+            <p class="figure-caption">Figure 5: Streaming function taxonomy — 20 built-in functions across four execution pattern categories.</p>
         </div>
-
-        <h4>Category 1: Transforms (9 functions)</h4>
         <p>
             All nine use <code>spawn_map</code>: read a chunk, apply a pure function, emit the result. Memory is O(chunk_size) — one chunk in, one chunk out, with no accumulation across chunks. The transform closure is <code>Fn(&amp;[u8]) -&gt; Result&lt;Bytes, String&gt;</code>, so errors (e.g., invalid base64 input) become <code>StreamChunk::Error</code> and terminate the stream cleanly.
         </p>

@@ -260,6 +260,7 @@
             <text x="497" y="479" fill="#e0e0e0" font-size="11">Streaming (concurrent)</text>
           </g>
         </svg>
+        <p class="figure-caption">Figure 9: Batch vs streaming throughput — wall-clock time across input sizes with crossover at ~3 MB.</p>
 
         <p>
             The crossover occurs at approximately <strong>3 MB</strong>. Below that, batch wins because streaming's fixed overhead (channel creation, task spawning, Tokio runtime) dominates. Above 3 MB, streaming's pipeline parallelism — all 5 stages running concurrently — overtakes batch's sequential execution. The advantage peaks at 32 MB (2.7× faster) then gradually narrows as both approaches become memory-bandwidth-bound at larger sizes.
@@ -540,6 +541,7 @@
                 <text id="csw-tt-lat" x="10" y="50" fill="#81d4fa" font-size="10"></text>
             </g>
         </svg>
+        <p class="figure-caption">Figure 10: Channel capacity sweep — throughput across 7 capacities and 6 input sizes showing capacity 8 as near-optimal.</p>
 
         <p>
             <strong>Key findings:</strong>

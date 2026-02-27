@@ -1,0 +1,629 @@
+<div class="section-content">
+    <section id="persistent-dag">
+    <h2>3. Persistent DAG Store</h2>
+    
+    <p>
+        The persistent DAG is the foundation of The robustness features presented here. Unlike The original in-memory <code>DagStore</code>, the persistent DAG survives process restarts and provides transactional guarantees for concurrent inserts. This section describes its design, implementation, and the key operations that enable parallel materialization, cascade invalidation, and garbage collection.
+    </p>
+
+    <h3>3.1 Design: Sled-Backed Adjacency Lists</h3>
+    
+    <p>
+        The DAG is represented as two adjacency lists stored in <a href="https://github.com/spacejam/sled" target="_blank">sled</a>, an embedded transactional key-value store written in Rust. Each adjacency list is a separate sled <code>Tree</code> (a sorted key-value namespace within the same database file):
+    </p>
+
+    <ul>
+        <li><strong>Forward tree</strong> (<code>CAddr → Vec&lt;CAddr&gt;</code>): Maps each recipe to its inputs. Given recipe <code>R</code>, a lookup returns the list of content addresses that must be materialized before <code>R</code> can execute. This tree drives the materialization engine (§4).</li>
+        <li><strong>Reverse tree</strong> (<code>CAddr → Vec&lt;CAddr&gt;</code>): Maps each content address to the recipes that depend on it. Given input <code>A</code>, a lookup returns every recipe whose output would be invalidated if <code>A</code> changes. This tree drives cascade invalidation (§6) and garbage collection (§7).</li>
+    </ul>
+
+    <p>
+        Keys are 32-byte <a href="https://github.com/BLAKE3-team/BLAKE3" target="_blank">BLAKE3</a> hashes (<code>CAddr</code>); values are <code>bincode</code>-serialized vectors of <code>CAddr</code>. Maintaining both directions avoids expensive full-table scans: forward lookups are O(1) for materialization, and reverse lookups are O(1) for invalidation — neither requires iterating the entire DAG.
+    </p>
+
+    <p>
+        A critical invariant ties the two trees together: every forward entry <code>R → [A, B]</code> must have corresponding reverse entries <code>A → [..., R]</code> and <code>B → [..., R]</code>. If this invariant is violated (e.g., by a partial write during a crash), cascade invalidation would silently miss dependents. The transactional insert (§3.2) enforces this invariant atomically.
+    </p>
+
+    <div style="text-align: center; margin: 1.5em 0;">
+      <svg id="dag-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 570" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 80%; border-radius: 8px; cursor: pointer;">
+        <defs>
+          <marker id="arr-fwd" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#64b5f6"/></marker>
+          <marker id="arr-rev" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#ffb74d"/></marker>
+        </defs>
+
+        <rect width="900" height="570" rx="12" fill="#1a1e2e"/>
+
+        <!-- PersistentDag struct box -->
+        <rect x="220" y="16" width="460" height="108" rx="8" fill="#232840" stroke="#64b5f6" stroke-width="2"/>
+        <text x="450" y="46" text-anchor="middle" fill="#e0e0e0" font-size="18" font-weight="bold">PersistentDag</text>
+        <line x1="230" y1="58" x2="670" y2="58" stroke="#3a3f5c"/>
+        <text x="240" y="80" fill="#81d4fa" font-size="14" font-family="Consolas, monospace">forward: Tree</text>
+        <text x="430" y="80" fill="#555" font-size="12" font-family="Consolas, monospace">// CAddr → Vec&lt;CAddr&gt; (inputs)</text>
+        <text x="240" y="98" fill="#ffb74d" font-size="14" font-family="Consolas, monospace">reverse: Tree</text>
+        <text x="430" y="98" fill="#555" font-size="12" font-family="Consolas, monospace">// CAddr → Vec&lt;CAddr&gt; (dependents)</text>
+        <text x="240" y="116" fill="#a5d6a7" font-size="14" font-family="Consolas, monospace">db: Db</text>
+        <text x="430" y="116" fill="#555" font-size="12" font-family="Consolas, monospace">// sled database handle</text>
+
+        <!-- sled database backing store -->
+        <rect x="140" y="220" width="620" height="260" rx="10" fill="none" stroke="#a5d6a7" stroke-width="1.5" stroke-dasharray="6,4" opacity="0.5"/>
+        <text x="160" y="242" fill="#a5d6a7" font-size="11" opacity="0.7" font-family="Consolas, monospace">sled Db (persistent storage)</text>
+
+        <!-- Shared nodes -->
+        <g id="node-R"><circle cx="300" cy="270" r="28" fill="#232840" stroke="#64b5f6" stroke-width="2"/><text x="300" y="276" text-anchor="middle" fill="#e0e0e0" font-size="16" font-weight="bold">R</text></g>
+        <g id="node-S"><circle cx="600" cy="270" r="28" fill="#232840" stroke="#64b5f6" stroke-width="2"/><text x="600" y="276" text-anchor="middle" fill="#e0e0e0" font-size="16" font-weight="bold">S</text></g>
+        <g id="node-A"><circle cx="350" cy="410" r="28" fill="#232840" stroke="#64b5f6" stroke-width="2"/><text x="350" y="416" text-anchor="middle" fill="#e0e0e0" font-size="16" font-weight="bold">A</text></g>
+        <g id="node-B"><circle cx="550" cy="410" r="28" fill="#232840" stroke="#64b5f6" stroke-width="2"/><text x="550" y="416" text-anchor="middle" fill="#e0e0e0" font-size="16" font-weight="bold">B</text></g>
+
+        <!-- Forward edges (recipe → inputs) -->
+        <g id="fwd-edges" opacity="1">
+          <line x1="288" y1="296" x2="355" y2="380" stroke="#64b5f6" stroke-width="2" marker-end="url(#arr-fwd)"><animate attributeName="stroke-dashoffset" from="80" to="0" dur="1s" fill="freeze"/></line>
+          <line x1="320" y1="293" x2="535" y2="388" stroke="#64b5f6" stroke-width="2" marker-end="url(#arr-fwd)"><animate attributeName="stroke-dashoffset" from="80" to="0" dur="1s" fill="freeze"/></line>
+          <line x1="585" y1="296" x2="370" y2="388" stroke="#64b5f6" stroke-width="2" marker-end="url(#arr-fwd)"><animate attributeName="stroke-dashoffset" from="80" to="0" dur="1s" fill="freeze"/></line>
+          <text x="450" y="185" text-anchor="middle" fill="#81d4fa" font-size="16" font-weight="bold">Forward Edges</text>
+          <text x="450" y="205" text-anchor="middle" fill="#b0bec5" font-size="13">recipe → inputs</text>
+          <text x="250" y="340" fill="#90a4ae" font-size="12" font-family="Consolas, monospace">R → [A, B]</text>
+          <text x="580" y="340" fill="#90a4ae" font-size="12" font-family="Consolas, monospace">S → [A]</text>
+        </g>
+
+        <!-- Reverse edges (input → dependents) -->
+        <g id="rev-edges" opacity="0">
+          <line x1="345" y1="382" x2="310" y2="300" stroke="#ffb74d" stroke-width="2" marker-end="url(#arr-rev)"/>
+          <line x1="365" y1="384" x2="585" y2="296" stroke="#ffb74d" stroke-width="2" marker-end="url(#arr-rev)"/>
+          <line x1="540" y1="384" x2="318" y2="294" stroke="#ffb74d" stroke-width="2" marker-end="url(#arr-rev)"/>
+          <text x="450" y="185" text-anchor="middle" fill="#ffb74d" font-size="16" font-weight="bold">Reverse Edges</text>
+          <text x="450" y="205" text-anchor="middle" fill="#b0bec5" font-size="13">input → dependents</text>
+          <text x="300" y="470" fill="#90a4ae" font-size="12" font-family="Consolas, monospace">A → [R, S]</text>
+          <text x="510" y="470" fill="#90a4ae" font-size="12" font-family="Consolas, monospace">B → [R]</text>
+        </g>
+
+        <!-- Explanations per state -->
+        <g id="fwd-explain" opacity="1">
+          <text x="450" y="505" text-anchor="middle" fill="#81d4fa" font-size="12">Forward edges answer: "What inputs does this recipe need?"</text>
+          <text x="450" y="522" text-anchor="middle" fill="#b0bec5" font-size="11">Used by the async executor to resolve and parallelize input materialization.</text>
+        </g>
+        <g id="rev-explain" opacity="0">
+          <text x="450" y="505" text-anchor="middle" fill="#ffb74d" font-size="12">Reverse edges answer: "What depends on this input?"</text>
+          <text x="450" y="522" text-anchor="middle" fill="#b0bec5" font-size="11">Used by cascade invalidation and garbage collection to find affected dependents.</text>
+        </g>
+
+        <!-- Toggle hint -->
+        <rect x="310" y="538" width="280" height="24" rx="4" fill="#232840"/>
+        <text id="dag-hint" x="450" y="555" text-anchor="middle" fill="#90a4ae" font-size="11">Click to toggle reverse edges →</text>
+      </svg>
+      <p class="figure-caption">Figure 2: Forward and reverse edge indices in the persistent dependency DAG.</p>
+    </div>
+
+    <p>
+        <strong>Why sled?</strong> Three options were evaluated:
+    </p>
+
+    <ul>
+        <li><strong>RocksDB:</strong> Industry-standard embedded KV store, but requires C++ bindings and has a complex API. Overkill for the required access patterns (mostly sequential scans for GC, point lookups for materialization).</li>
+        <li><strong>SQLite:</strong> Mature and widely deployed, but SQL overhead is unnecessary — only key-value operations are needed. Also, SQLite's locking model (database-level write lock) would serialize concurrent recipe inserts.</li>
+        <li><strong>sled:</strong> Pure Rust, embedded, transactional, and optimized for concurrent writes. Supports ACID transactions across multiple trees (critical for atomic forward+reverse edge updates). Chosen for simplicity and Rust ecosystem integration.</li>
+    </ul>
+
+    <h3>3.2 Transactional Insert</h3>
+    
+    <p>
+        When a recipe is registered via <code>PutRecipe</code>, the DAG must atomically update both forward and reverse edges. A partial write — where the forward edge is persisted but the corresponding reverse entries are not — would silently break cascade invalidation: a changed input would fail to propagate to all its dependents, producing stale results without any error signal.
+    </p>
+
+    <p>
+        The insert operation proceeds through three logical stages before touching the database:
+    </p>
+
+    <ol>
+        <li><strong>Idempotency check:</strong> If the forward tree already contains the recipe's address, the insert returns immediately. Because content addresses are deterministic (the same recipe definition always produces the same <code>CAddr</code>), duplicate registrations are harmless and expected — especially when multiple clients submit overlapping workloads.</li>
+        <li><strong>Self-cycle guard:</strong> If the recipe lists its own address as an input, the insert is rejected with a <code>CycleDetected</code> error. Transitive cycles (A → B → C → A) are not checked here; they are caught at materialization time (§4) when the async executor detects that a request is already in flight.</li>
+        <li><strong>Atomic dual-tree write:</strong> A sled transaction opens both the forward and reverse trees, writes the forward edge, then iterates over each input to append the recipe's address to that input's reverse entry. If any step fails — including a process crash mid-transaction — sled's write-ahead log ensures the entire transaction is rolled back. No partial state is ever visible to concurrent readers.</li>
+    </ol>
+
+    <p>
+        The implementation:
+    </p>
+
+    <div class="code-block">
+        <pre>
+pub fn insert(&self, recipe: &Recipe) -> Result&lt;CAddr&gt; {
+    let addr = recipe.addr();
+    let addr_bytes = addr.as_bytes();
+
+    // Idempotent: already exists
+    if self.forward.contains_key(addr_bytes)? {
+        return Ok(addr);
+    }
+
+    // Self-cycle check
+    if recipe.inputs.contains(&addr) {
+        return Err(DerivaError::CycleDetected(
+            format!("recipe {} lists itself as input", addr)
+        ));
+    }
+
+    // Serialize inputs
+    let inputs_bytes = bincode::serialize(&recipe.inputs)?;
+
+    // Atomic transaction: write forward + update all reverse entries
+    (&self.forward, &self.reverse).transaction(|(fwd_tx, rev_tx)| {
+        // Write forward edge: addr → inputs
+        fwd_tx.insert(addr_bytes, inputs_bytes.as_slice())?;
+        
+        // Update reverse edges: for each input, add addr to its dependents
+        for input in &recipe.inputs {
+            let key = input.as_bytes();
+            let mut deps: Vec&lt;CAddr&gt; = match rev_tx.get(key)? {
+                Some(bytes) => bincode::deserialize(&bytes)?,
+                None => Vec::new(),
+            };
+            if !deps.contains(&addr) {
+                deps.push(addr);
+                let bytes = bincode::serialize(&deps)?;
+                rev_tx.insert(key, bytes.as_slice())?;
+            }
+        }
+        Ok(())
+    })?;
+
+    self.db.flush()?;  // Ensure durability
+    Ok(addr)
+}</pre>
+    </div>
+
+    <div style="text-align: center; margin: 1.5em 0;">
+      <svg id="txn-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 480" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 80%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="480" rx="12" fill="#1a1e2e"/>
+
+        <!-- Title -->
+        <text x="450" y="32" text-anchor="middle" fill="#e0e0e0" font-size="16" font-weight="bold">Transactional Insert: PutRecipe(S, inputs=[A])</text>
+
+        <!-- DAG nodes (always visible) -->
+        <circle cx="250" cy="120" r="28" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="250" y="126" text-anchor="middle" fill="#e0e0e0" font-size="16" font-weight="bold">R</text>
+
+        <circle cx="650" cy="120" r="28" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="650" y="126" text-anchor="middle" fill="#e0e0e0" font-size="16" font-weight="bold">S</text>
+
+        <circle cx="350" cy="280" r="28" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="350" y="286" text-anchor="middle" fill="#e0e0e0" font-size="16" font-weight="bold">A</text>
+
+        <circle cx="550" cy="280" r="28" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="550" y="286" text-anchor="middle" fill="#e0e0e0" font-size="16" font-weight="bold">B</text>
+
+        <!-- Pre-existing edges (always dim) -->
+        <line x1="238" y1="146" x2="355" y2="252" stroke="#64b5f6" stroke-width="1.5" opacity="0.3"/>
+        <line x1="264" y1="146" x2="538" y2="254" stroke="#64b5f6" stroke-width="1.5" opacity="0.3"/>
+        <text x="200" y="190" fill="#90a4ae" font-size="10" font-family="Consolas, monospace">R→[A,B]</text>
+        <!-- Pre-existing reverse for R -->
+        <text x="310" y="340" fill="#90a4ae" font-size="10" font-family="Consolas, monospace" opacity="0.4">A→[R]</text>
+        <text x="510" y="340" fill="#90a4ae" font-size="10" font-family="Consolas, monospace" opacity="0.4">B→[R]</text>
+
+        <!-- Step 0: Before (initial state) -->
+        <g id="txn-s0" opacity="1">
+          <rect x="580" y="90" width="140" height="60" rx="6" fill="none" stroke="#3a3f5c" stroke-width="1" stroke-dasharray="4,3"/>
+          <text x="650" y="170" text-anchor="middle" fill="#90a4ae" font-size="10">S: no edges yet</text>
+        </g>
+
+        <!-- Step 1: Forward edge written -->
+        <g id="txn-s1" opacity="0">
+          <line x1="638" y1="146" x2="365" y2="254" stroke="#64b5f6" stroke-width="2.5" opacity="0.9"/>
+          <text x="650" y="170" text-anchor="middle" fill="#81d4fa" font-size="11" font-family="Consolas, monospace">fwd: S→[A]</text>
+          <rect x="620" y="80" width="180" height="30" rx="4" fill="#1b3a5c" opacity="0.6"/>
+          <text x="710" y="100" text-anchor="middle" fill="#64b5f6" font-size="11">forward.insert(S, [A])</text>
+        </g>
+
+        <!-- Step 2: Reverse edge updated -->
+        <g id="txn-s2" opacity="0">
+          <line x1="638" y1="146" x2="365" y2="254" stroke="#64b5f6" stroke-width="2.5" opacity="0.9"/>
+          <text x="650" y="170" text-anchor="middle" fill="#81d4fa" font-size="11" font-family="Consolas, monospace">fwd: S→[A]</text>
+          <line x1="362" y1="254" x2="640" y2="146" stroke="#ffb74d" stroke-width="2.5" opacity="0.9"/>
+          <text x="310" y="340" fill="#ffb74d" font-size="11" font-family="Consolas, monospace">A→[R, S]</text>
+          <rect x="260" y="350" width="200" height="30" rx="4" fill="#4a3520" opacity="0.6"/>
+          <text x="360" y="370" text-anchor="middle" fill="#ffb74d" font-size="11">reverse[A].push(S)</text>
+        </g>
+
+        <!-- Step 3: Crash scenario -->
+        <g id="txn-s3" opacity="0">
+          <!-- Show only forward edge, reverse missing = inconsistent -->
+          <line x1="638" y1="146" x2="365" y2="254" stroke="#e74c3c" stroke-width="2.5" stroke-dasharray="6,4" opacity="0.8"/>
+          <text x="650" y="170" text-anchor="middle" fill="#e74c3c" font-size="11" font-family="Consolas, monospace">fwd: S→[A] ✓</text>
+          <text x="310" y="340" fill="#e74c3c" font-size="11" font-family="Consolas, monospace">A→[R] ✗ missing S</text>
+          <!-- Crash icon -->
+          <text x="500" y="210" text-anchor="middle" fill="#e74c3c" font-size="28">⚡</text>
+          <rect x="400" y="215" width="200" height="30" rx="4" fill="#3c1a1a" opacity="0.7"/>
+          <text x="500" y="235" text-anchor="middle" fill="#e74c3c" font-size="11">Crash between writes!</text>
+          <rect x="370" y="250" width="260" height="24" rx="4" fill="#1a1e2e" stroke="#e74c3c" stroke-width="1" opacity="0.8"/>
+          <text x="500" y="266" text-anchor="middle" fill="#e74c3c" font-size="10">sled transaction rolls back → DAG stays consistent</text>
+        </g>
+
+        <!-- Step indicator -->
+        <g id="txn-steps">
+          <circle id="txn-d0" cx="380" cy="430" r="8" fill="#81d4fa"/>
+          <circle id="txn-d1" cx="420" cy="430" r="8" fill="#3a3f5c"/>
+          <circle id="txn-d2" cx="460" cy="430" r="8" fill="#3a3f5c"/>
+          <circle id="txn-d3" cx="500" cy="430" r="8" fill="#3a3f5c"/>
+        </g>
+
+        <!-- Explanation per step -->
+        <g id="txn-e0" opacity="1">
+          <text x="450" y="405" text-anchor="middle" fill="#b0bec5" font-size="13">Before insert — S has no edges in the DAG.</text>
+        </g>
+        <g id="txn-e1" opacity="0">
+          <text x="450" y="405" text-anchor="middle" fill="#81d4fa" font-size="13">Step 1: Write forward edge S → [A] inside the transaction.</text>
+        </g>
+        <g id="txn-e2" opacity="0">
+          <text x="450" y="405" text-anchor="middle" fill="#ffb74d" font-size="13">Step 2: Update reverse edge A → [R, S]. Transaction commits atomically.</text>
+        </g>
+        <g id="txn-e3" opacity="0">
+          <text x="450" y="405" text-anchor="middle" fill="#e74c3c" font-size="13">What if a crash occurs between steps? The transaction rolls back entirely.</text>
+        </g>
+
+        <!-- Hint -->
+        <rect x="310" y="448" width="280" height="24" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text id="txn-hint" x="450" y="465" text-anchor="middle" fill="#90a4ae" font-size="11">Click to step through the transaction →</text>
+      </svg>
+      <p class="figure-caption">Figure 3: Atomic multi-key transaction ensuring forward/reverse edge consistency.</p>
+    </div>
+
+    <p>
+        <strong>Key properties:</strong>
+    </p>
+
+    <ul>
+        <li><strong>Atomicity:</strong> The <code>transaction</code> closure either commits all writes or rolls back all writes. If the process crashes during the transaction, sled's write-ahead log ensures the DAG remains consistent.</li>
+        <li><strong>Idempotency:</strong> Inserting the same recipe twice is a no-op (early return if <code>forward.contains_key</code>). This is critical for distributed scenarios where multiple nodes might register the same recipe concurrently.</li>
+        <li><strong>Cycle detection:</strong> Self-cycles (recipe lists itself as input) are rejected immediately. Transitive cycles (A → B → C → A) are not detected at insert time — they're prevented by the materialization engine (§4), which tracks in-flight requests and rejects circular dependencies.</li>
+    </ul>
+
+    <h3>3.3 Querying the DAG</h3>
+    
+    <p>
+        The persistent DAG exposes four query operations. Each is consumed by a different subsystem, and the separation reflects a deliberate design choice: the DAG itself has no knowledge of materialization, invalidation, or garbage collection. It is a pure data structure; the subsystems that read it impose their own semantics.
+    </p>
+
+    <p>
+        The first two operations are <strong>point lookups</strong> — single-key reads against the forward or reverse tree:
+    </p>
+
+    <ul>
+        <li><code>inputs(addr)</code> reads the forward tree. Given a recipe's content address, it returns the list of inputs that must be materialized before the recipe can execute. This is the primary query used by the async materialization engine (§4): when a <code>GetBlob</code> request arrives, the engine calls <code>inputs()</code> to discover what needs to be resolved first, then fans out concurrent sub-requests for each input.</li>
+        <li><code>dependents(addr)</code> reads the reverse tree. Given any content address, it returns every recipe that lists that address as an input. This is the primary query used by cascade invalidation (§6): when a blob is deleted or overwritten, <code>dependents()</code> identifies all downstream recipes whose cached outputs are now stale.</li>
+    </ul>
+
+    <p>
+        The remaining two operations are <strong>full scans</strong> — they iterate the entire forward tree and are used exclusively by garbage collection (§7):
+    </p>
+
+    <ul>
+        <li><code>all_addrs()</code> enumerates every recipe address in the DAG. The GC sweep phase uses this to compare the set of known recipes against the set of blobs in the content store, identifying orphaned blobs that are no longer reachable.</li>
+        <li><code>live_addr_set()</code> computes the transitive closure of all live addresses: every recipe output <em>and</em> every input referenced by any recipe. Any content address not in this set is unreachable and safe to delete. This is the mark phase of the mark-and-sweep GC described in §7.</li>
+    </ul>
+
+    <div class="code-block">
+        <pre>
+// 1. Get inputs of a recipe (for materialization)
+pub fn inputs(&self, addr: &CAddr) -> Result&lt;Option&lt;Vec&lt;CAddr&gt;&gt;&gt; {
+    match self.forward.get(addr.as_bytes())? {
+        Some(bytes) => Ok(Some(bincode::deserialize(&bytes)?)),
+        None => Ok(None),
+    }
+}
+
+// 2. Get dependents of an addr (for cascade invalidation)
+pub fn dependents(&self, addr: &CAddr) -> Result&lt;Vec&lt;CAddr&gt;&gt; {
+    match self.reverse.get(addr.as_bytes())? {
+        Some(bytes) => Ok(bincode::deserialize(&bytes)?),
+        None => Ok(Vec::new()),
+    }
+}
+
+// 3. Get all addrs in the DAG (for GC enumeration)
+pub fn all_addrs(&self) -> Vec&lt;CAddr&gt; {
+    self.forward.iter()
+        .filter_map(|r| r.ok())
+        .filter_map(|(k, _)| &lt;[u8; 32]&gt;::try_from(k.as_ref()).ok()
+                              .map(CAddr::from_raw))
+        .collect()
+}
+
+// 4. Compute live set (for GC mark phase)
+pub fn live_addr_set(&self) -> HashSet&lt;CAddr&gt; {
+    let mut live = HashSet::new();
+    for (key, val) in self.forward.iter().flatten() {
+        // Recipe output is live
+        if let Ok(arr) = &lt;[u8; 32]&gt;::try_from(key.as_ref()) {
+            live.insert(CAddr::from_raw(arr));
+        }
+        // Recipe inputs are live
+        if let Ok(inputs) = bincode::deserialize::&lt;Vec&lt;CAddr&gt;&gt;(&val) {
+            for input in inputs {
+                live.insert(input);
+            }
+        }
+    }
+    live
+}</pre>
+    </div>
+
+    <p>
+        An important asymmetry: <code>inputs()</code> returns <code>Option</code> (the address might not be a recipe at all — it could be a raw blob), while <code>dependents()</code> returns an empty <code>Vec</code> for unknown addresses. This distinction matters because a missing forward entry is a normal condition (leaf blobs have no inputs), whereas a missing reverse entry simply means nothing depends on that address yet.
+    </p>
+
+    <div style="text-align: center; margin: 1.5em 0;">
+      <svg id="query-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 540" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 80%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="540" rx="12" fill="#1a1e2e"/>
+
+        <!-- DAG nodes with role labels -->
+        <circle cx="250" cy="140" r="28" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="250" y="146" text-anchor="middle" fill="#e0e0e0" font-size="16" font-weight="bold">R</text>
+        <text x="250" y="115" text-anchor="middle" fill="#90a4ae" font-size="9">recipe</text>
+
+        <circle cx="650" cy="140" r="28" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="650" y="146" text-anchor="middle" fill="#e0e0e0" font-size="16" font-weight="bold">S</text>
+        <text x="650" y="115" text-anchor="middle" fill="#90a4ae" font-size="9">recipe</text>
+
+        <circle cx="350" cy="300" r="28" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="350" y="306" text-anchor="middle" fill="#e0e0e0" font-size="16" font-weight="bold">A</text>
+        <text x="350" y="340" text-anchor="middle" fill="#90a4ae" font-size="9">input blob</text>
+
+        <circle cx="550" cy="300" r="28" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="550" y="306" text-anchor="middle" fill="#e0e0e0" font-size="16" font-weight="bold">B</text>
+        <text x="550" y="340" text-anchor="middle" fill="#90a4ae" font-size="9">input blob</text>
+
+        <!-- All edges dim base -->
+        <line x1="238" y1="166" x2="355" y2="272" stroke="#3a3f5c" stroke-width="1.5"/>
+        <line x1="264" y1="166" x2="538" y2="274" stroke="#3a3f5c" stroke-width="1.5"/>
+        <line x1="638" y1="166" x2="365" y2="274" stroke="#3a3f5c" stroke-width="1.5"/>
+
+        <!-- Mode 0: inputs(R) — forward point lookup -->
+        <g id="qry-s0" opacity="1">
+          <!-- Query target ring -->
+          <circle cx="250" cy="140" r="34" fill="none" stroke="#64b5f6" stroke-width="3">
+            <animate attributeName="stroke-width" values="3;4.5;3" dur="2s" repeatCount="indefinite"/>
+          </circle>
+          <!-- Lit edges -->
+          <line x1="238" y1="166" x2="355" y2="272" stroke="#64b5f6" stroke-width="2.5"/>
+          <line x1="264" y1="166" x2="538" y2="274" stroke="#64b5f6" stroke-width="2.5"/>
+          <!-- Traveling dots -->
+          <circle r="5" fill="#64b5f6">
+            <animateMotion dur="1.2s" repeatCount="indefinite" path="M238,166 L355,272"/>
+          </circle>
+          <circle r="5" fill="#64b5f6">
+            <animateMotion dur="1.2s" begin="0.3s" repeatCount="indefinite" path="M264,166 L538,274"/>
+          </circle>
+          <!-- Result rings -->
+          <circle cx="350" cy="300" r="34" fill="none" stroke="#64b5f6" stroke-width="2" stroke-dasharray="4,3" opacity="0.7"/>
+          <circle cx="550" cy="300" r="34" fill="none" stroke="#64b5f6" stroke-width="2" stroke-dasharray="4,3" opacity="0.7"/>
+          <!-- Title + code -->
+          <text x="450" y="38" text-anchor="middle" fill="#81d4fa" font-size="16" font-weight="bold">inputs(R) → [A, B]</text>
+          <text x="450" y="58" text-anchor="middle" fill="#b0bec5" font-size="12">Forward point lookup: "What inputs does recipe R need?"</text>
+          <!-- Code snippet -->
+          <rect x="250" y="370" width="400" height="24" rx="4" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="450" y="387" text-anchor="middle" fill="#81d4fa" font-size="11" font-family="Consolas, monospace">self.forward.get(addr.as_bytes())</text>
+          <!-- Complexity + consumer -->
+          <rect x="310" y="400" width="60" height="18" rx="3" fill="#1b3a5c"/>
+          <text x="340" y="413" text-anchor="middle" fill="#64b5f6" font-size="10" font-weight="bold">O(1)</text>
+          <text x="450" y="413" fill="#90a4ae" font-size="10">point lookup · &lt;10μs warm · &lt;100μs cold</text>
+          <!-- Explanation -->
+          <text x="450" y="440" text-anchor="middle" fill="#b0bec5" font-size="12">The materialization engine calls this to discover which blobs must be</text>
+          <text x="450" y="456" text-anchor="middle" fill="#b0bec5" font-size="12">resolved before a recipe can execute. Each input triggers a concurrent sub-request.</text>
+        </g>
+
+        <!-- Mode 1: dependents(A) — reverse point lookup -->
+        <g id="qry-s1" opacity="0">
+          <circle cx="350" cy="300" r="34" fill="none" stroke="#ffb74d" stroke-width="3">
+            <animate attributeName="stroke-width" values="3;4.5;3" dur="2s" repeatCount="indefinite"/>
+          </circle>
+          <line x1="355" y1="272" x2="238" y2="166" stroke="#ffb74d" stroke-width="2.5"/>
+          <line x1="365" y1="274" x2="638" y2="166" stroke="#ffb74d" stroke-width="2.5"/>
+          <circle r="5" fill="#ffb74d">
+            <animateMotion dur="1.2s" repeatCount="indefinite" path="M355,272 L238,166"/>
+          </circle>
+          <circle r="5" fill="#ffb74d">
+            <animateMotion dur="1.2s" begin="0.3s" repeatCount="indefinite" path="M365,274 L638,166"/>
+          </circle>
+          <circle cx="250" cy="140" r="34" fill="none" stroke="#ffb74d" stroke-width="2" stroke-dasharray="4,3" opacity="0.7"/>
+          <circle cx="650" cy="140" r="34" fill="none" stroke="#ffb74d" stroke-width="2" stroke-dasharray="4,3" opacity="0.7"/>
+          <text x="450" y="38" text-anchor="middle" fill="#ffb74d" font-size="16" font-weight="bold">dependents(A) → [R, S]</text>
+          <text x="450" y="58" text-anchor="middle" fill="#b0bec5" font-size="12">Reverse point lookup: "What recipes depend on input A?"</text>
+          <rect x="250" y="370" width="400" height="24" rx="4" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="450" y="387" text-anchor="middle" fill="#ffb74d" font-size="11" font-family="Consolas, monospace">self.reverse.get(addr.as_bytes())</text>
+          <rect x="310" y="400" width="60" height="18" rx="3" fill="#4a3520"/>
+          <text x="340" y="413" text-anchor="middle" fill="#ffb74d" font-size="10" font-weight="bold">O(1)</text>
+          <text x="450" y="413" fill="#90a4ae" font-size="10">point lookup · same latency as forward</text>
+          <text x="450" y="440" text-anchor="middle" fill="#b0bec5" font-size="12">Cascade invalidation calls this when a blob changes. Every returned recipe</text>
+          <text x="450" y="456" text-anchor="middle" fill="#b0bec5" font-size="12">has its cached output marked stale, then its own dependents are checked recursively.</text>
+        </g>
+
+        <!-- Mode 2: live_addr_set() — full scan -->
+        <g id="qry-s2" opacity="0">
+          <circle cx="250" cy="140" r="34" fill="none" stroke="#a5d6a7" stroke-width="2.5">
+            <animate attributeName="opacity" values="0.5;1;0.5" dur="2s" repeatCount="indefinite"/>
+          </circle>
+          <circle cx="650" cy="140" r="34" fill="none" stroke="#a5d6a7" stroke-width="2.5">
+            <animate attributeName="opacity" values="0.5;1;0.5" dur="2s" begin="0.5s" repeatCount="indefinite"/>
+          </circle>
+          <circle cx="350" cy="300" r="34" fill="none" stroke="#a5d6a7" stroke-width="2.5">
+            <animate attributeName="opacity" values="0.5;1;0.5" dur="2s" begin="1s" repeatCount="indefinite"/>
+          </circle>
+          <circle cx="550" cy="300" r="34" fill="none" stroke="#a5d6a7" stroke-width="2.5">
+            <animate attributeName="opacity" values="0.5;1;0.5" dur="2s" begin="1.5s" repeatCount="indefinite"/>
+          </circle>
+          <line x1="238" y1="166" x2="355" y2="272" stroke="#a5d6a7" stroke-width="2"/>
+          <line x1="264" y1="166" x2="538" y2="274" stroke="#a5d6a7" stroke-width="2"/>
+          <line x1="638" y1="166" x2="365" y2="274" stroke="#a5d6a7" stroke-width="2"/>
+          <text x="450" y="38" text-anchor="middle" fill="#a5d6a7" font-size="16" font-weight="bold">live_addr_set() → {R, S, A, B}</text>
+          <text x="450" y="58" text-anchor="middle" fill="#b0bec5" font-size="12">Full forward-tree scan: "Which addresses are still reachable?"</text>
+          <rect x="220" y="370" width="460" height="24" rx="4" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="450" y="387" text-anchor="middle" fill="#a5d6a7" font-size="11" font-family="Consolas, monospace">self.forward.iter() → collect keys + deserialize values</text>
+          <rect x="290" y="400" width="100" height="18" rx="3" fill="#1a3a1a"/>
+          <text x="340" y="413" text-anchor="middle" fill="#a5d6a7" font-size="10" font-weight="bold">O(N + E)</text>
+          <text x="460" y="413" fill="#90a4ae" font-size="10">full scan · ~100K addrs/sec · GC only</text>
+          <text x="450" y="440" text-anchor="middle" fill="#b0bec5" font-size="12">GC mark phase scans every forward entry: keys are recipe outputs, deserialized</text>
+          <text x="450" y="456" text-anchor="middle" fill="#b0bec5" font-size="12">values are recipe inputs. Any blob not in this set is orphaned and safe to delete.</text>
+        </g>
+
+        <!-- Step dots -->
+        <circle id="qry-d0" cx="410" cy="485" r="8" fill="#81d4fa"/>
+        <circle id="qry-d1" cx="450" cy="485" r="8" fill="#3a3f5c"/>
+        <circle id="qry-d2" cx="490" cy="485" r="8" fill="#3a3f5c"/>
+
+        <!-- Hint -->
+        <rect x="310" y="503" width="280" height="24" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text id="qry-hint" x="450" y="520" text-anchor="middle" fill="#90a4ae" font-size="11">Click to cycle through query operations →</text>
+      </svg>
+      <p class="figure-caption">Figure 4: DAG query operations — inputs(), dependents(), and ancestry traversal.</p>
+    </div>
+
+    <p>
+        <strong>Performance characteristics:</strong>
+    </p>
+
+    <ul>
+        <li><code>inputs(addr)</code> and <code>dependents(addr)</code>: <strong>O(1)</strong> point lookups in sled (B-tree index). Typical latency: <strong>&lt;10μs</strong> for warm cache, <strong>&lt;100μs</strong> for cold disk read.</li>
+        <li><code>all_addrs()</code>: <strong>O(N)</strong> sequential scan of the forward tree, where N = number of recipes. Used only during GC (infrequent). Typical throughput: <strong>~100K addrs/sec</strong> on SSD.</li>
+        <li><code>live_addr_set()</code>: <strong>O(N + E)</strong> where E = total number of edges. Scans both keys (recipe outputs) and values (recipe inputs). Used only during GC mark phase. Typical time: <strong>&lt;5ms</strong> for 1000 recipes.</li>
+    </ul>
+
+    <h3>3.4 Restart Recovery</h3>
+    
+    <p>
+        A key motivation for persisting the DAG is crash recovery. The original in-memory <code>DagStore</code> was rebuilt from scratch on every server restart: every recipe in the content store was re-read, its inputs were re-parsed, and both forward and reverse edges were re-inserted into a fresh hash map. For a DAG with N recipes and E total edges, this reconstruction was <strong>O(N + E)</strong> — dominated by deserialization and hash-map insertion. In practice, a DAG with 10,000 recipes took 2–5 seconds to rebuild, during which the server could not accept requests.
+    </p>
+
+    <p>
+        The persistent DAG eliminates this overhead entirely. Because sled stores the forward and reverse trees on disk, the server startup path reduces to a single <code>sled::open()</code> call, which memory-maps the database file and returns immediately. No iteration, no deserialization, no reconstruction:
+    </p>
+
+    <div class="code-block">
+        <pre>
+// In deriva-server/src/state.rs
+pub fn new(config: ServerConfig) -> Result&lt;Self&gt; {
+    let db = sled::open(&config.dag_path)?;
+    let dag = PersistentDag::open(&db)?;
+    
+    // DAG is immediately available — no rebuild needed
+    log::info!("Loaded DAG with {} recipes", dag.len());
+    
+    // ... initialize other components
+}</pre>
+    </div>
+
+    <p>
+        The <code>dag.len()</code> call (which counts entries in the forward tree) is the only scan performed at startup — it serves as a sanity check logged for operational visibility. Actual query operations begin serving immediately.
+    </p>
+
+    <p>
+        This difference is most significant in deployment scenarios where restarts are frequent: rolling updates, auto-scaling events, or crash-loop recovery. A 5-second rebuild window means 5 seconds of unavailability per restart; with the persistent DAG, the window drops to under 100ms regardless of DAG size.
+    </p>
+
+    <div style="text-align: center; margin: 1.5em 0;">
+      <svg id="restart-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 380" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 80%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="380" rx="12" fill="#1a1e2e"/>
+
+        <!-- Shared: timeline axis -->
+        <line x1="100" y1="200" x2="800" y2="200" stroke="#3a3f5c" stroke-width="1"/>
+        <text x="100" y="220" fill="#90a4ae" font-size="10">0ms</text>
+        <text x="800" y="220" fill="#90a4ae" font-size="10" text-anchor="end">time →</text>
+
+        <!-- State 0: In-memory DagStore (slow restart) -->
+        <g id="rst-s0" opacity="1">
+          <text x="450" y="36" text-anchor="middle" fill="#e74c3c" font-size="16" font-weight="bold">In-Memory DagStore — Restart Recovery</text>
+          <text x="450" y="56" text-anchor="middle" fill="#b0bec5" font-size="12">O(N + E) rebuild from recipe store on every restart</text>
+
+          <!-- Crash marker -->
+          <text x="110" y="190" fill="#e74c3c" font-size="18">⚡</text>
+          <text x="135" y="195" fill="#e74c3c" font-size="10">crash</text>
+
+          <!-- Rebuild bar -->
+          <rect x="170" y="170" width="420" height="24" rx="4" fill="#e74c3c" opacity="0.3"/>
+          <rect x="170" y="170" width="420" height="24" rx="4" fill="none" stroke="#e74c3c" stroke-width="1.5"/>
+          <!-- Animated fill to show scanning -->
+          <rect x="170" y="170" width="0" height="24" rx="4" fill="#e74c3c" opacity="0.5">
+            <animate attributeName="width" from="0" to="420" dur="3s" repeatCount="indefinite"/>
+          </rect>
+          <text x="380" y="187" text-anchor="middle" fill="#fff" font-size="11">Rebuilding DAG: re-read all recipes, re-insert edges…</text>
+
+          <!-- Ready marker -->
+          <rect x="600" y="170" width="100" height="24" rx="4" fill="#2ecc71" opacity="0.3"/>
+          <text x="650" y="187" text-anchor="middle" fill="#2ecc71" font-size="11">Ready</text>
+
+          <!-- Timeline labels -->
+          <text x="170" y="240" fill="#e74c3c" font-size="10">~2–5 seconds</text>
+          <line x1="170" y1="225" x2="170" y2="200" stroke="#e74c3c" stroke-width="1" stroke-dasharray="3,2"/>
+          <line x1="590" y1="225" x2="590" y2="200" stroke="#e74c3c" stroke-width="1" stroke-dasharray="3,2"/>
+
+          <!-- Detail steps -->
+          <rect x="150" y="260" width="600" height="70" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="170" y="280" fill="#e74c3c" font-size="11" font-family="Consolas, monospace">for recipe in content_store.all_recipes():</text>
+          <text x="190" y="296" fill="#90a4ae" font-size="11" font-family="Consolas, monospace">inputs = deserialize(recipe.inputs)     // O(E/N) per recipe</text>
+          <text x="190" y="312" fill="#90a4ae" font-size="11" font-family="Consolas, monospace">dag.forward[addr] = inputs              // hash-map insert</text>
+          <text x="190" y="328" fill="#90a4ae" font-size="11" font-family="Consolas, monospace">for inp in inputs: dag.reverse[inp] += addr</text>
+
+          <text x="450" y="360" text-anchor="middle" fill="#b0bec5" font-size="12">Server cannot accept requests during rebuild — clients see connection refused.</text>
+        </g>
+
+        <!-- State 1: Persistent DAG (instant restart) -->
+        <g id="rst-s1" opacity="0">
+          <text x="450" y="36" text-anchor="middle" fill="#2ecc71" font-size="16" font-weight="bold">Persistent DAG — Restart Recovery</text>
+          <text x="450" y="56" text-anchor="middle" fill="#b0bec5" font-size="12">O(1) sled::open() — memory-map the existing database file</text>
+
+          <!-- Crash marker -->
+          <text x="110" y="190" fill="#e74c3c" font-size="18">⚡</text>
+          <text x="135" y="195" fill="#e74c3c" font-size="10">crash</text>
+
+          <!-- Tiny open bar -->
+          <rect x="170" y="170" width="40" height="24" rx="4" fill="#2ecc71" opacity="0.5"/>
+          <rect x="170" y="170" width="40" height="24" rx="4" fill="none" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="190" y="187" text-anchor="middle" fill="#fff" font-size="9">open</text>
+
+          <!-- Ready bar (rest of timeline) -->
+          <rect x="220" y="170" width="480" height="24" rx="4" fill="#2ecc71" opacity="0.2"/>
+          <text x="460" y="187" text-anchor="middle" fill="#2ecc71" font-size="11">Serving requests immediately</text>
+
+          <!-- Timeline labels -->
+          <text x="170" y="240" fill="#2ecc71" font-size="10">&lt;100ms</text>
+          <line x1="170" y1="225" x2="170" y2="200" stroke="#2ecc71" stroke-width="1" stroke-dasharray="3,2"/>
+          <line x1="210" y1="225" x2="210" y2="200" stroke="#2ecc71" stroke-width="1" stroke-dasharray="3,2"/>
+
+          <!-- Code snippet -->
+          <rect x="150" y="260" width="600" height="50" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="170" y="280" fill="#2ecc71" font-size="11" font-family="Consolas, monospace">let db = sled::open(&amp;config.dag_path)?;  // mmap, no iteration</text>
+          <text x="170" y="296" fill="#2ecc71" font-size="11" font-family="Consolas, monospace">let dag = PersistentDag::open(&amp;db)?;     // ready instantly</text>
+
+          <text x="450" y="340" text-anchor="middle" fill="#b0bec5" font-size="12">No reconstruction, no deserialization. DAG is served directly from disk-backed pages.</text>
+          <text x="450" y="360" text-anchor="middle" fill="#b0bec5" font-size="12">Restart time is constant regardless of DAG size — 100 recipes or 100,000.</text>
+        </g>
+
+        <!-- Step dots -->
+        <circle id="rst-d0" cx="430" cy="375" r="0" fill="none"/>
+        <circle id="rst-d1" cx="470" cy="375" r="0" fill="none"/>
+
+        <!-- Hint -->
+        <!-- (reuse bottom area) -->
+      </svg>
+      <div style="margin-top: -10px;">
+        <span id="rst-hint" style="color: #546e7a; font-size: 12px; cursor: pointer;">Click to compare: persistent DAG →</span>
+      </div>
+      <p class="figure-caption">Figure 5: Restart recovery — in-memory DAG rebuild vs persistent DAG instant availability.</p>
+    </div>
+
+    <h3>3.5 Why Not a Graph Database?</h3>
+    
+    <p>
+        Using a dedicated graph database (Neo4j, TigerGraph, DGraph) was considered but rejected for three reasons:
+    </p>
+
+    <ol>
+        <li><strong>Operational complexity:</strong> Graph databases are separate services that require deployment, monitoring, and backup. Sled is embedded — zero operational overhead.</li>
+        <li><strong>Query complexity mismatch:</strong> Graph databases excel at complex traversals (shortest path, PageRank, community detection). Deriva's queries are simple: "get inputs," "get dependents," "enumerate all nodes." A KV store is sufficient.</li>
+        <li><strong>Rust ecosystem integration:</strong> Sled is pure Rust with no external dependencies. Graph databases require network clients (gRPC, HTTP) and serialization overhead. For a storage system where the DAG is accessed on every materialization, the overhead would be prohibitive.</li>
+    </ol>
+
+    <p>
+        The persistent DAG is intentionally minimal: two adjacency lists, four query operations, and transactional inserts. This simplicity is a feature — it makes the system easier to reason about, test, and debug. The next section shows how this simple foundation enables sophisticated parallel materialization.
+    </p>
+
+    </section>
+</div>

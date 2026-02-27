@@ -1,0 +1,1249 @@
+<div class="section-content">
+    <section id="async-materialization">
+    <h2>4. Async Materialization</h2>
+    
+    <p>
+        The <code>AsyncExecutor</code> is the heart of The parallel materialization system. It transforms the original sequential <code>Executor</code> (which resolved inputs one-by-one) into a concurrent engine that exploits DAG structure for parallelism. This section describes three key mechanisms: broadcast-channel deduplication, deadlock-free semaphore placement, and input assembly for deterministic ordering.
+    </p>
+
+    <h3>4.1 The Materialization Pipeline</h3>
+    
+    <p>
+        When a client requests <code>Get(addr)</code>, the <code>AsyncExecutor</code> follows an 11-step pipeline. The steps are not all executed for every request — the first three are early-exit checks that short-circuit the common cases (cache hits, leaf blobs, and duplicate in-flight requests). Only when all three checks miss does the executor enter the full producer path (steps 4–11).
+    </p>
+
+    <p>
+        The pipeline is structured around three phases:
+    </p>
+
+    <ul>
+        <li><strong>Fast paths (steps 1–2):</strong> Cache and leaf checks return immediately with zero computation. These handle the majority of requests in a warm system.</li>
+        <li><strong>Deduplication (step 3):</strong> If another task is already computing this address, the current task subscribes to a broadcast channel and waits — no redundant work is performed.</li>
+        <li><strong>Producer path (steps 4–11):</strong> The task registers itself as the producer, resolves inputs in parallel, acquires a semaphore for compute, executes the recipe function, broadcasts the result to any waiting subscribers, and caches the output. The critical ordering constraint: input resolution (step 6) happens <em>before</em> semaphore acquisition (step 7), which prevents deadlocks in diamond-shaped DAGs (§4.3).</li>
+    </ul>
+
+    <p>
+        The following visualization walks through each step. Click to advance:
+    </p>
+
+    <div style="text-align: center; margin: 1.5em 0;">
+      <svg id="pipe-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="520" rx="12" fill="#1a1e2e"/>
+
+        <!-- Title -->
+        <text x="450" y="30" text-anchor="middle" fill="#e0e0e0" font-size="14" font-weight="bold">AsyncExecutor::materialize(addr)</text>
+
+        <!-- Step boxes along left column -->
+        <g id="pipe-steps-bg">
+          <rect id="pipe-box-0"  x="30" y="50"  width="200" height="32" rx="5" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <rect id="pipe-box-1"  x="30" y="88"  width="200" height="32" rx="5" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <rect id="pipe-box-2"  x="30" y="126" width="200" height="32" rx="5" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <rect id="pipe-box-3"  x="30" y="164" width="200" height="32" rx="5" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <rect id="pipe-box-4"  x="30" y="202" width="200" height="32" rx="5" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <rect id="pipe-box-5"  x="30" y="240" width="200" height="32" rx="5" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <rect id="pipe-box-6"  x="30" y="278" width="200" height="32" rx="5" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <rect id="pipe-box-7"  x="30" y="316" width="200" height="32" rx="5" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <rect id="pipe-box-8"  x="30" y="354" width="200" height="32" rx="5" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <rect id="pipe-box-9"  x="30" y="392" width="200" height="32" rx="5" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <rect id="pipe-box-10" x="30" y="430" width="200" height="32" rx="5" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        </g>
+
+        <!-- Step labels -->
+        <text x="40" y="71"  fill="#81d4fa" font-size="11"><tspan font-weight="bold">1.</tspan> Cache check</text>
+        <text x="40" y="109" fill="#81d4fa" font-size="11"><tspan font-weight="bold">2.</tspan> Leaf check</text>
+        <text x="40" y="147" fill="#81d4fa" font-size="11"><tspan font-weight="bold">3.</tspan> Dedup check</text>
+        <text x="40" y="185" fill="#81d4fa" font-size="11"><tspan font-weight="bold">4.</tspan> Register producer</text>
+        <text x="40" y="223" fill="#81d4fa" font-size="11"><tspan font-weight="bold">5.</tspan> Recipe lookup</text>
+        <text x="40" y="261" fill="#81d4fa" font-size="11"><tspan font-weight="bold">6.</tspan> Parallel inputs</text>
+        <text x="40" y="299" fill="#81d4fa" font-size="11"><tspan font-weight="bold">7.</tspan> Acquire semaphore</text>
+        <text x="40" y="337" fill="#81d4fa" font-size="11"><tspan font-weight="bold">8.</tspan> Execute compute</text>
+        <text x="40" y="375" fill="#81d4fa" font-size="11"><tspan font-weight="bold">9.</tspan> Broadcast result</text>
+        <text x="40" y="413" fill="#81d4fa" font-size="11"><tspan font-weight="bold">10.</tspan> Cleanup</text>
+        <text x="40" y="451" fill="#81d4fa" font-size="11"><tspan font-weight="bold">11.</tspan> Cache on success</text>
+
+        <!-- Phase brackets -->
+        <line x1="235" y1="55" x2="235" y2="115" stroke="#2ecc71" stroke-width="1.5"/>
+        <text x="242" y="90" fill="#2ecc71" font-size="9">fast path</text>
+        <line x1="235" y1="131" x2="235" y2="153" stroke="#f39c12" stroke-width="1.5"/>
+        <text x="242" y="147" fill="#f39c12" font-size="9">dedup</text>
+        <line x1="235" y1="169" x2="235" y2="457" stroke="#e74c3c" stroke-width="1.5"/>
+        <text x="242" y="315" fill="#e74c3c" font-size="9">producer</text>
+
+        <!-- Right panel: detail per step -->
+        <g id="pipe-s0" opacity="1">
+          <rect x="300" y="50" width="570" height="400" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="585" y="80" text-anchor="middle" fill="#2ecc71" font-size="15" font-weight="bold">Step 1: Cache Check</text>
+          <text x="585" y="105" text-anchor="middle" fill="#b0bec5" font-size="12">Is the result already in the content store?</text>
+          <rect x="340" y="125" width="490" height="24" rx="4" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="585" y="142" text-anchor="middle" fill="#2ecc71" font-size="11" font-family="Consolas, monospace">if self.store.contains(addr)? { return Ok(blob) }</text>
+          <text x="585" y="175" text-anchor="middle" fill="#e0e0e0" font-size="12">The content store is checked first. If the blob already exists</text>
+          <text x="585" y="193" text-anchor="middle" fill="#e0e0e0" font-size="12">(from a previous materialization or direct put), it is returned</text>
+          <text x="585" y="211" text-anchor="middle" fill="#e0e0e0" font-size="12">immediately with no computation.</text>
+          <rect x="440" y="235" width="290" height="50" rx="6" fill="#1a3a1a" opacity="0.5"/>
+          <text x="585" y="255" text-anchor="middle" fill="#2ecc71" font-size="11" font-weight="bold">O(1) point lookup · &lt;10μs warm</text>
+          <text x="585" y="273" text-anchor="middle" fill="#2ecc71" font-size="10">Handles ~80% of requests in a warm system</text>
+          <!-- Mini diagram: client -> cache -> return -->
+          <text x="370" y="330" fill="#90a4ae" font-size="11">Client</text>
+          <line x1="405" y1="326" x2="500" y2="326" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="510" y="330" fill="#2ecc71" font-size="11">Cache</text>
+          <line x1="545" y1="326" x2="620" y2="326" stroke="#2ecc71" stroke-width="1.5" stroke-dasharray="4,3"/>
+          <text x="630" y="330" fill="#2ecc71" font-size="11">✓ Hit → return</text>
+        </g>
+
+        <g id="pipe-s1" opacity="0">
+          <rect x="300" y="50" width="570" height="400" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="585" y="80" text-anchor="middle" fill="#2ecc71" font-size="15" font-weight="bold">Step 2: Leaf Check</text>
+          <text x="585" y="105" text-anchor="middle" fill="#b0bec5" font-size="12">Is this address a raw blob (not a recipe)?</text>
+          <rect x="340" y="125" width="490" height="24" rx="4" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="585" y="142" text-anchor="middle" fill="#2ecc71" font-size="11" font-family="Consolas, monospace">if dag.inputs(addr)?.is_none() { return Ok(blob) }</text>
+          <text x="585" y="175" text-anchor="middle" fill="#e0e0e0" font-size="12">If the DAG has no forward entry for this address, it is a leaf</text>
+          <text x="585" y="193" text-anchor="middle" fill="#e0e0e0" font-size="12">blob — raw data with no recipe. Returned directly from the</text>
+          <text x="585" y="211" text-anchor="middle" fill="#e0e0e0" font-size="12">content store without entering the compute pipeline.</text>
+          <rect x="440" y="235" width="290" height="50" rx="6" fill="#1a3a1a" opacity="0.5"/>
+          <text x="585" y="255" text-anchor="middle" fill="#2ecc71" font-size="11" font-weight="bold">O(1) DAG lookup · no computation</text>
+          <text x="585" y="273" text-anchor="middle" fill="#2ecc71" font-size="10">Leaf blobs are inputs that were directly uploaded</text>
+        </g>
+
+        <g id="pipe-s2" opacity="0">
+          <rect x="300" y="50" width="570" height="400" rx="8" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+          <text x="585" y="80" text-anchor="middle" fill="#f39c12" font-size="15" font-weight="bold">Step 3: Dedup Check</text>
+          <text x="585" y="105" text-anchor="middle" fill="#b0bec5" font-size="12">Is another task already computing this address?</text>
+          <rect x="330" y="120" width="510" height="40" rx="4" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="585" y="137" text-anchor="middle" fill="#f39c12" font-size="10" font-family="Consolas, monospace">if let Some(tx) = in_flight.get(&amp;addr) {</text>
+          <text x="585" y="152" text-anchor="middle" fill="#f39c12" font-size="10" font-family="Consolas, monospace">    rx = tx.subscribe(); return rx.recv().await }</text>
+          <text x="585" y="185" text-anchor="middle" fill="#e0e0e0" font-size="12">The in_flight map tracks addresses currently being computed.</text>
+          <text x="585" y="203" text-anchor="middle" fill="#e0e0e0" font-size="12">If a match is found, this task subscribes to the producer's</text>
+          <text x="585" y="221" text-anchor="middle" fill="#e0e0e0" font-size="12">broadcast channel and waits — no redundant computation.</text>
+          <!-- Mini diagram: multiple clients -> one producer -->
+          <text x="340" y="270" fill="#f39c12" font-size="10">Client A →</text>
+          <text x="340" y="290" fill="#f39c12" font-size="10">Client B →</text>
+          <text x="340" y="310" fill="#f39c12" font-size="10">Client C →</text>
+          <line x1="420" y1="266" x2="500" y2="286" stroke="#f39c12" stroke-width="1"/>
+          <line x1="420" y1="286" x2="500" y2="286" stroke="#f39c12" stroke-width="1"/>
+          <line x1="420" y1="306" x2="500" y2="286" stroke="#f39c12" stroke-width="1"/>
+          <rect x="500" y="274" width="120" height="24" rx="4" fill="#4a3520" opacity="0.5"/>
+          <text x="560" y="290" text-anchor="middle" fill="#f39c12" font-size="10">1 producer</text>
+          <line x1="620" y1="286" x2="700" y2="266" stroke="#f39c12" stroke-width="1" stroke-dasharray="3,2"/>
+          <line x1="620" y1="286" x2="700" y2="286" stroke="#f39c12" stroke-width="1" stroke-dasharray="3,2"/>
+          <line x1="620" y1="286" x2="700" y2="306" stroke="#f39c12" stroke-width="1" stroke-dasharray="3,2"/>
+          <text x="720" y="270" fill="#f39c12" font-size="10">→ result</text>
+          <text x="720" y="290" fill="#f39c12" font-size="10">→ result</text>
+          <text x="720" y="310" fill="#f39c12" font-size="10">→ result</text>
+        </g>
+
+        <g id="pipe-s3" opacity="0">
+          <rect x="300" y="50" width="570" height="400" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="585" y="80" text-anchor="middle" fill="#e74c3c" font-size="15" font-weight="bold">Step 4: Register Producer</text>
+          <text x="585" y="105" text-anchor="middle" fill="#b0bec5" font-size="12">Claim ownership — create broadcast channel for subscribers</text>
+          <rect x="330" y="120" width="510" height="40" rx="4" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="585" y="137" text-anchor="middle" fill="#e74c3c" font-size="10" font-family="Consolas, monospace">let (tx, _) = broadcast::channel(capacity);</text>
+          <text x="585" y="152" text-anchor="middle" fill="#e74c3c" font-size="10" font-family="Consolas, monospace">in_flight.insert(addr, tx.clone());</text>
+          <text x="585" y="185" text-anchor="middle" fill="#e0e0e0" font-size="12">A broadcast channel is created and inserted into the in_flight</text>
+          <text x="585" y="203" text-anchor="middle" fill="#e0e0e0" font-size="12">map. Any future request for this address (step 3) will find</text>
+          <text x="585" y="221" text-anchor="middle" fill="#e0e0e0" font-size="12">this entry and subscribe instead of starting a new computation.</text>
+        </g>
+
+        <g id="pipe-s4" opacity="0">
+          <rect x="300" y="50" width="570" height="400" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="585" y="80" text-anchor="middle" fill="#e74c3c" font-size="15" font-weight="bold">Step 5: Recipe Lookup</text>
+          <text x="585" y="105" text-anchor="middle" fill="#b0bec5" font-size="12">Retrieve the recipe definition from the persistent DAG</text>
+          <rect x="340" y="125" width="490" height="24" rx="4" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="585" y="142" text-anchor="middle" fill="#e74c3c" font-size="11" font-family="Consolas, monospace">let inputs = dag.inputs(addr)? // → Vec&lt;CAddr&gt;</text>
+          <text x="585" y="175" text-anchor="middle" fill="#e0e0e0" font-size="12">The forward tree is queried to get the list of input addresses.</text>
+          <text x="585" y="193" text-anchor="middle" fill="#e0e0e0" font-size="12">These are the content addresses that must be materialized</text>
+          <text x="585" y="211" text-anchor="middle" fill="#e0e0e0" font-size="12">before the recipe's compute function can execute.</text>
+        </g>
+
+        <g id="pipe-s5" opacity="0">
+          <rect x="300" y="50" width="570" height="400" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="585" y="80" text-anchor="middle" fill="#e74c3c" font-size="15" font-weight="bold">Step 6: Parallel Input Resolution</text>
+          <text x="585" y="105" text-anchor="middle" fill="#b0bec5" font-size="12">Materialize all inputs concurrently — no semaphore held</text>
+          <rect x="330" y="120" width="510" height="40" rx="4" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="585" y="137" text-anchor="middle" fill="#e74c3c" font-size="10" font-family="Consolas, monospace">let futs = inputs.map(|i| materialize(i));</text>
+          <text x="585" y="152" text-anchor="middle" fill="#e74c3c" font-size="10" font-family="Consolas, monospace">let bytes = try_join_all(futs).await?;</text>
+          <text x="585" y="185" text-anchor="middle" fill="#e0e0e0" font-size="12">All inputs are resolved concurrently via try_join_all.</text>
+          <text x="585" y="203" text-anchor="middle" fill="#e0e0e0" font-size="12">Each input triggers a recursive materialize() call that may</text>
+          <text x="585" y="221" text-anchor="middle" fill="#e0e0e0" font-size="12">itself fan out. Results are collected in positional order.</text>
+          <!-- Fan-out mini diagram -->
+          <rect x="460" y="245" width="80" height="22" rx="3" fill="#3a1a1a"/>
+          <text x="500" y="260" text-anchor="middle" fill="#e74c3c" font-size="10">addr</text>
+          <line x1="500" y1="267" x2="400" y2="300" stroke="#e74c3c" stroke-width="1"/>
+          <line x1="500" y1="267" x2="500" y2="300" stroke="#e74c3c" stroke-width="1"/>
+          <line x1="500" y1="267" x2="600" y2="300" stroke="#e74c3c" stroke-width="1"/>
+          <rect x="370" y="300" width="60" height="20" rx="3" fill="#3a1a1a"/>
+          <text x="400" y="314" text-anchor="middle" fill="#e74c3c" font-size="9">input₁</text>
+          <rect x="470" y="300" width="60" height="20" rx="3" fill="#3a1a1a"/>
+          <text x="500" y="314" text-anchor="middle" fill="#e74c3c" font-size="9">input₂</text>
+          <rect x="570" y="300" width="60" height="20" rx="3" fill="#3a1a1a"/>
+          <text x="600" y="314" text-anchor="middle" fill="#e74c3c" font-size="9">input₃</text>
+          <text x="500" y="345" text-anchor="middle" fill="#90a4ae" font-size="10">concurrent — no permit held</text>
+          <rect x="440" y="360" width="120" height="20" rx="3" fill="#1a3a1a" opacity="0.5"/>
+          <text x="500" y="375" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">⚠ Key: before step 7</text>
+        </g>
+
+        <g id="pipe-s6" opacity="0">
+          <rect x="300" y="50" width="570" height="400" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="585" y="80" text-anchor="middle" fill="#e74c3c" font-size="15" font-weight="bold">Step 7: Acquire Semaphore</text>
+          <text x="585" y="105" text-anchor="middle" fill="#b0bec5" font-size="12">Limit concurrent compute to prevent resource exhaustion</text>
+          <rect x="340" y="125" width="490" height="24" rx="4" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="585" y="142" text-anchor="middle" fill="#e74c3c" font-size="11" font-family="Consolas, monospace">let _permit = self.semaphore.acquire().await?;</text>
+          <text x="585" y="175" text-anchor="middle" fill="#e0e0e0" font-size="12">The semaphore is acquired only after all inputs are resolved.</text>
+          <text x="585" y="193" text-anchor="middle" fill="#e0e0e0" font-size="12">This ordering prevents deadlocks: a task never holds a permit</text>
+          <text x="585" y="211" text-anchor="middle" fill="#e0e0e0" font-size="12">while waiting for inputs that need permits to compute.</text>
+          <text x="585" y="245" text-anchor="middle" fill="#e74c3c" font-size="11">Permit held via RAII — released when _permit drops after step 8.</text>
+        </g>
+
+        <g id="pipe-s7" opacity="0">
+          <rect x="300" y="50" width="570" height="400" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="585" y="80" text-anchor="middle" fill="#e74c3c" font-size="15" font-weight="bold">Step 8: Execute Compute</text>
+          <text x="585" y="105" text-anchor="middle" fill="#b0bec5" font-size="12">Run the recipe's function on a blocking thread</text>
+          <rect x="330" y="120" width="510" height="40" rx="4" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="585" y="137" text-anchor="middle" fill="#e74c3c" font-size="10" font-family="Consolas, monospace">let result = spawn_blocking(move || {</text>
+          <text x="585" y="152" text-anchor="middle" fill="#e74c3c" font-size="10" font-family="Consolas, monospace">    func.execute(&amp;input_bytes, &amp;params) }).await?;</text>
+          <text x="585" y="185" text-anchor="middle" fill="#e0e0e0" font-size="12">The compute function runs on a dedicated blocking thread pool</text>
+          <text x="585" y="203" text-anchor="middle" fill="#e0e0e0" font-size="12">to avoid starving the async runtime. Input bytes are passed in</text>
+          <text x="585" y="221" text-anchor="middle" fill="#e0e0e0" font-size="12">positional order matching the recipe's input list.</text>
+          <text x="585" y="255" text-anchor="middle" fill="#90a4ae" font-size="11">This is the only step that performs actual computation.</text>
+        </g>
+
+        <g id="pipe-s8" opacity="0">
+          <rect x="300" y="50" width="570" height="400" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="585" y="80" text-anchor="middle" fill="#e74c3c" font-size="15" font-weight="bold">Step 9: Broadcast Result</text>
+          <text x="585" y="105" text-anchor="middle" fill="#b0bec5" font-size="12">Send the result to all waiting subscribers</text>
+          <rect x="340" y="125" width="490" height="24" rx="4" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="585" y="142" text-anchor="middle" fill="#e74c3c" font-size="11" font-family="Consolas, monospace">let _ = tx.send(result.clone());</text>
+          <text x="585" y="175" text-anchor="middle" fill="#e0e0e0" font-size="12">The broadcast channel clones the result to every subscriber</text>
+          <text x="585" y="193" text-anchor="middle" fill="#e0e0e0" font-size="12">that attached during step 3. If no subscribers exist (single</text>
+          <text x="585" y="211" text-anchor="middle" fill="#e0e0e0" font-size="12">request), the send is a no-op — the result is still returned.</text>
+        </g>
+
+        <g id="pipe-s9" opacity="0">
+          <rect x="300" y="50" width="570" height="400" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="585" y="80" text-anchor="middle" fill="#e74c3c" font-size="15" font-weight="bold">Step 10: Cleanup</text>
+          <text x="585" y="105" text-anchor="middle" fill="#b0bec5" font-size="12">Remove from in_flight map to allow future recomputation</text>
+          <rect x="340" y="125" width="490" height="24" rx="4" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="585" y="142" text-anchor="middle" fill="#e74c3c" font-size="11" font-family="Consolas, monospace">self.in_flight.lock().await.remove(&amp;addr);</text>
+          <text x="585" y="175" text-anchor="middle" fill="#e0e0e0" font-size="12">The in_flight entry is removed so future requests for this</text>
+          <text x="585" y="193" text-anchor="middle" fill="#e0e0e0" font-size="12">address go through the normal path (cache hit at step 1)</text>
+          <text x="585" y="211" text-anchor="middle" fill="#e0e0e0" font-size="12">rather than subscribing to a stale broadcast channel.</text>
+        </g>
+
+        <g id="pipe-s10" opacity="0">
+          <rect x="300" y="50" width="570" height="400" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="585" y="80" text-anchor="middle" fill="#e74c3c" font-size="15" font-weight="bold">Step 11: Cache on Success</text>
+          <text x="585" y="105" text-anchor="middle" fill="#b0bec5" font-size="12">Store the computed result for future cache hits</text>
+          <rect x="340" y="125" width="490" height="24" rx="4" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="585" y="142" text-anchor="middle" fill="#e74c3c" font-size="11" font-family="Consolas, monospace">self.store.put(addr, &amp;output)?;</text>
+          <text x="585" y="175" text-anchor="middle" fill="#e0e0e0" font-size="12">The output blob is written to the content store, keyed by its</text>
+          <text x="585" y="193" text-anchor="middle" fill="#e0e0e0" font-size="12">content address. Future Get(addr) requests will hit step 1</text>
+          <text x="585" y="211" text-anchor="middle" fill="#e0e0e0" font-size="12">(cache check) and return immediately.</text>
+          <text x="585" y="245" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">Pipeline complete — result returned to client.</text>
+        </g>
+
+        <!-- Step counter -->
+        <text id="pipe-counter" x="450" y="485" text-anchor="middle" fill="#90a4ae" font-size="12">Step 1 of 11</text>
+
+        <!-- Hint -->
+        <rect x="310" y="495" width="280" height="22" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text id="pipe-hint" x="450" y="511" text-anchor="middle" fill="#90a4ae" font-size="11">Click to advance →</text>
+      </svg>
+      <p class="figure-caption">Figure 6: Async materialization pipeline — resolve, compute, store, and notify phases.</p>
+    </div>
+
+
+    <h3>4.2 Broadcast-Channel Deduplication</h3>
+    
+    <p>
+        When multiple clients request the same unmaterialized CAddr concurrently, only one task should compute it — the others should wait for the result. Without deduplication, N concurrent requests for the same address would trigger N independent compute tasks, wasting CPU and potentially producing redundant I/O against the content store.
+    </p>
+
+    <p>
+        The deduplication mechanism uses a shared <code>in_flight</code> map that tracks which addresses are currently being computed. The map's values are Tokio <code>broadcast::Sender</code> handles — multi-producer, multi-consumer channels that clone the result to every subscriber:
+    </p>
+
+    <ul>
+        <li><strong>First request (producer):</strong> Finds no entry in <code>in_flight</code>, creates a broadcast channel, inserts it into the map, and proceeds to compute. When the result is ready, it sends once on the channel — all subscribers receive a clone.</li>
+        <li><strong>Subsequent requests (subscribers):</strong> Find an existing entry in <code>in_flight</code>, call <code>tx.subscribe()</code> to get a receiver, drop the lock, and <code>await</code> the result. No computation is performed — the subscriber simply waits for the producer to finish.</li>
+    </ul>
+
+    <p>
+        A subtle but important detail: the lock on <code>in_flight</code> is held only for the duration of the map lookup (step 3) or insertion (step 4), then immediately dropped. Subscribers never hold the lock while waiting for the result — this prevents the lock from becoming a bottleneck under high concurrency.
+    </p>
+
+    <div class="code-block">
+        <pre>
+// In AsyncExecutor struct
+in_flight: Arc&lt;Mutex&lt;HashMap&lt;CAddr, broadcast::Sender&lt;Result&lt;Bytes&gt;&gt;&gt;&gt;&gt;
+
+// Step 3: Deduplication check
+{
+    let in_flight = self.in_flight.lock().await;
+    if let Some(tx) = in_flight.get(&addr) {
+        // Another task is computing this addr — subscribe to its channel
+        let mut rx = tx.subscribe();
+        drop(in_flight);  // Release lock before waiting
+        
+        let result = match rx.recv().await {
+            Ok(result) => result,
+            Err(_) => Err(DerivaError::ComputeFailed(
+                "producer task failed or was cancelled".into()
+            )),
+        };
+        return result;  // Return result from producer
+    }
+}
+
+// Step 4: Register as producer
+let (tx, _rx) = broadcast::channel(self.config.dedup_channel_capacity);
+{
+    let mut in_flight = self.in_flight.lock().await;
+    in_flight.insert(addr, tx.clone());
+}
+
+// ... compute ...
+
+// Step 9: Broadcast result to all subscribers
+let _ = tx.send(result.clone());
+
+// Step 10: Cleanup
+self.in_flight.lock().await.remove(&addr);</pre>
+    </div>
+
+    <p>
+        The following visualization shows the deduplication lifecycle. Click to step through the timeline as three concurrent requests arrive for the same address:
+    </p>
+
+    <div style="text-align: center; margin: 1.5em 0;">
+      <svg id="dedup-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 480" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="480" rx="12" fill="#1a1e2e"/>
+
+        <!-- Actors (always visible) -->
+        <text x="60" y="60" text-anchor="middle" fill="#81d4fa" font-size="12" font-weight="bold">Client A</text>
+        <text x="60" y="120" text-anchor="middle" fill="#f39c12" font-size="12" font-weight="bold">Client B</text>
+        <text x="60" y="180" text-anchor="middle" fill="#f39c12" font-size="12" font-weight="bold">Client C</text>
+
+        <!-- in_flight map box -->
+        <rect x="300" y="25" width="200" height="30" rx="5" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text x="400" y="45" text-anchor="middle" fill="#90a4ae" font-size="11" font-family="Consolas, monospace">in_flight map</text>
+
+        <!-- Compute box -->
+        <rect x="600" y="25" width="160" height="30" rx="5" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text x="680" y="45" text-anchor="middle" fill="#90a4ae" font-size="11">Compute Engine</text>
+
+        <!-- Timeline base lines -->
+        <line x1="120" y1="56" x2="850" y2="56" stroke="#3a3f5c" stroke-width="0.5"/>
+        <line x1="120" y1="116" x2="850" y2="116" stroke="#3a3f5c" stroke-width="0.5"/>
+        <line x1="120" y1="176" x2="850" y2="176" stroke="#3a3f5c" stroke-width="0.5"/>
+
+        <!-- Step 0: Client A arrives, no entry in map -->
+        <g id="dd-s0" opacity="1">
+          <rect x="130" y="220" width="720" height="200" rx="8" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="490" y="248" text-anchor="middle" fill="#81d4fa" font-size="14" font-weight="bold">① Client A arrives — Get(addr)</text>
+          <text x="490" y="272" text-anchor="middle" fill="#b0bec5" font-size="12">Checks in_flight map → empty. No one is computing this address.</text>
+          <!-- Arrow: A -> map -->
+          <line x1="120" y1="56" x2="300" y2="40" stroke="#81d4fa" stroke-width="2"/>
+          <circle cx="300" cy="40" r="4" fill="#81d4fa"/>
+          <text x="200" y="48" text-anchor="middle" fill="#81d4fa" font-size="10">lookup</text>
+          <!-- Map state -->
+          <rect x="310" y="295" width="360" height="30" rx="4" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="490" y="315" text-anchor="middle" fill="#90a4ae" font-size="11" font-family="Consolas, monospace">in_flight.get(&amp;addr) → None</text>
+          <text x="490" y="350" text-anchor="middle" fill="#81d4fa" font-size="12">Client A becomes the <tspan font-weight="bold">producer</tspan> — proceeds to step 4.</text>
+          <text x="490" y="375" text-anchor="middle" fill="#b0bec5" font-size="11">Creates broadcast channel, inserts into map, begins computation.</text>
+        </g>
+
+        <!-- Step 1: A registers as producer, B arrives and subscribes -->
+        <g id="dd-s1" opacity="0">
+          <rect x="130" y="220" width="720" height="200" rx="8" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+          <text x="490" y="248" text-anchor="middle" fill="#f39c12" font-size="14" font-weight="bold">② Client B arrives while A is computing</text>
+          <text x="490" y="272" text-anchor="middle" fill="#b0bec5" font-size="12">Checks in_flight map → found! Subscribes to A's broadcast channel.</text>
+          <!-- A computing bar -->
+          <rect x="600" y="64" width="200" height="24" rx="4" fill="#81d4fa" opacity="0.3"/>
+          <text x="700" y="80" text-anchor="middle" fill="#81d4fa" font-size="10">A computing…</text>
+          <!-- B -> map -> subscribe -->
+          <line x1="120" y1="116" x2="300" y2="40" stroke="#f39c12" stroke-width="2"/>
+          <circle cx="300" cy="40" r="4" fill="#f39c12"/>
+          <text x="200" y="108" text-anchor="middle" fill="#f39c12" font-size="10">lookup</text>
+          <!-- Map state -->
+          <rect x="310" y="295" width="360" height="30" rx="4" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="490" y="315" text-anchor="middle" fill="#f39c12" font-size="11" font-family="Consolas, monospace">in_flight.get(&amp;addr) → Some(tx)</text>
+          <text x="490" y="350" text-anchor="middle" fill="#f39c12" font-size="12">Client B calls <tspan font-family="Consolas, monospace" font-size="11">tx.subscribe()</tspan>, drops lock, awaits result.</text>
+          <text x="490" y="375" text-anchor="middle" fill="#b0bec5" font-size="11">No computation started — B is a passive subscriber.</text>
+        </g>
+
+        <!-- Step 2: C also subscribes -->
+        <g id="dd-s2" opacity="0">
+          <rect x="130" y="220" width="720" height="200" rx="8" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+          <text x="490" y="248" text-anchor="middle" fill="#f39c12" font-size="14" font-weight="bold">③ Client C also arrives — same address</text>
+          <text x="490" y="272" text-anchor="middle" fill="#b0bec5" font-size="12">Also finds the in_flight entry. Now 2 subscribers waiting on 1 producer.</text>
+          <!-- A computing bar -->
+          <rect x="600" y="64" width="200" height="24" rx="4" fill="#81d4fa" opacity="0.3"/>
+          <text x="700" y="80" text-anchor="middle" fill="#81d4fa" font-size="10">A computing…</text>
+          <!-- B waiting -->
+          <rect x="350" y="104" width="100" height="24" rx="4" fill="#f39c12" opacity="0.2"/>
+          <text x="400" y="120" text-anchor="middle" fill="#f39c12" font-size="9">B waiting</text>
+          <!-- C -> map -->
+          <line x1="120" y1="176" x2="300" y2="40" stroke="#f39c12" stroke-width="2"/>
+          <circle cx="300" cy="40" r="4" fill="#f39c12"/>
+          <!-- Subscriber count -->
+          <rect x="340" y="300" width="300" height="50" rx="6" fill="#1a1e2e" stroke="#f39c12" stroke-width="1"/>
+          <text x="490" y="320" text-anchor="middle" fill="#f39c12" font-size="11">broadcast channel subscribers: 2</text>
+          <text x="490" y="338" text-anchor="middle" fill="#90a4ae" font-size="10">B and C both await rx.recv() — zero CPU cost</text>
+          <text x="490" y="375" text-anchor="middle" fill="#b0bec5" font-size="11">Compute runs exactly once regardless of subscriber count.</text>
+        </g>
+
+        <!-- Step 3: A finishes, broadcasts, all receive -->
+        <g id="dd-s3" opacity="0">
+          <rect x="130" y="220" width="720" height="200" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="490" y="248" text-anchor="middle" fill="#2ecc71" font-size="14" font-weight="bold">④ Producer A finishes — broadcast result</text>
+          <text x="490" y="272" text-anchor="middle" fill="#b0bec5" font-size="12">tx.send(result) clones the result to B and C. Map entry removed.</text>
+          <!-- A done -->
+          <rect x="600" y="64" width="200" height="24" rx="4" fill="#2ecc71" opacity="0.3"/>
+          <text x="700" y="80" text-anchor="middle" fill="#2ecc71" font-size="10">A done ✓</text>
+          <!-- Broadcast arrows -->
+          <line x1="700" y1="68" x2="700" y2="116" stroke="#2ecc71" stroke-width="2"/>
+          <line x1="700" y1="68" x2="700" y2="176" stroke="#2ecc71" stroke-width="2"/>
+          <circle cx="700" cy="116" r="4" fill="#2ecc71"/>
+          <circle cx="700" cy="176" r="4" fill="#2ecc71"/>
+          <text x="740" y="100" fill="#2ecc71" font-size="10">→ B gets result</text>
+          <text x="740" y="160" fill="#2ecc71" font-size="10">→ C gets result</text>
+          <!-- Cleanup -->
+          <rect x="340" y="300" width="300" height="50" rx="6" fill="#1a1e2e" stroke="#2ecc71" stroke-width="1"/>
+          <text x="490" y="318" text-anchor="middle" fill="#2ecc71" font-size="11" font-family="Consolas, monospace">in_flight.remove(&amp;addr)</text>
+          <text x="490" y="338" text-anchor="middle" fill="#90a4ae" font-size="10">Map cleaned up — future requests hit cache (step 1)</text>
+          <text x="490" y="370" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">3 requests served, 1 computation performed</text>
+          <text x="490" y="392" text-anchor="middle" fill="#b0bec5" font-size="11">Dedup rate: 100% — 2 of 3 requests avoided redundant work.</text>
+        </g>
+
+        <!-- Step dots -->
+        <circle id="dd-d0" cx="400" cy="440" r="8" fill="#81d4fa"/>
+        <circle id="dd-d1" cx="435" cy="440" r="8" fill="#3a3f5c"/>
+        <circle id="dd-d2" cx="470" cy="440" r="8" fill="#3a3f5c"/>
+        <circle id="dd-d3" cx="505" cy="440" r="8" fill="#3a3f5c"/>
+
+        <!-- Hint -->
+        <rect x="330" y="456" width="250" height="22" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text id="dd-hint" x="455" y="472" text-anchor="middle" fill="#90a4ae" font-size="11">Click to step through timeline →</text>
+      </svg>
+      <p class="figure-caption">Figure 7: Broadcast-based deduplication — three concurrent requests coalesced into one computation.</p>
+    </div>
+
+    <p>
+        <strong>Why broadcast channels?</strong> Tokio's <code>broadcast</code> channel supports multiple receivers and clones the message to each. This is a natural fit for deduplication: the producer sends once, and all subscribers receive a copy. Alternative designs using <code>oneshot</code> channels would require N channels for N subscribers, complicating both allocation and cleanup. With broadcast, the subscriber count is unbounded and dynamic — new subscribers can attach at any point before the send.
+    </p>
+
+    <p>
+        <strong>Capacity tuning:</strong> The channel capacity (default: 16) determines how many results can be buffered if subscribers are slow to receive. In practice, subscribers are fast (they clone a <code>Bytes</code> handle, which is a reference-counted pointer — not a deep copy), so a small capacity suffices. If the channel fills, <code>send()</code> drops the oldest message, but this is harmless because the producer also returns the result directly to its own caller.
+    </p>
+
+    <p>
+        <strong>Error propagation:</strong> If the producer task panics or is cancelled, the broadcast channel is dropped, and all subscribers receive a <code>RecvError</code>. This is converted into a <code>DerivaError::ComputeFailed</code>, ensuring that subscribers never hang indefinitely — they either receive the result or an explicit error.
+    </p>
+
+    <h3>4.3 Deadlock-Free Semaphore Placement</h3>
+    
+    <p>
+        A semaphore limits concurrent compute operations to prevent resource exhaustion (CPU, memory). The critical design question is not <em>whether</em> to use a semaphore, but <em>when</em> to acquire it. The ordering of semaphore acquisition relative to input resolution determines whether the system can deadlock.
+    </p>
+
+    <p>
+        The problem arises in diamond-shaped DAGs — the most common non-trivial topology. Consider recipe <code>D = h(B, C)</code> where both <code>B</code> and <code>C</code> depend on leaf <code>A</code>. Three tasks are spawned: T1 for B, T2 for C, and T3 for D. If the semaphore is acquired <em>before</em> input resolution, T3 holds a permit while waiting for B and C to complete. But B and C need permits to compute. With <code>max_concurrency=2</code>, all three permits are consumed (T1, T2, T3), and T1/T2 cannot start because T3 holds the last permit — classic circular wait.
+    </p>
+
+    <p>
+        The solution is to acquire the semaphore <em>after</em> input resolution. A task waits for all its inputs without holding any permit, then acquires a permit only for the brief compute step. This eliminates circular wait: permits are held only during actual computation, never during dependency resolution.
+    </p>
+
+    <p>
+        The following visualization demonstrates both orderings on the same diamond DAG with <code>max_concurrency=2</code>. Click to toggle:
+    </p>
+
+    <div style="text-align: center; margin: 1.5em 0;">
+      <svg id="sem-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 530" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="530" rx="12" fill="#1a1e2e"/>
+
+        <!-- Shared: Diamond DAG (top-left) -->
+        <circle cx="120" cy="60" r="20" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="120" y="66" text-anchor="middle" fill="#e0e0e0" font-size="13" font-weight="bold">A</text>
+        <text x="120" y="42" text-anchor="middle" fill="#90a4ae" font-size="8">leaf</text>
+
+        <circle cx="60" cy="150" r="20" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="60" y="156" text-anchor="middle" fill="#e0e0e0" font-size="13" font-weight="bold">B</text>
+
+        <circle cx="180" cy="150" r="20" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="180" y="156" text-anchor="middle" fill="#e0e0e0" font-size="13" font-weight="bold">C</text>
+
+        <circle cx="120" cy="240" r="20" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="120" y="246" text-anchor="middle" fill="#e0e0e0" font-size="13" font-weight="bold">D</text>
+
+        <!-- Static dim edges -->
+        <line x1="108" y1="78" x2="72" y2="132" stroke="#3a3f5c" stroke-width="1.5"/>
+        <line x1="132" y1="78" x2="168" y2="132" stroke="#3a3f5c" stroke-width="1.5"/>
+        <line x1="72" y1="168" x2="108" y2="222" stroke="#3a3f5c" stroke-width="1.5"/>
+        <line x1="168" y1="168" x2="132" y2="222" stroke="#3a3f5c" stroke-width="1.5"/>
+
+        <!-- Semaphore gauge -->
+        <text x="120" y="290" text-anchor="middle" fill="#90a4ae" font-size="10">Semaphore: max = 2</text>
+        <rect x="50" y="298" width="140" height="14" rx="3" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+
+        <!-- State 0: WRONG — deadlock -->
+        <g id="sem-s0" opacity="1">
+          <text x="560" y="35" text-anchor="middle" fill="#e74c3c" font-size="16" font-weight="bold">&#x274C; Wrong: acquire &#x2192; resolve &#x2192; compute</text>
+          <text x="560" y="55" text-anchor="middle" fill="#b0bec5" font-size="12">Tasks hold permits while waiting for inputs</text>
+
+          <!-- Semaphore full -->
+          <rect x="50" y="298" width="140" height="14" rx="3" fill="#e74c3c" opacity="0.5">
+            <animate attributeName="opacity" values="0.5;0.8;0.5" dur="1.5s" repeatCount="indefinite"/>
+          </rect>
+          <text x="120" y="325" text-anchor="middle" fill="#e74c3c" font-size="9" font-weight="bold">2/2 permits held &#x2014; FULL</text>
+
+          <!-- DAG edge animations: T1 tries A->B, T2 tries A->C, T3 tries B->D + C->D but stuck -->
+          <!-- T1: A->B lit red, dot stuck halfway -->
+          <line x1="108" y1="78" x2="72" y2="132" stroke="#e74c3c" stroke-width="2.5" opacity="0.6"/>
+          <circle r="5" fill="#e74c3c">
+            <animateMotion dur="1.5s" repeatCount="indefinite" path="M108,78 L90,105"/>
+            <animate attributeName="opacity" values="1;0.3;1" dur="1.5s" repeatCount="indefinite"/>
+          </circle>
+          <!-- T2: A->C lit red, dot stuck halfway -->
+          <line x1="132" y1="78" x2="168" y2="132" stroke="#e74c3c" stroke-width="2.5" opacity="0.6"/>
+          <circle r="5" fill="#e74c3c">
+            <animateMotion dur="1.5s" begin="0.2s" repeatCount="indefinite" path="M132,78 L150,105"/>
+            <animate attributeName="opacity" values="1;0.3;1" dur="1.5s" repeatCount="indefinite"/>
+          </circle>
+          <!-- T3: D waiting — pulsing red ring -->
+          <circle cx="120" cy="240" r="26" fill="none" stroke="#e74c3c" stroke-width="2.5" stroke-dasharray="5,4">
+            <animate attributeName="stroke-dashoffset" from="0" to="18" dur="1s" repeatCount="indefinite"/>
+          </circle>
+          <!-- Blocked arrows B->D and C->D: dashed, no dots -->
+          <line x1="72" y1="168" x2="108" y2="222" stroke="#e74c3c" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.3"/>
+          <line x1="168" y1="168" x2="132" y2="222" stroke="#e74c3c" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.3"/>
+          <!-- Task labels on DAG -->
+          <text x="38" y="145" fill="#e74c3c" font-size="8" font-weight="bold">T1</text>
+          <text x="202" y="145" fill="#e74c3c" font-size="8" font-weight="bold">T2</text>
+          <text x="145" y="245" fill="#e74c3c" font-size="8" font-weight="bold">T3</text>
+
+          <!-- Timeline -->
+          <rect x="240" y="70" width="620" height="220" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1"/>
+          <text x="260" y="95" fill="#e74c3c" font-size="11" font-weight="bold">T1 (B):</text>
+          <rect x="340" y="82" width="60" height="18" rx="3" fill="#e74c3c" opacity="0.4"/>
+          <text x="370" y="95" text-anchor="middle" fill="#fff" font-size="9">permit</text>
+          <rect x="400" y="82" width="120" height="18" rx="3" fill="#e74c3c" opacity="0.6"/>
+          <text x="460" y="95" text-anchor="middle" fill="#fff" font-size="9">computing B&#x2026;</text>
+
+          <text x="260" y="125" fill="#e74c3c" font-size="11" font-weight="bold">T2 (C):</text>
+          <rect x="340" y="112" width="60" height="18" rx="3" fill="#e74c3c" opacity="0.4"/>
+          <text x="370" y="125" text-anchor="middle" fill="#fff" font-size="9">permit</text>
+          <rect x="400" y="112" width="180" height="18" rx="3" fill="#e74c3c" opacity="0.6"/>
+          <text x="490" y="125" text-anchor="middle" fill="#fff" font-size="9">computing C&#x2026;</text>
+
+          <text x="260" y="155" fill="#e74c3c" font-size="11" font-weight="bold">T3 (D):</text>
+          <rect x="340" y="142" width="60" height="18" rx="3" fill="#e74c3c" opacity="0.4"/>
+          <text x="370" y="155" text-anchor="middle" fill="#fff" font-size="9">permit</text>
+          <rect x="400" y="142" width="300" height="18" rx="3" fill="#e74c3c" opacity="0.15" stroke="#e74c3c" stroke-width="1" stroke-dasharray="4,3"/>
+          <text x="550" y="155" text-anchor="middle" fill="#e74c3c" font-size="9">waiting for B, C&#x2026; (holds permit!)</text>
+
+          <text x="450" y="195" text-anchor="middle" fill="#e74c3c" font-size="20">&#x26A0;&#xFE0F;</text>
+          <text x="450" y="215" text-anchor="middle" fill="#e74c3c" font-size="12" font-weight="bold">DEADLOCK</text>
+          <text x="450" y="235" text-anchor="middle" fill="#b0bec5" font-size="11">T3 holds permit but waits for T1/T2. T1/T2 need permits to start.</text>
+          <text x="450" y="253" text-anchor="middle" fill="#b0bec5" font-size="11">Circular wait &#x2014; no task can make progress.</text>
+          <text x="450" y="278" text-anchor="middle" fill="#e74c3c" font-size="10">With max_concurrency = N, any DAG deeper than N triggers this.</text>
+        </g>
+
+        <!-- State 1: CORRECT — deadlock-free -->
+        <g id="sem-s1" opacity="0">
+          <text x="560" y="35" text-anchor="middle" fill="#2ecc71" font-size="16" font-weight="bold">&#x2705; Correct: resolve &#x2192; acquire &#x2192; compute</text>
+          <text x="560" y="55" text-anchor="middle" fill="#b0bec5" font-size="12">Tasks wait for inputs without holding permits</text>
+
+          <!-- Semaphore cycles -->
+          <rect x="50" y="298" width="70" height="14" rx="3" fill="#2ecc71" opacity="0.5">
+            <animate attributeName="width" values="70;140;70;0;70;140;70" dur="8s" repeatCount="indefinite"/>
+          </rect>
+          <text x="120" y="325" text-anchor="middle" fill="#2ecc71" font-size="9" font-weight="bold">permits cycle &#x2014; never exhausted</text>
+
+          <!-- DAG animations: dots flow smoothly through the full diamond -->
+          <!-- Phase 1: A->B and A->C simultaneously (green dots) -->
+          <line x1="108" y1="78" x2="72" y2="132" stroke="#2ecc71" stroke-width="2.5">
+            <animate attributeName="opacity" values="0.8;0.8;0.2;0.2" dur="8s" repeatCount="indefinite"/>
+          </line>
+          <line x1="132" y1="78" x2="168" y2="132" stroke="#2ecc71" stroke-width="2.5">
+            <animate attributeName="opacity" values="0.8;0.8;0.2;0.2" dur="8s" repeatCount="indefinite"/>
+          </line>
+          <circle r="5" fill="#2ecc71">
+            <animateMotion dur="2s" repeatCount="indefinite" path="M108,78 L72,132"/>
+            <animate attributeName="opacity" values="1;1;0;0" dur="8s" repeatCount="indefinite"/>
+          </circle>
+          <circle r="5" fill="#2ecc71">
+            <animateMotion dur="2s" begin="0.2s" repeatCount="indefinite" path="M132,78 L168,132"/>
+            <animate attributeName="opacity" values="1;1;0;0" dur="8s" repeatCount="indefinite"/>
+          </circle>
+
+          <!-- Phase 2: B->D and C->D (after B/C done) -->
+          <line x1="72" y1="168" x2="108" y2="222" stroke="#2ecc71" stroke-width="2.5">
+            <animate attributeName="opacity" values="0.2;0.2;0.8;0.2" dur="8s" repeatCount="indefinite"/>
+          </line>
+          <line x1="168" y1="168" x2="132" y2="222" stroke="#2ecc71" stroke-width="2.5">
+            <animate attributeName="opacity" values="0.2;0.2;0.8;0.2" dur="8s" repeatCount="indefinite"/>
+          </line>
+          <circle r="5" fill="#2ecc71">
+            <animateMotion dur="2s" begin="4s" repeatCount="indefinite" path="M72,168 L108,222"/>
+            <animate attributeName="opacity" values="0;0;1;0" dur="8s" repeatCount="indefinite"/>
+          </circle>
+          <circle r="5" fill="#2ecc71">
+            <animateMotion dur="2s" begin="4s" repeatCount="indefinite" path="M168,168 L132,222"/>
+            <animate attributeName="opacity" values="0;0;1;0" dur="8s" repeatCount="indefinite"/>
+          </circle>
+
+          <!-- D success pulse -->
+          <circle cx="120" cy="240" r="26" fill="none" stroke="#2ecc71" stroke-width="2">
+            <animate attributeName="opacity" values="0;0;0;1;0" dur="8s" repeatCount="indefinite"/>
+            <animate attributeName="r" values="26;32;26" dur="1s" begin="6s" repeatCount="indefinite"/>
+          </circle>
+
+          <!-- Task labels on DAG -->
+          <text x="38" y="145" fill="#2ecc71" font-size="8" font-weight="bold">T1</text>
+          <text x="202" y="145" fill="#2ecc71" font-size="8" font-weight="bold">T2</text>
+          <text x="145" y="245" fill="#2ecc71" font-size="8" font-weight="bold">T3</text>
+
+          <!-- Timeline -->
+          <rect x="240" y="70" width="620" height="220" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="260" y="95" fill="#2ecc71" font-size="11" font-weight="bold">T1 (B):</text>
+          <rect x="340" y="82" width="80" height="18" rx="3" fill="#90a4ae" opacity="0.3"/>
+          <text x="380" y="95" text-anchor="middle" fill="#90a4ae" font-size="9">resolve A</text>
+          <rect x="420" y="82" width="100" height="18" rx="3" fill="#2ecc71" opacity="0.5"/>
+          <text x="470" y="95" text-anchor="middle" fill="#fff" font-size="9">permit + compute B</text>
+          <text x="530" y="95" fill="#2ecc71" font-size="9">&#x2713; release</text>
+
+          <text x="260" y="125" fill="#2ecc71" font-size="11" font-weight="bold">T2 (C):</text>
+          <rect x="340" y="112" width="80" height="18" rx="3" fill="#90a4ae" opacity="0.3"/>
+          <text x="380" y="125" text-anchor="middle" fill="#90a4ae" font-size="9">resolve A</text>
+          <rect x="420" y="112" width="150" height="18" rx="3" fill="#2ecc71" opacity="0.5"/>
+          <text x="495" y="125" text-anchor="middle" fill="#fff" font-size="9">permit + compute C</text>
+          <text x="580" y="125" fill="#2ecc71" font-size="9">&#x2713; release</text>
+
+          <text x="260" y="155" fill="#2ecc71" font-size="11" font-weight="bold">T3 (D):</text>
+          <rect x="340" y="142" width="230" height="18" rx="3" fill="#90a4ae" opacity="0.3"/>
+          <text x="455" y="155" text-anchor="middle" fill="#90a4ae" font-size="9">waiting for B, C (no permit held)</text>
+          <rect x="580" y="142" width="80" height="18" rx="3" fill="#2ecc71" opacity="0.5"/>
+          <text x="620" y="155" text-anchor="middle" fill="#fff" font-size="9">permit + D</text>
+          <text x="670" y="155" fill="#2ecc71" font-size="9">&#x2713;</text>
+
+          <text x="450" y="195" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">No deadlock &#x2014; permits flow freely</text>
+          <text x="450" y="215" text-anchor="middle" fill="#b0bec5" font-size="11">T3 waits for B and C without consuming a permit.</text>
+          <text x="450" y="233" text-anchor="middle" fill="#b0bec5" font-size="11">When B/C finish, their permits are released. T3 then acquires one.</text>
+          <text x="450" y="258" text-anchor="middle" fill="#2ecc71" font-size="10">Invariant: permits are held only during actual computation (step 8).</text>
+          <text x="450" y="278" text-anchor="middle" fill="#b0bec5" font-size="10">Works for any DAG depth &#x2014; no circular wait is possible.</text>
+        </g>
+
+        <!-- Code snippet (always visible) -->
+        <rect x="240" y="340" width="620" height="70" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text x="260" y="360" fill="#b0bec5" font-size="10">// Step 6: resolve inputs (NO permit held)</text>
+        <text x="260" y="376" fill="#81d4fa" font-size="10" font-family="Consolas, monospace">let input_bytes = try_join_all(futures).await?;</text>
+        <text x="260" y="392" fill="#b0bec5" font-size="10">// Step 7: acquire ONLY for compute</text>
+        <text x="260" y="408" fill="#81d4fa" font-size="10" font-family="Consolas, monospace">let _permit = self.semaphore.acquire().await?;</text>
+
+        <text x="450" y="440" text-anchor="middle" fill="#90a4ae" font-size="11">_permit held via RAII &#x2014; automatically released when it goes out of scope after step 8.</text>
+
+        <!-- Hint -->
+        <rect x="310" y="460" width="280" height="24" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text id="sem-hint" x="450" y="477" text-anchor="middle" fill="#90a4ae" font-size="11">Click to see correct ordering &#x2192;</text>
+      </svg>
+      <p class="figure-caption">Figure 8: Semaphore-based concurrency control — compute-only vs full-scope permit holding.</p>
+    </div>
+
+
+    <p>
+        The <code>_permit</code> variable holds the semaphore permit via RAII — when it goes out of scope (after step 8), the permit is automatically released. This ensures permits are held for the minimum duration: only during compute, never during input resolution, broadcasting, or cleanup. The guarantee is structural, not convention-based — Rust's ownership system enforces it at compile time.
+    </p>
+
+    <h3>4.4 Parallel Input Resolution</h3>
+
+    <p>
+        Step 6 is where the materialization pipeline extracts parallelism from the DAG. Each recipe declares its inputs as a list of content addresses. The sequential executor resolved these one at a time — a <code>for</code> loop that blocked on each <code>materialize()</code> call before starting the next. For a recipe with N independent inputs, this serializes N independent computations into a chain, wasting all available concurrency.
+    </p>
+
+    <p>
+        The parallel executor replaces this loop with <code>try_join_all</code>: all N input futures are spawned simultaneously, and the executor waits for the entire batch to complete. The key insight is that inputs to a single recipe are always independent — they share no mutable state and cannot depend on each other (the DAG is acyclic). This makes parallel resolution a pure win: no synchronization overhead, no ordering constraints, just concurrent execution.
+    </p>
+
+    <div class="code-block">
+        <pre>
+let futures: Vec&lt;_&gt; = recipe.inputs.iter()
+    .map(|input_addr| self.materialize(*input_addr))
+    .collect();
+let input_bytes = futures::future::try_join_all(futures).await?;</pre>
+    </div>
+
+    <p>
+        <code>try_join_all</code> provides fail-fast semantics: if any input fails, the entire join returns immediately with that error, and remaining futures are dropped (canceled). This avoids wasting compute on inputs that will never be used. The alternative — <code>join_all</code> without the <code>try_</code> prefix — would wait for all futures even after a failure, collecting errors into a <code>Vec&lt;Result&gt;</code>. Since a single failed input makes the entire recipe uncomputable, fail-fast is the correct choice.
+    </p>
+
+    <p>
+        The following visualization shows the difference on a diamond DAG where <code>D = h(B, C)</code>. Click to toggle between sequential and parallel resolution:
+    </p>
+
+    <div style="text-align: center; margin: 1.5em 0;">
+      <svg id="resolve-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 440" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="440" rx="12" fill="#1a1e2e"/>
+
+        <!-- Shared: Diamond DAG (left) -->
+        <text x="120" y="25" text-anchor="middle" fill="#90a4ae" font-size="10">D = h(B, C)</text>
+        <circle cx="120" cy="55" r="18" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="120" y="60" text-anchor="middle" fill="#e0e0e0" font-size="12" font-weight="bold">A</text>
+        <text x="120" y="40" text-anchor="middle" fill="#90a4ae" font-size="7">leaf 0s</text>
+
+        <circle cx="60" cy="140" r="18" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="60" y="145" text-anchor="middle" fill="#e0e0e0" font-size="12" font-weight="bold">B</text>
+        <text x="60" y="165" text-anchor="middle" fill="#90a4ae" font-size="7">f(A) 2s</text>
+
+        <circle cx="180" cy="140" r="18" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="180" y="145" text-anchor="middle" fill="#e0e0e0" font-size="12" font-weight="bold">C</text>
+        <text x="180" y="165" text-anchor="middle" fill="#90a4ae" font-size="7">g(A) 3s</text>
+
+        <circle cx="120" cy="225" r="18" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="120" y="230" text-anchor="middle" fill="#e0e0e0" font-size="12" font-weight="bold">D</text>
+        <text x="120" y="250" text-anchor="middle" fill="#90a4ae" font-size="7">h(B,C) 1s</text>
+
+        <!-- Static dim edges -->
+        <line x1="108" y1="71" x2="72" y2="124" stroke="#3a3f5c" stroke-width="1.5"/>
+        <line x1="132" y1="71" x2="168" y2="124" stroke="#3a3f5c" stroke-width="1.5"/>
+        <line x1="72" y1="156" x2="108" y2="209" stroke="#3a3f5c" stroke-width="1.5"/>
+        <line x1="168" y1="156" x2="132" y2="209" stroke="#3a3f5c" stroke-width="1.5"/>
+
+        <!-- State 0: SEQUENTIAL -->
+        <g id="res-s0" opacity="1">
+          <text x="560" y="30" text-anchor="middle" fill="#f39c12" font-size="15" font-weight="bold">Sequential: for loop — one at a time</text>
+          <text x="560" y="48" text-anchor="middle" fill="#b0bec5" font-size="11">Each input blocks until complete before the next starts</text>
+
+          <!-- DAG: A->B first (orange), then A->C (orange, delayed) -->
+          <line x1="108" y1="71" x2="72" y2="124" stroke="#f39c12" stroke-width="2.5" opacity="0.7"/>
+          <circle r="4" fill="#f39c12">
+            <animateMotion dur="2s" repeatCount="indefinite" path="M108,71 L72,124"/>
+            <animate attributeName="opacity" values="1;1;0;0;0;0" dur="6s" repeatCount="indefinite"/>
+          </circle>
+          <line x1="132" y1="71" x2="168" y2="124" stroke="#f39c12" stroke-width="2.5" opacity="0.3">
+            <animate attributeName="opacity" values="0.3;0.3;0.7;0.7;0.3;0.3" dur="6s" repeatCount="indefinite"/>
+          </line>
+          <circle r="4" fill="#f39c12">
+            <animateMotion dur="3s" begin="2s" repeatCount="indefinite" path="M132,71 L168,124"/>
+            <animate attributeName="opacity" values="0;0;1;1;0;0" dur="6s" repeatCount="indefinite"/>
+          </circle>
+          <!-- B->D then C->D (sequential, after each completes) -->
+          <circle r="4" fill="#f39c12">
+            <animateMotion dur="1s" begin="2s" repeatCount="indefinite" path="M72,156 L108,209"/>
+            <animate attributeName="opacity" values="0;1;0;0;0;0" dur="6s" repeatCount="indefinite"/>
+          </circle>
+          <circle r="4" fill="#f39c12">
+            <animateMotion dur="1s" begin="5s" repeatCount="indefinite" path="M168,156 L132,209"/>
+            <animate attributeName="opacity" values="0;0;0;0;0;1" dur="6s" repeatCount="indefinite"/>
+          </circle>
+
+          <!-- Timeline panel -->
+          <rect x="260" y="65" width="600" height="200" rx="8" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+          <!-- Time axis -->
+          <line x1="340" y1="240" x2="830" y2="240" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="340" y="255" fill="#90a4ae" font-size="8">0s</text>
+          <text x="438" y="255" fill="#90a4ae" font-size="8">1s</text>
+          <text x="536" y="255" fill="#90a4ae" font-size="8">2s</text>
+          <text x="634" y="255" fill="#90a4ae" font-size="8">3s</text>
+          <text x="732" y="255" fill="#90a4ae" font-size="8">4s</text>
+          <text x="830" y="255" fill="#90a4ae" font-size="8">5s</text>
+
+          <!-- Resolve B: 0-2s -->
+          <text x="280" y="95" fill="#f39c12" font-size="11" font-weight="bold">B:</text>
+          <rect x="340" y="82" width="196" height="20" rx="3" fill="#f39c12" opacity="0.5"/>
+          <text x="438" y="96" text-anchor="middle" fill="#fff" font-size="9">materialize(B) — 2s</text>
+
+          <!-- Resolve C: 2-5s (waits for B!) -->
+          <text x="280" y="125" fill="#f39c12" font-size="11" font-weight="bold">C:</text>
+          <rect x="340" y="112" width="196" height="20" rx="3" fill="#3a3f5c" opacity="0.3"/>
+          <text x="438" y="126" text-anchor="middle" fill="#90a4ae" font-size="9">idle (waiting for B)</text>
+          <rect x="536" y="112" width="294" height="20" rx="3" fill="#f39c12" opacity="0.5"/>
+          <text x="683" y="126" text-anchor="middle" fill="#fff" font-size="9">materialize(C) — 3s</text>
+
+          <!-- Compute D: 5-6s -->
+          <text x="280" y="155" fill="#f39c12" font-size="11" font-weight="bold">D:</text>
+          <rect x="340" y="142" width="490" height="20" rx="3" fill="#3a3f5c" opacity="0.15"/>
+          <text x="585" y="156" text-anchor="middle" fill="#90a4ae" font-size="9">waiting for B, then C</text>
+
+          <!-- Total -->
+          <text x="560" y="190" text-anchor="middle" fill="#f39c12" font-size="13" font-weight="bold">Total input resolution: 2 + 3 = 5s</text>
+          <text x="560" y="210" text-anchor="middle" fill="#b0bec5" font-size="11">C cannot start until B finishes — wasted concurrency</text>
+          <text x="560" y="228" text-anchor="middle" fill="#90a4ae" font-size="10">for input_addr in &amp;recipe.inputs { materialize(*input_addr)?; }</text>
+        </g>
+
+        <!-- State 1: PARALLEL -->
+        <g id="res-s1" opacity="0">
+          <text x="560" y="30" text-anchor="middle" fill="#2ecc71" font-size="15" font-weight="bold">Parallel: try_join_all — all at once</text>
+          <text x="560" y="48" text-anchor="middle" fill="#b0bec5" font-size="11">All inputs spawned simultaneously, wait for slowest</text>
+
+          <!-- DAG: A->B and A->C simultaneously (green) -->
+          <line x1="108" y1="71" x2="72" y2="124" stroke="#2ecc71" stroke-width="2.5" opacity="0.7"/>
+          <line x1="132" y1="71" x2="168" y2="124" stroke="#2ecc71" stroke-width="2.5" opacity="0.7"/>
+          <circle r="4" fill="#2ecc71">
+            <animateMotion dur="2s" repeatCount="indefinite" path="M108,71 L72,124"/>
+          </circle>
+          <circle r="4" fill="#2ecc71">
+            <animateMotion dur="2s" begin="0.15s" repeatCount="indefinite" path="M132,71 L168,124"/>
+          </circle>
+          <!-- B->D and C->D converge -->
+          <line x1="72" y1="156" x2="108" y2="209" stroke="#2ecc71" stroke-width="2.5">
+            <animate attributeName="opacity" values="0.3;0.3;0.7;0.3" dur="6s" repeatCount="indefinite"/>
+          </line>
+          <line x1="168" y1="156" x2="132" y2="209" stroke="#2ecc71" stroke-width="2.5">
+            <animate attributeName="opacity" values="0.3;0.3;0.3;0.7" dur="6s" repeatCount="indefinite"/>
+          </line>
+          <circle r="4" fill="#2ecc71">
+            <animateMotion dur="1.5s" begin="2s" repeatCount="indefinite" path="M72,156 L108,209"/>
+            <animate attributeName="opacity" values="0;0;1;0" dur="6s" repeatCount="indefinite"/>
+          </circle>
+          <circle r="4" fill="#2ecc71">
+            <animateMotion dur="1.5s" begin="3s" repeatCount="indefinite" path="M168,156 L132,209"/>
+            <animate attributeName="opacity" values="0;0;0;1" dur="6s" repeatCount="indefinite"/>
+          </circle>
+          <!-- D success pulse -->
+          <circle cx="120" cy="225" r="24" fill="none" stroke="#2ecc71" stroke-width="2">
+            <animate attributeName="opacity" values="0;0;0;0;1;0" dur="6s" repeatCount="indefinite"/>
+            <animate attributeName="r" values="24;30;24" dur="1s" begin="5s" repeatCount="indefinite"/>
+          </circle>
+
+          <!-- Timeline panel -->
+          <rect x="260" y="65" width="600" height="200" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <!-- Time axis -->
+          <line x1="340" y1="240" x2="830" y2="240" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="340" y="255" fill="#90a4ae" font-size="8">0s</text>
+          <text x="503" y="255" fill="#90a4ae" font-size="8">1s</text>
+          <text x="667" y="255" fill="#90a4ae" font-size="8">2s</text>
+          <text x="830" y="255" fill="#90a4ae" font-size="8">3s</text>
+
+          <!-- Resolve B: 0-2s -->
+          <text x="280" y="95" fill="#2ecc71" font-size="11" font-weight="bold">B:</text>
+          <rect x="340" y="82" width="327" height="20" rx="3" fill="#2ecc71" opacity="0.5"/>
+          <text x="503" y="96" text-anchor="middle" fill="#fff" font-size="9">materialize(B) — 2s</text>
+          <text x="675" y="96" fill="#2ecc71" font-size="9">&#x2713; done</text>
+
+          <!-- Resolve C: 0-3s (parallel!) -->
+          <text x="280" y="125" fill="#2ecc71" font-size="11" font-weight="bold">C:</text>
+          <rect x="340" y="112" width="490" height="20" rx="3" fill="#2ecc71" opacity="0.5"/>
+          <text x="585" y="126" text-anchor="middle" fill="#fff" font-size="9">materialize(C) — 3s</text>
+          <text x="838" y="126" fill="#2ecc71" font-size="9">&#x2713; done</text>
+
+          <!-- Overlap indicator -->
+          <line x1="340" y1="80" x2="340" y2="135" stroke="#2ecc71" stroke-width="1" stroke-dasharray="3,2" opacity="0.5"/>
+          <text x="330" y="75" fill="#2ecc71" font-size="7" text-anchor="end">both start</text>
+
+          <!-- Compute D: after max(B,C) = 3s -->
+          <text x="280" y="155" fill="#2ecc71" font-size="11" font-weight="bold">D:</text>
+          <rect x="340" y="142" width="490" height="20" rx="3" fill="#90a4ae" opacity="0.15"/>
+          <text x="585" y="156" text-anchor="middle" fill="#90a4ae" font-size="9">waiting for max(B, C)</text>
+
+          <!-- Total -->
+          <text x="560" y="190" text-anchor="middle" fill="#2ecc71" font-size="13" font-weight="bold">Total input resolution: max(2, 3) = 3s</text>
+          <text x="560" y="210" text-anchor="middle" fill="#b0bec5" font-size="11">B and C overlap — wall-clock time = slowest input only</text>
+          <text x="560" y="228" text-anchor="middle" fill="#2ecc71" font-size="10">Speedup: 5s &#x2192; 3s (1.67&#xD7;) — grows with fan-in width</text>
+        </g>
+
+        <!-- Shared: code snippet -->
+        <rect x="260" y="280" width="600" height="55" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text x="280" y="298" fill="#b0bec5" font-size="10">// Step 6: resolve all inputs concurrently</text>
+        <text x="280" y="314" fill="#81d4fa" font-size="10" font-family="Consolas, monospace">let futures = recipe.inputs.iter().map(|a| self.materialize(*a)).collect();</text>
+        <text x="280" y="330" fill="#81d4fa" font-size="10" font-family="Consolas, monospace">let input_bytes = try_join_all(futures).await?; <tspan fill="#b0bec5">// fail-fast</tspan></text>
+
+        <!-- Scaling note -->
+        <text x="450" y="360" text-anchor="middle" fill="#90a4ae" font-size="10">Fan-in scaling: 10 inputs &#xD7; 1s each &#x2192; sequential 10s vs parallel ~1s (10&#xD7; speedup)</text>
+
+        <!-- Hint -->
+        <rect x="310" y="375" width="280" height="24" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text id="res-hint" x="450" y="392" text-anchor="middle" fill="#90a4ae" font-size="11">Click to see parallel resolution &#x2192;</text>
+      </svg>
+      <p class="figure-caption">Figure 9: Input resolution — sequential vs parallel dependency fetching on a diamond DAG.</p>
+    </div>
+
+    <p>
+        For wider fan-in patterns, the speedup scales linearly. A recipe with 10 independent inputs, each taking 1 second, completes in ~1 second with parallel resolution versus 10 seconds sequentially — a 10&#xD7; improvement. This is common in aggregation recipes that combine many leaf computations.
+    </p>
+
+    <p>
+        The fail-fast behavior of <code>try_join_all</code> is equally important for error handling. If input 3 of 10 fails after 0.5 seconds, the remaining 9 futures are dropped immediately rather than running to completion. This prevents wasted work: since a single failed input makes the recipe uncomputable, there is no value in resolving the remaining inputs. The alternative — <code>join_all</code> without the <code>try_</code> prefix — would wait for all 10 futures and collect errors into a <code>Vec&lt;Result&gt;</code>, wasting up to 9 seconds of compute on inputs that will never be used.
+    </p>
+
+    <h3>4.5 Input Assembly: Deterministic Ordering</h3>
+
+    <p>
+        Parallel input resolution introduces a subtle correctness requirement: the compute function must receive its inputs in the same order every time, regardless of which input finishes first. In a content-addressed system, the output address is a hash of the computation — if the same recipe produces different byte orderings on different runs, it produces different content addresses, breaking the fundamental invariant that identical computations yield identical addresses.
+    </p>
+
+    <p>
+        <code>try_join_all</code> solves this through positional slot collection. Internally, it allocates a <code>Vec</code> with one slot per future, indexed by position. As futures complete (in any order), each result is placed into its pre-assigned slot. The returned <code>Vec&lt;Bytes&gt;</code> always matches the order of the input iterator, not the order of completion. This is a property of the combinator itself — no additional sorting or reordering is needed.
+    </p>
+
+    <p>
+        The following visualization demonstrates this on <code>D = h(B, C)</code>. Two runs resolve B and C in different orders, but the assembled input vector is identical. Click to toggle between scenarios:
+    </p>
+
+    <div style="text-align: center; margin: 1.5em 0;">
+      <svg id="order-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 420" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="420" rx="12" fill="#1a1e2e"/>
+
+        <!-- Shared: slot diagram (bottom) -->
+        <text x="450" y="310" text-anchor="middle" fill="#e0e0e0" font-size="13" font-weight="bold">Assembled input_bytes: Vec&lt;Bytes&gt;</text>
+        <rect x="260" y="320" width="180" height="36" rx="4" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="350" y="343" text-anchor="middle" fill="#81d4fa" font-size="12" font-weight="bold">[0] bytes_B</text>
+        <rect x="460" y="320" width="180" height="36" rx="4" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="550" y="343" text-anchor="middle" fill="#81d4fa" font-size="12" font-weight="bold">[1] bytes_C</text>
+        <text x="450" y="375" text-anchor="middle" fill="#2ecc71" font-size="11" font-weight="bold">&#x2705; Same order in both scenarios — deterministic CAddr</text>
+
+        <!-- State 0: B finishes first -->
+        <g id="ord-s0" opacity="1">
+          <text x="450" y="30" text-anchor="middle" fill="#81d4fa" font-size="15" font-weight="bold">Scenario 1: B completes before C</text>
+          <text x="450" y="50" text-anchor="middle" fill="#b0bec5" font-size="11">B takes 1s, C takes 3s — B lands in slot [0] first</text>
+
+          <!-- Timeline -->
+          <rect x="80" y="70" width="740" height="110" rx="8" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <!-- Time axis -->
+          <line x1="200" y1="165" x2="780" y2="165" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="200" y="178" fill="#90a4ae" font-size="8">0s</text>
+          <text x="393" y="178" fill="#90a4ae" font-size="8">1s</text>
+          <text x="587" y="178" fill="#90a4ae" font-size="8">2s</text>
+          <text x="780" y="178" fill="#90a4ae" font-size="8">3s</text>
+
+          <!-- B: 0-1s, finishes first -->
+          <text x="110" y="100" fill="#42a5f5" font-size="12" font-weight="bold">B [0]:</text>
+          <rect x="200" y="86" width="193" height="22" rx="3" fill="#42a5f5" opacity="0.5"/>
+          <text x="296" y="101" text-anchor="middle" fill="#fff" font-size="10">1s</text>
+          <text x="400" y="101" fill="#2ecc71" font-size="10">&#x2713; slot[0] filled</text>
+
+          <!-- C: 0-3s, finishes second -->
+          <text x="110" y="135" fill="#f39c12" font-size="12" font-weight="bold">C [1]:</text>
+          <rect x="200" y="121" width="580" height="22" rx="3" fill="#f39c12" opacity="0.5"/>
+          <text x="490" y="136" text-anchor="middle" fill="#fff" font-size="10">3s</text>
+          <text x="788" y="136" fill="#2ecc71" font-size="10">&#x2713; slot[1]</text>
+
+          <!-- Animated dots: B fills slot first, then C -->
+          <!-- B result flows to slot [0] -->
+          <circle r="5" fill="#42a5f5">
+            <animateMotion dur="4s" repeatCount="indefinite" path="M393,97 L393,200 L350,200 L350,320"/>
+            <animate attributeName="opacity" values="0;1;1;0;0;0;0;0" dur="4s" repeatCount="indefinite"/>
+          </circle>
+          <!-- C result flows to slot [1] -->
+          <circle r="5" fill="#f39c12">
+            <animateMotion dur="4s" begin="1s" repeatCount="indefinite" path="M780,132 L780,200 L550,200 L550,320"/>
+            <animate attributeName="opacity" values="0;0;0;0;1;1;0;0" dur="4s" repeatCount="indefinite"/>
+          </circle>
+
+          <!-- Completion order label -->
+          <text x="450" y="210" text-anchor="middle" fill="#b0bec5" font-size="11">Completion order: B first, then C</text>
+          <text x="450" y="228" text-anchor="middle" fill="#81d4fa" font-size="11">Assembly order: [bytes_B, bytes_C] — matches input iterator</text>
+
+          <!-- Slot fill indicators -->
+          <rect x="260" y="320" width="180" height="36" rx="4" fill="none" stroke="#42a5f5" stroke-width="2">
+            <animate attributeName="stroke-width" values="2;3;2" dur="2s" begin="1s" repeatCount="indefinite"/>
+          </rect>
+          <rect x="460" y="320" width="180" height="36" rx="4" fill="none" stroke="#f39c12" stroke-width="2">
+            <animate attributeName="stroke-width" values="2;3;2" dur="2s" begin="3s" repeatCount="indefinite"/>
+          </rect>
+        </g>
+
+        <!-- State 1: C finishes first -->
+        <g id="ord-s1" opacity="0">
+          <text x="450" y="30" text-anchor="middle" fill="#ce93d8" font-size="15" font-weight="bold">Scenario 2: C completes before B</text>
+          <text x="450" y="50" text-anchor="middle" fill="#b0bec5" font-size="11">B takes 3s, C takes 1s — C lands in slot [1] first</text>
+
+          <!-- Timeline -->
+          <rect x="80" y="70" width="740" height="110" rx="8" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <line x1="200" y1="165" x2="780" y2="165" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="200" y="178" fill="#90a4ae" font-size="8">0s</text>
+          <text x="393" y="178" fill="#90a4ae" font-size="8">1s</text>
+          <text x="587" y="178" fill="#90a4ae" font-size="8">2s</text>
+          <text x="780" y="178" fill="#90a4ae" font-size="8">3s</text>
+
+          <!-- B: 0-3s, finishes second -->
+          <text x="110" y="100" fill="#42a5f5" font-size="12" font-weight="bold">B [0]:</text>
+          <rect x="200" y="86" width="580" height="22" rx="3" fill="#42a5f5" opacity="0.5"/>
+          <text x="490" y="101" text-anchor="middle" fill="#fff" font-size="10">3s</text>
+          <text x="788" y="101" fill="#2ecc71" font-size="10">&#x2713; slot[0]</text>
+
+          <!-- C: 0-1s, finishes first -->
+          <text x="110" y="135" fill="#f39c12" font-size="12" font-weight="bold">C [1]:</text>
+          <rect x="200" y="121" width="193" height="22" rx="3" fill="#f39c12" opacity="0.5"/>
+          <text x="296" y="136" text-anchor="middle" fill="#fff" font-size="10">1s</text>
+          <text x="400" y="136" fill="#2ecc71" font-size="10">&#x2713; slot[1] filled</text>
+
+          <!-- Animated dots: C fills slot first, then B -->
+          <!-- C result flows to slot [1] first -->
+          <circle r="5" fill="#f39c12">
+            <animateMotion dur="4s" repeatCount="indefinite" path="M393,132 L393,200 L550,200 L550,320"/>
+            <animate attributeName="opacity" values="0;1;1;0;0;0;0;0" dur="4s" repeatCount="indefinite"/>
+          </circle>
+          <!-- B result flows to slot [0] second -->
+          <circle r="5" fill="#42a5f5">
+            <animateMotion dur="4s" begin="1s" repeatCount="indefinite" path="M780,97 L780,200 L350,200 L350,320"/>
+            <animate attributeName="opacity" values="0;0;0;0;1;1;0;0" dur="4s" repeatCount="indefinite"/>
+          </circle>
+
+          <!-- Completion order label -->
+          <text x="450" y="210" text-anchor="middle" fill="#b0bec5" font-size="11">Completion order: C first, then B</text>
+          <text x="450" y="228" text-anchor="middle" fill="#ce93d8" font-size="11">Assembly order: still [bytes_B, bytes_C] — slot position wins</text>
+
+          <!-- Slot fill indicators (reversed pulse order) -->
+          <rect x="460" y="320" width="180" height="36" rx="4" fill="none" stroke="#f39c12" stroke-width="2">
+            <animate attributeName="stroke-width" values="2;3;2" dur="2s" begin="1s" repeatCount="indefinite"/>
+          </rect>
+          <rect x="260" y="320" width="180" height="36" rx="4" fill="none" stroke="#42a5f5" stroke-width="2">
+            <animate attributeName="stroke-width" values="2;3;2" dur="2s" begin="3s" repeatCount="indefinite"/>
+          </rect>
+        </g>
+
+        <!-- Hint -->
+        <rect x="310" y="390" width="280" height="24" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text id="ord-hint" x="450" y="407" text-anchor="middle" fill="#90a4ae" font-size="11">Click to see reversed completion order &#x2192;</text>
+      </svg>
+      <p class="figure-caption">Figure 10: Deterministic input ordering — resolution order varies but assembled vector is identical.</p>
+    </div>
+
+    <p>
+        This guarantee is what makes parallel resolution safe in a content-addressed system. If <code>h(bytes_B, bytes_C)</code> and <code>h(bytes_C, bytes_B)</code> produced different outputs (as most functions do), parallel execution would be non-deterministic — the same recipe would produce different content addresses depending on scheduling. Positional slot collection eliminates this: the compute function always sees <code>[bytes_B, bytes_C]</code>, producing the same CAddr regardless of which future completed first.
+    </p>
+
+    <h3>4.6 Comparison with Original Executor</h3>
+
+    <p>
+        The original <code>Executor</code> was synchronous and single-threaded. It resolved inputs with a blocking <code>for</code> loop — each <code>materialize()</code> call blocked the thread until that input was fully computed before starting the next. There was no deduplication: if two recipes shared an input, it was computed twice. There was no concurrency limit: the call stack depth was the only bound on resource usage.
+    </p>
+
+    <div class="code-block">
+        <pre>
+// Original: Sequential, blocking, no dedup
+let mut input_bytes = Vec::new();
+for input_addr in &recipe.inputs {
+    let bytes = self.materialize(*input_addr)?;  // Blocking
+    input_bytes.push(bytes);
+}
+let output = func.execute(&input_bytes, &recipe.params)?;</pre>
+    </div>
+
+    <p>
+        The <code>AsyncExecutor</code> replaces every aspect of this design. Inputs are resolved concurrently via <code>try_join_all</code>. Broadcast channels deduplicate concurrent requests to the same address. A semaphore bounds resource usage. The compute step runs on a blocking thread pool via <code>spawn_blocking</code> to avoid starving the async runtime.
+    </p>
+
+    <div class="code-block">
+        <pre>
+// Current: Parallel, async, deduplicated, bounded
+let futures: Vec&lt;_&gt; = recipe.inputs.iter()
+    .map(|input_addr| self.materialize(*input_addr))
+    .collect();
+let input_bytes = futures::future::try_join_all(futures).await?;
+let _permit = self.semaphore.acquire().await?;
+let output = self.execute_verified(&addr, func, input_bytes, &recipe.params).await?;</pre>
+    </div>
+
+    <p>
+        The following visualization shows both executors on a 4-input fan-in recipe <code>E = f(A, B, C, D)</code> where each input takes ~2 seconds. Click to toggle:
+    </p>
+
+    <div style="text-align: center; margin: 1.5em 0;">
+      <svg id="cmp-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 400" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="400" rx="12" fill="#1a1e2e"/>
+
+        <!-- Shared: Fan-in DAG (left) -->
+        <text x="100" y="22" text-anchor="middle" fill="#90a4ae" font-size="9">E = f(A, B, C, D)</text>
+        <circle cx="40" cy="55" r="15" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+        <text x="40" y="60" text-anchor="middle" fill="#e0e0e0" font-size="11" font-weight="bold">A</text>
+        <circle cx="80" cy="55" r="15" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+        <text x="80" y="60" text-anchor="middle" fill="#e0e0e0" font-size="11" font-weight="bold">B</text>
+        <circle cx="120" cy="55" r="15" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+        <text x="120" y="60" text-anchor="middle" fill="#e0e0e0" font-size="11" font-weight="bold">C</text>
+        <circle cx="160" cy="55" r="15" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+        <text x="160" y="60" text-anchor="middle" fill="#e0e0e0" font-size="11" font-weight="bold">D</text>
+        <circle cx="100" cy="130" r="18" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="100" y="135" text-anchor="middle" fill="#e0e0e0" font-size="12" font-weight="bold">E</text>
+        <!-- Edges -->
+        <line x1="40" y1="70" x2="88" y2="115" stroke="#3a3f5c" stroke-width="1.2"/>
+        <line x1="80" y1="70" x2="95" y2="115" stroke="#3a3f5c" stroke-width="1.2"/>
+        <line x1="120" y1="70" x2="105" y2="115" stroke="#3a3f5c" stroke-width="1.2"/>
+        <line x1="160" y1="70" x2="112" y2="115" stroke="#3a3f5c" stroke-width="1.2"/>
+
+        <!-- State 0: Original (sequential) -->
+        <g id="cmp-s0" opacity="1">
+          <text x="530" y="30" text-anchor="middle" fill="#f39c12" font-size="15" font-weight="bold">Original Executor — Sequential</text>
+          <text x="530" y="48" text-anchor="middle" fill="#b0bec5" font-size="11">Blocking for loop, no dedup, no concurrency limit</text>
+
+          <!-- Animated dots: one at a time, sequential -->
+          <line x1="40" y1="70" x2="88" y2="115" stroke="#f39c12" stroke-width="2">
+            <animate attributeName="opacity" values="0.8;0.8;0.2;0.2;0.2;0.2;0.2;0.2" dur="8s" repeatCount="indefinite"/>
+          </line>
+          <circle r="4" fill="#f39c12">
+            <animateMotion dur="2s" repeatCount="indefinite" path="M40,70 L88,115"/>
+            <animate attributeName="opacity" values="1;1;0;0;0;0;0;0" dur="8s" repeatCount="indefinite"/>
+          </circle>
+          <line x1="80" y1="70" x2="95" y2="115" stroke="#f39c12" stroke-width="2">
+            <animate attributeName="opacity" values="0.2;0.2;0.8;0.8;0.2;0.2;0.2;0.2" dur="8s" repeatCount="indefinite"/>
+          </line>
+          <circle r="4" fill="#f39c12">
+            <animateMotion dur="2s" begin="2s" repeatCount="indefinite" path="M80,70 L95,115"/>
+            <animate attributeName="opacity" values="0;0;1;1;0;0;0;0" dur="8s" repeatCount="indefinite"/>
+          </circle>
+          <line x1="120" y1="70" x2="105" y2="115" stroke="#f39c12" stroke-width="2">
+            <animate attributeName="opacity" values="0.2;0.2;0.2;0.2;0.8;0.8;0.2;0.2" dur="8s" repeatCount="indefinite"/>
+          </line>
+          <circle r="4" fill="#f39c12">
+            <animateMotion dur="2s" begin="4s" repeatCount="indefinite" path="M120,70 L105,115"/>
+            <animate attributeName="opacity" values="0;0;0;0;1;1;0;0" dur="8s" repeatCount="indefinite"/>
+          </circle>
+          <line x1="160" y1="70" x2="112" y2="115" stroke="#f39c12" stroke-width="2">
+            <animate attributeName="opacity" values="0.2;0.2;0.2;0.2;0.2;0.2;0.8;0.8" dur="8s" repeatCount="indefinite"/>
+          </line>
+          <circle r="4" fill="#f39c12">
+            <animateMotion dur="2s" begin="6s" repeatCount="indefinite" path="M160,70 L112,115"/>
+            <animate attributeName="opacity" values="0;0;0;0;0;0;1;1" dur="8s" repeatCount="indefinite"/>
+          </circle>
+
+          <!-- Timeline -->
+          <rect x="220" y="65" width="650" height="170" rx="8" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+          <!-- Time axis -->
+          <line x1="300" y1="215" x2="840" y2="215" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="300" y="228" fill="#90a4ae" font-size="8">0s</text>
+          <text x="435" y="228" fill="#90a4ae" font-size="8">2s</text>
+          <text x="570" y="228" fill="#90a4ae" font-size="8">4s</text>
+          <text x="705" y="228" fill="#90a4ae" font-size="8">6s</text>
+          <text x="840" y="228" fill="#90a4ae" font-size="8">8s</text>
+
+          <text x="245" y="90" fill="#f39c12" font-size="10" font-weight="bold">A:</text>
+          <rect x="300" y="78" width="135" height="18" rx="3" fill="#f39c12" opacity="0.5"/>
+          <text x="367" y="91" text-anchor="middle" fill="#fff" font-size="9">2s</text>
+
+          <text x="245" y="112" fill="#f39c12" font-size="10" font-weight="bold">B:</text>
+          <rect x="300" y="100" width="135" height="18" rx="3" fill="#3a3f5c" opacity="0.2"/>
+          <rect x="435" y="100" width="135" height="18" rx="3" fill="#f39c12" opacity="0.5"/>
+          <text x="502" y="113" text-anchor="middle" fill="#fff" font-size="9">2s</text>
+
+          <text x="245" y="134" fill="#f39c12" font-size="10" font-weight="bold">C:</text>
+          <rect x="300" y="122" width="270" height="18" rx="3" fill="#3a3f5c" opacity="0.2"/>
+          <rect x="570" y="122" width="135" height="18" rx="3" fill="#f39c12" opacity="0.5"/>
+          <text x="637" y="135" text-anchor="middle" fill="#fff" font-size="9">2s</text>
+
+          <text x="245" y="156" fill="#f39c12" font-size="10" font-weight="bold">D:</text>
+          <rect x="300" y="144" width="405" height="18" rx="3" fill="#3a3f5c" opacity="0.2"/>
+          <rect x="705" y="144" width="135" height="18" rx="3" fill="#f39c12" opacity="0.5"/>
+          <text x="772" y="157" text-anchor="middle" fill="#fff" font-size="9">2s</text>
+
+          <!-- Total -->
+          <text x="530" y="185" text-anchor="middle" fill="#f39c12" font-size="13" font-weight="bold">Total: 2 + 2 + 2 + 2 = 8s</text>
+          <text x="530" y="203" text-anchor="middle" fill="#b0bec5" font-size="10">Each input waits for the previous — O(N &#xD7; T)</text>
+        </g>
+
+        <!-- State 1: AsyncExecutor (parallel) -->
+        <g id="cmp-s1" opacity="0">
+          <text x="530" y="30" text-anchor="middle" fill="#2ecc71" font-size="15" font-weight="bold">AsyncExecutor — Parallel + Dedup + Bounded</text>
+          <text x="530" y="48" text-anchor="middle" fill="#b0bec5" font-size="11">try_join_all, broadcast channels, semaphore</text>
+
+          <!-- Animated dots: all simultaneously -->
+          <line x1="40" y1="70" x2="88" y2="115" stroke="#2ecc71" stroke-width="2" opacity="0.7"/>
+          <line x1="80" y1="70" x2="95" y2="115" stroke="#2ecc71" stroke-width="2" opacity="0.7"/>
+          <line x1="120" y1="70" x2="105" y2="115" stroke="#2ecc71" stroke-width="2" opacity="0.7"/>
+          <line x1="160" y1="70" x2="112" y2="115" stroke="#2ecc71" stroke-width="2" opacity="0.7"/>
+          <circle r="4" fill="#2ecc71">
+            <animateMotion dur="2s" repeatCount="indefinite" path="M40,70 L88,115"/>
+          </circle>
+          <circle r="4" fill="#2ecc71">
+            <animateMotion dur="2s" begin="0.1s" repeatCount="indefinite" path="M80,70 L95,115"/>
+          </circle>
+          <circle r="4" fill="#2ecc71">
+            <animateMotion dur="2s" begin="0.2s" repeatCount="indefinite" path="M120,70 L105,115"/>
+          </circle>
+          <circle r="4" fill="#2ecc71">
+            <animateMotion dur="2s" begin="0.3s" repeatCount="indefinite" path="M160,70 L112,115"/>
+          </circle>
+          <!-- E success pulse -->
+          <circle cx="100" cy="130" r="22" fill="none" stroke="#2ecc71" stroke-width="2">
+            <animate attributeName="r" values="22;28;22" dur="2s" repeatCount="indefinite"/>
+            <animate attributeName="opacity" values="0.3;0.8;0.3" dur="2s" repeatCount="indefinite"/>
+          </circle>
+
+          <!-- Timeline -->
+          <rect x="220" y="65" width="650" height="170" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <line x1="300" y1="215" x2="840" y2="215" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="300" y="228" fill="#90a4ae" font-size="8">0s</text>
+          <text x="570" y="228" fill="#90a4ae" font-size="8">2s</text>
+
+          <text x="245" y="90" fill="#2ecc71" font-size="10" font-weight="bold">A:</text>
+          <rect x="300" y="78" width="270" height="18" rx="3" fill="#2ecc71" opacity="0.5"/>
+          <text x="435" y="91" text-anchor="middle" fill="#fff" font-size="9">2s</text>
+          <text x="578" y="91" fill="#2ecc71" font-size="9">&#x2713;</text>
+
+          <text x="245" y="112" fill="#2ecc71" font-size="10" font-weight="bold">B:</text>
+          <rect x="300" y="100" width="270" height="18" rx="3" fill="#2ecc71" opacity="0.5"/>
+          <text x="435" y="113" text-anchor="middle" fill="#fff" font-size="9">2s</text>
+          <text x="578" y="113" fill="#2ecc71" font-size="9">&#x2713;</text>
+
+          <text x="245" y="134" fill="#2ecc71" font-size="10" font-weight="bold">C:</text>
+          <rect x="300" y="122" width="270" height="18" rx="3" fill="#2ecc71" opacity="0.5"/>
+          <text x="435" y="135" text-anchor="middle" fill="#fff" font-size="9">2s</text>
+          <text x="578" y="135" fill="#2ecc71" font-size="9">&#x2713;</text>
+
+          <text x="245" y="156" fill="#2ecc71" font-size="10" font-weight="bold">D:</text>
+          <rect x="300" y="144" width="270" height="18" rx="3" fill="#2ecc71" opacity="0.5"/>
+          <text x="435" y="157" text-anchor="middle" fill="#fff" font-size="9">2s</text>
+          <text x="578" y="157" fill="#2ecc71" font-size="9">&#x2713;</text>
+
+          <!-- Overlap indicator -->
+          <line x1="300" y1="76" x2="300" y2="164" stroke="#2ecc71" stroke-width="1" stroke-dasharray="3,2" opacity="0.4"/>
+          <text x="290" y="73" fill="#2ecc71" font-size="7" text-anchor="end">all start</text>
+          <line x1="570" y1="76" x2="570" y2="164" stroke="#2ecc71" stroke-width="1" stroke-dasharray="3,2" opacity="0.4"/>
+          <text x="580" y="73" fill="#2ecc71" font-size="7">all done</text>
+
+          <!-- Total -->
+          <text x="530" y="185" text-anchor="middle" fill="#2ecc71" font-size="13" font-weight="bold">Total: max(2, 2, 2, 2) = 2s — 4&#xD7; speedup</text>
+          <text x="530" y="203" text-anchor="middle" fill="#b0bec5" font-size="10">All inputs overlap — O(T) regardless of fan-in width N</text>
+        </g>
+
+        <!-- Shared: feature comparison -->
+        <rect x="220" y="245" width="650" height="100" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text x="350" y="265" text-anchor="middle" fill="#90a4ae" font-size="10" font-weight="bold">Feature</text>
+        <text x="560" y="265" text-anchor="middle" fill="#f39c12" font-size="10" font-weight="bold">Original</text>
+        <text x="760" y="265" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">AsyncExecutor</text>
+        <line x1="240" y1="272" x2="850" y2="272" stroke="#3a3f5c" stroke-width="0.5"/>
+
+        <text x="350" y="288" text-anchor="middle" fill="#e0e0e0" font-size="10">Input resolution</text>
+        <text x="560" y="288" text-anchor="middle" fill="#f39c12" font-size="10">Sequential</text>
+        <text x="760" y="288" text-anchor="middle" fill="#2ecc71" font-size="10">Parallel (try_join_all)</text>
+
+        <text x="350" y="306" text-anchor="middle" fill="#e0e0e0" font-size="10">Deduplication</text>
+        <text x="560" y="306" text-anchor="middle" fill="#f39c12" font-size="10">None</text>
+        <text x="760" y="306" text-anchor="middle" fill="#2ecc71" font-size="10">Broadcast channels</text>
+
+        <text x="350" y="324" text-anchor="middle" fill="#e0e0e0" font-size="10">Concurrency limit</text>
+        <text x="560" y="324" text-anchor="middle" fill="#f39c12" font-size="10">Unbounded (stack)</text>
+        <text x="760" y="324" text-anchor="middle" fill="#2ecc71" font-size="10">Semaphore-bounded</text>
+
+        <text x="350" y="342" text-anchor="middle" fill="#e0e0e0" font-size="10">Compute isolation</text>
+        <text x="560" y="342" text-anchor="middle" fill="#f39c12" font-size="10">Inline (blocks thread)</text>
+        <text x="760" y="342" text-anchor="middle" fill="#2ecc71" font-size="10">spawn_blocking pool</text>
+
+        <!-- Hint -->
+        <rect x="310" y="360" width="280" height="24" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text id="cmp-hint" x="450" y="377" text-anchor="middle" fill="#90a4ae" font-size="11">Click to see AsyncExecutor &#x2192;</text>
+      </svg>
+      <p class="figure-caption">Figure 11: Executor comparison — recursive loop vs async spawned tasks on a 4-input fan-in.</p>
+    </div>
+
+    <p>
+        The speedup from parallel input resolution scales with fan-in width: for N inputs each taking T seconds, the original executor takes N&#xD7;T while the async executor takes T (the slowest input). But the comparison extends beyond raw speed. Broadcast-channel deduplication eliminates redundant computation across concurrent callers. The semaphore prevents resource exhaustion that the original executor was vulnerable to (deep DAGs could exhaust the call stack). And <code>spawn_blocking</code> isolates CPU-bound compute from the async runtime, preventing a long-running recipe from starving I/O tasks.
+    </p>
+
+    <h3>4.7 Deduplication Effectiveness</h3>
+    
+    <p>
+        Broadcast-channel deduplication is most effective when multiple clients request the same CAddr within a short time window (milliseconds to seconds). Real-world scenarios:
+    </p>
+
+    <ul>
+        <li><strong>Batch requests:</strong> A web service receives 100 requests for the same derived dataset (e.g., "latest sales report"). Without dedup, 100 compute tasks execute. With dedup, 1 compute task executes, 99 subscribe.</li>
+        <li><strong>Retry storms:</strong> A client retries a failed request 10 times in rapid succession. Without dedup, 10 compute tasks. With dedup, 1 compute task (if the first is still in-flight when retries arrive).</li>
+        <li><strong>Shared dependencies:</strong> Two recipes depend on the same expensive input. If both recipes are materialized concurrently, the shared input is computed once.</li>
+    </ul>
+
+    <p>
+        Evaluation (§9) measures deduplication effectiveness: for N concurrent requests to the same CAddr, compute invocations should be exactly 1 (100% dedup rate).
+    </p>
+
+    </section>
+</div>

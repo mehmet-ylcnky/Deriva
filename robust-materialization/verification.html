@@ -1,0 +1,1308 @@
+<div class="section-content">
+    <section id="verification-mode">
+    <h2>5. Verification Mode</h2>
+    
+    <p>
+        Deriva's core invariant is <strong>computation addressing</strong>: the same recipe (function + inputs + params) MUST always produce the same output. The CAddr IS the identity of the data. If a compute function is non-deterministic (uses random numbers, timestamps, unordered iteration), the system silently produces wrong results: the "same" address returns different data depending on when it's computed. Verification Mode detects this by executing recipes twice and comparing outputs byte-for-byte.
+    </p>
+
+    <h3>5.1 The Problem: Silent Non-Determinism</h3>
+
+    <p>
+        Computation addressing relies on a single invariant: the same recipe always produces the same output. The content address <em>is</em> the identity of the data — if a compute function returns different bytes on re-execution with identical inputs, the address becomes a lie. A client that retrieves <code>0xabc123</code> from cache gets one result; if the cache is evicted and the recipe is recomputed, the same address returns different data. No error is raised, no warning is logged — the system silently returns wrong results.
+    </p>
+
+    <p>
+        This failure mode is particularly dangerous because it is invisible. The system continues to operate normally — cache hits return stale data, cache misses trigger recomputation that produces different data, and downstream recipes that depend on the non-deterministic output propagate the inconsistency through the DAG. The longer the non-determinism goes undetected, the wider the blast radius.
+    </p>
+
+    <p>
+        The following visualization demonstrates the problem. A recipe is computed twice with identical inputs, but the compute function uses a non-deterministic operation (e.g., <code>HashMap</code> iteration order). Click to step through the failure scenario:
+    </p>
+
+    <div style="text-align: center; margin: 1.5em 0;">
+      <svg id="nondet-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 430" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="430" rx="12" fill="#1a1e2e"/>
+
+        <!-- Step 0: First compute — cached -->
+        <g id="nd-s0" opacity="1">
+          <text x="450" y="28" text-anchor="middle" fill="#81d4fa" font-size="15" font-weight="bold">Step 1: First compute — result cached</text>
+
+          <!-- Recipe box -->
+          <rect x="40" y="50" width="200" height="70" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="140" y="72" text-anchor="middle" fill="#81d4fa" font-size="11" font-weight="bold">Recipe R</text>
+          <text x="140" y="90" text-anchor="middle" fill="#b0bec5" font-size="9">func = summarize(data)</text>
+          <text x="140" y="106" text-anchor="middle" fill="#b0bec5" font-size="9">uses HashMap internally</text>
+
+          <!-- Arrow to compute -->
+          <line x1="240" y1="85" x2="310" y2="85" stroke="#81d4fa" stroke-width="1.5"/>
+          <polygon points="310,80 320,85 310,90" fill="#81d4fa"/>
+
+          <!-- Compute box -->
+          <rect x="320" y="55" width="180" height="60" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="410" y="78" text-anchor="middle" fill="#2ecc71" font-size="11" font-weight="bold">func.execute()</text>
+          <text x="410" y="96" text-anchor="middle" fill="#b0bec5" font-size="9">HashMap order: [A, B, C]</text>
+
+          <!-- Arrow to result -->
+          <line x1="500" y1="85" x2="570" y2="85" stroke="#2ecc71" stroke-width="1.5"/>
+          <polygon points="570,80 580,85 570,90" fill="#2ecc71"/>
+
+          <!-- Result -->
+          <rect x="580" y="55" width="280" height="60" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="720" y="75" text-anchor="middle" fill="#2ecc71" font-size="11" font-weight="bold">Output: 0xabc123…</text>
+          <text x="720" y="95" text-anchor="middle" fill="#b0bec5" font-size="9">→ cached at CAddr(R)</text>
+
+          <!-- Animated dot: recipe to compute to cache -->
+          <circle r="5" fill="#2ecc71">
+            <animateMotion dur="3s" repeatCount="indefinite" path="M240,85 L320,85 L500,85 L580,85"/>
+          </circle>
+
+          <!-- Client A reads from cache -->
+          <rect x="580" y="150" width="280" height="50" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1"/>
+          <text x="720" y="172" text-anchor="middle" fill="#81d4fa" font-size="11">Client A reads CAddr(R)</text>
+          <text x="720" y="188" text-anchor="middle" fill="#2ecc71" font-size="10">→ gets 0xabc123… &#x2713;</text>
+
+          <text x="450" y="240" text-anchor="middle" fill="#b0bec5" font-size="12">Everything looks correct. The result is cached and served consistently.</text>
+        </g>
+
+        <!-- Step 1: Cache eviction -->
+        <g id="nd-s1" opacity="0">
+          <text x="450" y="28" text-anchor="middle" fill="#f39c12" font-size="15" font-weight="bold">Step 2: Cache eviction — entry removed</text>
+
+          <!-- Cache box with X -->
+          <rect x="580" y="55" width="280" height="60" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1.5" stroke-dasharray="5,3"/>
+          <text x="720" y="75" text-anchor="middle" fill="#f39c12" font-size="11">CAddr(R): 0xabc123…</text>
+          <text x="720" y="95" text-anchor="middle" fill="#e74c3c" font-size="12" font-weight="bold">&#x274C; EVICTED</text>
+
+          <!-- Eviction reason -->
+          <rect x="580" y="130" width="280" height="40" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="720" y="148" text-anchor="middle" fill="#b0bec5" font-size="10">GC sweep, memory pressure, or TTL expiry</text>
+          <text x="720" y="163" text-anchor="middle" fill="#b0bec5" font-size="10">The recipe must be recomputed on next request</text>
+
+          <!-- Animated X -->
+          <text x="720" y="90" text-anchor="middle" fill="#e74c3c" font-size="30">
+            <animate attributeName="opacity" values="0.3;1;0.3" dur="1.5s" repeatCount="indefinite"/>
+          </text>
+
+          <text x="450" y="240" text-anchor="middle" fill="#f39c12" font-size="12">Cache eviction is normal and expected. The system should recompute identically…</text>
+        </g>
+
+        <!-- Step 2: Recompute — different result! -->
+        <g id="nd-s2" opacity="0">
+          <text x="450" y="28" text-anchor="middle" fill="#e74c3c" font-size="15" font-weight="bold">Step 3: Recompute — different output!</text>
+
+          <!-- Same recipe box -->
+          <rect x="40" y="50" width="200" height="70" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="140" y="72" text-anchor="middle" fill="#81d4fa" font-size="11" font-weight="bold">Recipe R (same)</text>
+          <text x="140" y="90" text-anchor="middle" fill="#b0bec5" font-size="9">func = summarize(data)</text>
+          <text x="140" y="106" text-anchor="middle" fill="#b0bec5" font-size="9">same inputs, same params</text>
+
+          <line x1="240" y1="85" x2="310" y2="85" stroke="#81d4fa" stroke-width="1.5"/>
+          <polygon points="310,80 320,85 310,90" fill="#81d4fa"/>
+
+          <!-- Compute — different HashMap order -->
+          <rect x="320" y="55" width="180" height="60" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="2"/>
+          <text x="410" y="78" text-anchor="middle" fill="#e74c3c" font-size="11" font-weight="bold">func.execute()</text>
+          <text x="410" y="96" text-anchor="middle" fill="#e74c3c" font-size="9">HashMap order: [C, A, B] &#x26A0;</text>
+
+          <line x1="500" y1="85" x2="570" y2="85" stroke="#e74c3c" stroke-width="1.5"/>
+          <polygon points="570,80 580,85 570,90" fill="#e74c3c"/>
+
+          <!-- Different result -->
+          <rect x="580" y="55" width="280" height="60" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="2"/>
+          <text x="720" y="75" text-anchor="middle" fill="#e74c3c" font-size="11" font-weight="bold">Output: 0xdef456… &#x2260; 0xabc123…</text>
+          <text x="720" y="95" text-anchor="middle" fill="#e74c3c" font-size="9">→ cached at CAddr(R) — WRONG DATA</text>
+
+          <!-- Animated red dot -->
+          <circle r="5" fill="#e74c3c">
+            <animateMotion dur="3s" repeatCount="indefinite" path="M240,85 L320,85 L500,85 L580,85"/>
+          </circle>
+
+          <!-- Client B reads different data -->
+          <rect x="580" y="150" width="280" height="50" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="720" y="172" text-anchor="middle" fill="#81d4fa" font-size="11">Client B reads CAddr(R)</text>
+          <text x="720" y="188" text-anchor="middle" fill="#e74c3c" font-size="10">→ gets 0xdef456… &#x2260; Client A's result</text>
+
+          <text x="450" y="240" text-anchor="middle" fill="#e74c3c" font-size="12" font-weight="bold">Same address, different data. No error raised. Silent corruption.</text>
+        </g>
+
+        <!-- Step 3: Blast radius -->
+        <g id="nd-s3" opacity="0">
+          <text x="450" y="28" text-anchor="middle" fill="#e74c3c" font-size="15" font-weight="bold">Step 4: Blast radius — corruption propagates</text>
+
+          <!-- DAG showing propagation -->
+          <circle cx="120" cy="80" r="22" fill="#232840" stroke="#e74c3c" stroke-width="2"/>
+          <text x="120" y="85" text-anchor="middle" fill="#e74c3c" font-size="11" font-weight="bold">R</text>
+          <text x="120" y="65" text-anchor="middle" fill="#e74c3c" font-size="7">non-det</text>
+
+          <line x1="138" y1="92" x2="190" y2="130" stroke="#e74c3c" stroke-width="1.5"/>
+          <line x1="102" y1="92" x2="50" y2="130" stroke="#e74c3c" stroke-width="1.5"/>
+
+          <circle cx="50" cy="150" r="18" fill="#232840" stroke="#e74c3c" stroke-width="1.5" stroke-dasharray="4,3"/>
+          <text x="50" y="155" text-anchor="middle" fill="#e74c3c" font-size="10">X</text>
+          <circle cx="190" cy="150" r="18" fill="#232840" stroke="#e74c3c" stroke-width="1.5" stroke-dasharray="4,3"/>
+          <text x="190" y="155" text-anchor="middle" fill="#e74c3c" font-size="10">Y</text>
+
+          <line x1="62" y1="164" x2="110" y2="200" stroke="#e74c3c" stroke-width="1" stroke-dasharray="3,3"/>
+          <line x1="178" y1="164" x2="130" y2="200" stroke="#e74c3c" stroke-width="1" stroke-dasharray="3,3"/>
+
+          <circle cx="120" cy="220" r="18" fill="#232840" stroke="#e74c3c" stroke-width="1.5" stroke-dasharray="4,3"/>
+          <text x="120" y="225" text-anchor="middle" fill="#e74c3c" font-size="10">Z</text>
+
+          <!-- Pulsing red rings on downstream nodes -->
+          <circle cx="50" cy="150" r="24" fill="none" stroke="#e74c3c" stroke-width="1.5">
+            <animate attributeName="opacity" values="0.2;0.8;0.2" dur="1.5s" repeatCount="indefinite"/>
+          </circle>
+          <circle cx="190" cy="150" r="24" fill="none" stroke="#e74c3c" stroke-width="1.5">
+            <animate attributeName="opacity" values="0.2;0.8;0.2" dur="1.5s" begin="0.3s" repeatCount="indefinite"/>
+          </circle>
+          <circle cx="120" cy="220" r="24" fill="none" stroke="#e74c3c" stroke-width="1.5">
+            <animate attributeName="opacity" values="0.2;0.8;0.2" dur="1.5s" begin="0.6s" repeatCount="indefinite"/>
+          </circle>
+
+          <!-- Explanation panel -->
+          <rect x="260" y="60" width="600" height="190" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1"/>
+          <text x="560" y="90" text-anchor="middle" fill="#e74c3c" font-size="13" font-weight="bold">Silent corruption propagates through the DAG</text>
+
+          <text x="290" y="120" fill="#e0e0e0" font-size="11">&#x2022; R produces different bytes on re-execution</text>
+          <text x="290" y="142" fill="#e0e0e0" font-size="11">&#x2022; X = f(R) and Y = g(R) inherit the wrong input</text>
+          <text x="290" y="164" fill="#e0e0e0" font-size="11">&#x2022; Z = h(X, Y) compounds the error</text>
+          <text x="290" y="186" fill="#e0e0e0" font-size="11">&#x2022; No error is raised at any point — all CAddrs look valid</text>
+          <text x="290" y="210" fill="#e0e0e0" font-size="11">&#x2022; Different clients see different data for the same address</text>
+          <text x="290" y="235" fill="#e74c3c" font-size="11" font-weight="bold">&#x2192; Verification Mode (§5.2) detects this by dual-computing and comparing</text>
+        </g>
+
+        <!-- Common sources (always visible) -->
+        <rect x="40" y="270" width="820" height="110" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text x="450" y="292" text-anchor="middle" fill="#e0e0e0" font-size="12" font-weight="bold">Common sources of non-determinism</text>
+        <text x="70" y="314" fill="#e74c3c" font-size="10">&#x2718; HashMap iteration</text>
+        <text x="70" y="332" fill="#e74c3c" font-size="10">&#x2718; rand::thread_rng()</text>
+        <text x="70" y="350" fill="#e74c3c" font-size="10">&#x2718; SystemTime::now()</text>
+        <text x="70" y="368" fill="#e74c3c" font-size="10">&#x2718; floating-point order</text>
+
+        <line x1="280" y1="300" x2="280" y2="375" stroke="#3a3f5c" stroke-width="0.5"/>
+
+        <text x="310" y="314" fill="#2ecc71" font-size="10">&#x2714; BTreeMap (ordered)</text>
+        <text x="310" y="332" fill="#2ecc71" font-size="10">&#x2714; fixed-seed RNG from inputs</text>
+        <text x="310" y="350" fill="#2ecc71" font-size="10">&#x2714; pure functions on bytes</text>
+        <text x="310" y="368" fill="#2ecc71" font-size="10">&#x2714; sort before serialization</text>
+
+        <line x1="540" y1="300" x2="540" y2="375" stroke="#3a3f5c" stroke-width="0.5"/>
+
+        <text x="570" y="314" fill="#e74c3c" font-size="10">&#x2718; thread scheduling races</text>
+        <text x="570" y="332" fill="#e74c3c" font-size="10">&#x2718; external I/O (network, files)</text>
+        <text x="570" y="350" fill="#2ecc71" font-size="10">&#x2714; deterministic hashing (BLAKE3)</text>
+        <text x="570" y="368" fill="#2ecc71" font-size="10">&#x2714; canonical serialization (bincode)</text>
+
+        <!-- Step dots + hint -->
+        <circle id="nd-d0" cx="410" cy="405" r="5" fill="#81d4fa"/>
+        <circle id="nd-d1" cx="430" cy="405" r="5" fill="#3a3f5c"/>
+        <circle id="nd-d2" cx="450" cy="405" r="5" fill="#3a3f5c"/>
+        <circle id="nd-d3" cx="470" cy="405" r="5" fill="#3a3f5c"/>
+        <text id="nd-hint" x="450" y="425" text-anchor="middle" fill="#90a4ae" font-size="11">Click to step through failure scenario &#x2192;</text>
+      </svg>
+      <p class="figure-caption">Figure 12: Non-determinism failure — identical inputs producing different content addresses.</p>
+    </div>
+
+    <p>
+        The danger is not that non-determinism is hard to fix — replacing <code>HashMap</code> with <code>BTreeMap</code> or sorting output before serialization is straightforward. The danger is that non-determinism is hard to <em>detect</em>. A function may pass all unit tests (which run deterministically on a single thread) and only exhibit non-determinism under concurrent execution or after a cache eviction cycle. Verification Mode (§5.2) addresses this by executing recipes twice and comparing outputs byte-for-byte, turning a silent correctness bug into an explicit error.
+    </p>
+
+    <h3>5.2 Three Verification Modes</h3>
+
+    <p>
+        Verification is configurable per-executor via <code>VerificationMode</code>. The design offers three points on the cost-vs-coverage tradeoff: zero overhead with no detection, full detection with 2× CPU cost, and probabilistic detection with tunable overhead. The choice depends on the deployment context — development, CI, or runtime auditing.
+    </p>
+
+    <div class="code-block">
+        <pre>
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VerificationMode {
+    /// No verification — single compute (default)
+    Off,
+    /// Dual compute — execute twice in parallel, compare byte-for-byte
+    DualCompute,
+    /// Deterministic sampling — verify `rate` fraction of recipes (0.0-1.0)
+    Sampled { rate: f64 },
+}</pre>
+    </div>
+
+    <p>
+        The key insight behind <code>DualCompute</code> is that parallel execution on separate blocking threads costs ~1× wall-clock time despite 2× CPU usage — the two executions overlap completely. <code>Sampled</code> mode uses the CAddr itself as the sampling seed, making the decision deterministic: the same address is always verified or never verified, which makes failures reproducible rather than intermittent.
+    </p>
+
+    <p>
+        The following visualization shows each mode's execution pattern and cost profile. Click to cycle through the three modes:
+    </p>
+
+    <div style="text-align: center; margin: 1.5em 0;">
+      <svg id="vmode-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 420" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="420" rx="12" fill="#1a1e2e"/>
+
+        <!-- State 0: Off -->
+        <g id="vm-s0" opacity="1">
+          <text x="450" y="30" text-anchor="middle" fill="#81d4fa" font-size="15" font-weight="bold">Mode 1: Off — Zero Overhead</text>
+          <text x="450" y="50" text-anchor="middle" fill="#b0bec5" font-size="11">Single execution, no comparison. Default for runtime.</text>
+
+          <!-- Execution diagram -->
+          <rect x="60" y="70" width="780" height="130" rx="8" fill="#232840" stroke="#81d4fa" stroke-width="1"/>
+
+          <text x="90" y="100" fill="#81d4fa" font-size="11" font-weight="bold">Thread 1:</text>
+          <rect x="200" y="86" width="300" height="24" rx="4" fill="#81d4fa" opacity="0.4"/>
+          <text x="350" y="103" text-anchor="middle" fill="#fff" font-size="10">func.execute(inputs)</text>
+          <text x="510" y="103" fill="#2ecc71" font-size="10">→ output</text>
+
+          <!-- Animated dot -->
+          <circle r="5" fill="#81d4fa">
+            <animateMotion dur="3s" repeatCount="indefinite" path="M200,98 L500,98"/>
+          </circle>
+
+          <text x="90" y="135" fill="#90a4ae" font-size="11">Thread 2:</text>
+          <text x="200" y="135" fill="#90a4ae" font-size="10" font-style="italic">idle</text>
+
+          <text x="90" y="170" fill="#e0e0e0" font-size="11">Wall-clock: <tspan fill="#81d4fa" font-weight="bold">T</tspan></text>
+          <text x="300" y="170" fill="#e0e0e0" font-size="11">CPU cost: <tspan fill="#81d4fa" font-weight="bold">1× T</tspan></text>
+          <text x="500" y="170" fill="#e0e0e0" font-size="11">Detection: <tspan fill="#e74c3c" font-weight="bold">none</tspan></text>
+
+          <!-- Cost bar -->
+          <text x="90" y="225" fill="#90a4ae" font-size="10">Overhead:</text>
+          <rect x="200" y="212" width="500" height="16" rx="3" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <rect x="200" y="212" width="0" height="16" rx="3" fill="#81d4fa" opacity="0.5"/>
+          <text x="450" y="225" text-anchor="middle" fill="#81d4fa" font-size="10" font-weight="bold">0% overhead</text>
+
+          <text x="450" y="260" text-anchor="middle" fill="#b0bec5" font-size="11">Best for: runtime with trusted, well-tested compute functions</text>
+        </g>
+
+        <!-- State 1: DualCompute -->
+        <g id="vm-s1" opacity="0">
+          <text x="450" y="30" text-anchor="middle" fill="#2ecc71" font-size="15" font-weight="bold">Mode 2: DualCompute — Full Detection</text>
+          <text x="450" y="50" text-anchor="middle" fill="#b0bec5" font-size="11">Execute twice in parallel, compare byte-for-byte. Catches all non-determinism.</text>
+
+          <rect x="60" y="70" width="780" height="130" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+
+          <text x="90" y="100" fill="#2ecc71" font-size="11" font-weight="bold">Thread 1:</text>
+          <rect x="200" y="86" width="300" height="24" rx="4" fill="#2ecc71" opacity="0.4"/>
+          <text x="350" y="103" text-anchor="middle" fill="#fff" font-size="10">func.execute(inputs₁)</text>
+          <text x="510" y="103" fill="#2ecc71" font-size="10">→ output₁</text>
+
+          <text x="90" y="135" fill="#2ecc71" font-size="11" font-weight="bold">Thread 2:</text>
+          <rect x="200" y="121" width="300" height="24" rx="4" fill="#2ecc71" opacity="0.4"/>
+          <text x="350" y="138" text-anchor="middle" fill="#fff" font-size="10">func.execute(inputs₂)</text>
+          <text x="510" y="138" fill="#2ecc71" font-size="10">→ output₂</text>
+
+          <!-- Animated dots on both threads -->
+          <circle r="5" fill="#2ecc71">
+            <animateMotion dur="3s" repeatCount="indefinite" path="M200,98 L500,98"/>
+          </circle>
+          <circle r="5" fill="#2ecc71">
+            <animateMotion dur="3s" begin="0.1s" repeatCount="indefinite" path="M200,133 L500,133"/>
+          </circle>
+
+          <!-- Compare arrow -->
+          <line x1="530" y1="98" x2="560" y2="115" stroke="#2ecc71" stroke-width="1.5"/>
+          <line x1="530" y1="133" x2="560" y2="115" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="600" y="120" fill="#2ecc71" font-size="10" font-weight="bold">output₁ == output₂ ?</text>
+          <text x="750" y="108" fill="#2ecc71" font-size="9">✓ pass → return</text>
+          <text x="750" y="128" fill="#e74c3c" font-size="9">✗ fail → DeterminismViolation</text>
+
+          <text x="90" y="170" fill="#e0e0e0" font-size="11">Wall-clock: <tspan fill="#2ecc71" font-weight="bold">~T</tspan> (parallel)</text>
+          <text x="300" y="170" fill="#e0e0e0" font-size="11">CPU cost: <tspan fill="#f39c12" font-weight="bold">2× T</tspan></text>
+          <text x="500" y="170" fill="#e0e0e0" font-size="11">Detection: <tspan fill="#2ecc71" font-weight="bold">100%</tspan></text>
+
+          <text x="90" y="225" fill="#90a4ae" font-size="10">Overhead:</text>
+          <rect x="200" y="212" width="500" height="16" rx="3" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <rect x="200" y="212" width="500" height="16" rx="3" fill="#f39c12" opacity="0.3"/>
+          <text x="450" y="225" text-anchor="middle" fill="#f39c12" font-size="10" font-weight="bold">+100% CPU (but ~0% wall-clock on multi-core)</text>
+
+          <text x="450" y="260" text-anchor="middle" fill="#b0bec5" font-size="11">Best for: development, CI/CD pipelines, post-deployment validation</text>
+        </g>
+
+        <!-- State 2: Sampled -->
+        <g id="vm-s2" opacity="0">
+          <text x="450" y="30" text-anchor="middle" fill="#ce93d8" font-size="15" font-weight="bold">Mode 3: Sampled { rate: 0.10 } — Probabilistic</text>
+          <text x="450" y="50" text-anchor="middle" fill="#b0bec5" font-size="11">Verify 10% of recipes using CAddr as deterministic seed.</text>
+
+          <rect x="60" y="70" width="780" height="130" rx="8" fill="#232840" stroke="#ce93d8" stroke-width="1"/>
+
+          <!-- 10 recipe slots: 1 verified, 9 not -->
+          <text x="90" y="95" fill="#ce93d8" font-size="10" font-weight="bold">10 recipes:</text>
+          <!-- Verified one -->
+          <rect x="200" y="82" width="56" height="24" rx="3" fill="#ce93d8" opacity="0.5" stroke="#ce93d8" stroke-width="1.5"/>
+          <text x="228" y="98" text-anchor="middle" fill="#fff" font-size="8">2× ✓</text>
+          <!-- Unverified 9 -->
+          <rect x="262" y="82" width="56" height="24" rx="3" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="290" y="98" text-anchor="middle" fill="#90a4ae" font-size="8">1×</text>
+          <rect x="324" y="82" width="56" height="24" rx="3" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="352" y="98" text-anchor="middle" fill="#90a4ae" font-size="8">1×</text>
+          <rect x="386" y="82" width="56" height="24" rx="3" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="414" y="98" text-anchor="middle" fill="#90a4ae" font-size="8">1×</text>
+          <rect x="448" y="82" width="56" height="24" rx="3" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="476" y="98" text-anchor="middle" fill="#90a4ae" font-size="8">1×</text>
+          <rect x="510" y="82" width="56" height="24" rx="3" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="538" y="98" text-anchor="middle" fill="#90a4ae" font-size="8">1×</text>
+          <rect x="572" y="82" width="56" height="24" rx="3" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="600" y="98" text-anchor="middle" fill="#90a4ae" font-size="8">1×</text>
+          <rect x="634" y="82" width="56" height="24" rx="3" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="662" y="98" text-anchor="middle" fill="#90a4ae" font-size="8">1×</text>
+          <rect x="696" y="82" width="56" height="24" rx="3" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="724" y="98" text-anchor="middle" fill="#90a4ae" font-size="8">1×</text>
+          <rect x="758" y="82" width="56" height="24" rx="3" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="786" y="98" text-anchor="middle" fill="#90a4ae" font-size="8">1×</text>
+
+          <!-- Pulsing highlight on verified slot -->
+          <rect x="200" y="82" width="56" height="24" rx="3" fill="none" stroke="#ce93d8" stroke-width="2">
+            <animate attributeName="stroke-width" values="2;3.5;2" dur="1.5s" repeatCount="indefinite"/>
+          </rect>
+
+          <!-- Sampling logic -->
+          <text x="90" y="130" fill="#ce93d8" font-size="10" font-weight="bold">Seed:</text>
+          <text x="200" y="130" fill="#81d4fa" font-size="10" font-family="Consolas, monospace">addr.as_bytes()[0] / 255.0 &lt; 0.10</text>
+          <text x="90" y="150" fill="#b0bec5" font-size="10">Same CAddr → always same decision (deterministic, reproducible)</text>
+
+          <text x="90" y="170" fill="#e0e0e0" font-size="11">Wall-clock: <tspan fill="#ce93d8" font-weight="bold">~T</tspan></text>
+          <text x="300" y="170" fill="#e0e0e0" font-size="11">CPU cost: <tspan fill="#ce93d8" font-weight="bold">1.1× T</tspan> avg</text>
+          <text x="500" y="170" fill="#e0e0e0" font-size="11">Detection: <tspan fill="#ce93d8" font-weight="bold">10% of recipes</tspan></text>
+
+          <text x="90" y="225" fill="#90a4ae" font-size="10">Overhead:</text>
+          <rect x="200" y="212" width="500" height="16" rx="3" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <rect x="200" y="212" width="50" height="16" rx="3" fill="#ce93d8" opacity="0.4"/>
+          <text x="450" y="225" text-anchor="middle" fill="#ce93d8" font-size="10" font-weight="bold">+10% CPU — tunable via rate parameter</text>
+
+          <text x="450" y="260" text-anchor="middle" fill="#b0bec5" font-size="11">Best for: ongoing runtime auditing with minimal overhead</text>
+        </g>
+
+        <!-- Shared: comparison table -->
+        <rect x="60" y="280" width="780" height="85" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text x="170" y="300" text-anchor="middle" fill="#90a4ae" font-size="10" font-weight="bold">Mode</text>
+        <text x="340" y="300" text-anchor="middle" fill="#90a4ae" font-size="10" font-weight="bold">CPU Cost</text>
+        <text x="500" y="300" text-anchor="middle" fill="#90a4ae" font-size="10" font-weight="bold">Wall-Clock</text>
+        <text x="660" y="300" text-anchor="middle" fill="#90a4ae" font-size="10" font-weight="bold">Detection</text>
+        <line x1="80" y1="307" x2="820" y2="307" stroke="#3a3f5c" stroke-width="0.5"/>
+
+        <text x="170" y="323" text-anchor="middle" fill="#81d4fa" font-size="10">Off</text>
+        <text x="340" y="323" text-anchor="middle" fill="#e0e0e0" font-size="10">1×</text>
+        <text x="500" y="323" text-anchor="middle" fill="#e0e0e0" font-size="10">T</text>
+        <text x="660" y="323" text-anchor="middle" fill="#e74c3c" font-size="10">0%</text>
+
+        <text x="170" y="343" text-anchor="middle" fill="#2ecc71" font-size="10">DualCompute</text>
+        <text x="340" y="343" text-anchor="middle" fill="#f39c12" font-size="10">2×</text>
+        <text x="500" y="343" text-anchor="middle" fill="#e0e0e0" font-size="10">~T (parallel)</text>
+        <text x="660" y="343" text-anchor="middle" fill="#2ecc71" font-size="10">100%</text>
+
+        <text x="170" y="363" text-anchor="middle" fill="#ce93d8" font-size="10">Sampled { rate }</text>
+        <text x="340" y="363" text-anchor="middle" fill="#e0e0e0" font-size="10">(1 + rate)×</text>
+        <text x="500" y="363" text-anchor="middle" fill="#e0e0e0" font-size="10">~T</text>
+        <text x="660" y="363" text-anchor="middle" fill="#ce93d8" font-size="10">rate × 100%</text>
+
+        <!-- Step dots + hint -->
+        <circle id="vm-d0" cx="420" cy="393" r="5" fill="#81d4fa"/>
+        <circle id="vm-d1" cx="440" cy="393" r="5" fill="#3a3f5c"/>
+        <circle id="vm-d2" cx="460" cy="393" r="5" fill="#3a3f5c"/>
+        <text id="vm-hint" x="450" y="413" text-anchor="middle" fill="#90a4ae" font-size="11">Click to cycle through modes &#x2192;</text>
+      </svg>
+      <p class="figure-caption">Figure 13: Verification modes — Off, DualCompute, and Sampled execution patterns.</p>
+    </div>
+
+    <p>
+        The three modes form a deployment progression: <code>DualCompute</code> during development and CI to catch non-determinism early, <code>Off</code> as the default for trusted runtime workloads, and <code>Sampled</code> for ongoing auditing where a small fraction of recipes are continuously verified. The <code>rate</code> parameter in <code>Sampled</code> mode controls the tradeoff directly — <code>0.05</code> adds 5% CPU overhead while verifying 5% of all materializations, enough to detect systematic non-determinism within minutes of deployment.
+    </p>
+
+    <h3>5.3 Parallel Dual Compute</h3>
+
+    <p>
+        When verification is enabled, <code>execute_verified()</code> runs the compute function twice in parallel using <code>tokio::join!</code>. The two executions are fully independent: inputs are cloned, the <code>Arc&lt;dyn ComputeFunction&gt;</code> is cloned (cheap reference count), and each execution runs on a separate blocking thread via <code>spawn_blocking</code>. This isolation ensures that any shared mutable state inside the compute function (the most common source of non-determinism) manifests as different outputs rather than being masked by sequential execution.
+    </p>
+
+    <p>
+        The comparison is byte-for-byte: <code>output1 == output2</code>. This is stricter than hash comparison — it catches cases where different byte sequences happen to collide under a weaker hash. On match, the result is returned and a pass is recorded. On mismatch, a <code>DeterminismViolation</code> error is constructed with both output hashes, lengths, the CAddr, and the function ID — enough information to reproduce and debug the failure.
+    </p>
+
+    <p>
+        The following visualization shows the dual-compute data flow. Click to toggle between the pass and fail outcomes:
+    </p>
+
+    <div style="text-align: center; margin: 1.5em 0;">
+      <svg id="dual-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 440" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="440" rx="12" fill="#1a1e2e"/>
+
+        <!-- Shared: input + fork -->
+        <rect x="30" y="80" width="140" height="50" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+        <text x="100" y="100" text-anchor="middle" fill="#81d4fa" font-size="11" font-weight="bold">input_bytes</text>
+        <text x="100" y="116" text-anchor="middle" fill="#90a4ae" font-size="9">+ params, func</text>
+
+        <!-- Fork arrows -->
+        <line x1="170" y1="95" x2="230" y2="60" stroke="#546e7a" stroke-width="1.5"/>
+        <line x1="170" y1="115" x2="230" y2="150" stroke="#546e7a" stroke-width="1.5"/>
+        <text x="195" y="85" fill="#90a4ae" font-size="8">clone</text>
+        <text x="195" y="145" fill="#90a4ae" font-size="8">clone</text>
+
+        <!-- Thread 1 -->
+        <rect x="230" y="38" width="250" height="44" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1"/>
+        <text x="355" y="56" text-anchor="middle" fill="#81d4fa" font-size="10" font-weight="bold">Thread 1: spawn_blocking</text>
+        <text x="355" y="72" text-anchor="middle" fill="#b0bec5" font-size="9">func1.execute(input1, &amp;params1)</text>
+
+        <!-- Thread 2 -->
+        <rect x="230" y="128" width="250" height="44" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1"/>
+        <text x="355" y="146" text-anchor="middle" fill="#81d4fa" font-size="10" font-weight="bold">Thread 2: spawn_blocking</text>
+        <text x="355" y="162" text-anchor="middle" fill="#b0bec5" font-size="9">func2.execute(input2, &amp;params2)</text>
+
+        <!-- Converge arrows to compare -->
+        <line x1="480" y1="60" x2="540" y2="100" stroke="#546e7a" stroke-width="1.5"/>
+        <line x1="480" y1="150" x2="540" y2="110" stroke="#546e7a" stroke-width="1.5"/>
+
+        <!-- Compare box -->
+        <rect x="540" y="85" width="160" height="40" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="2"/>
+        <text x="620" y="110" text-anchor="middle" fill="#e0e0e0" font-size="11" font-weight="bold">output1 == output2 ?</text>
+
+        <!-- tokio::join! label -->
+        <text x="355" y="30" text-anchor="middle" fill="#90a4ae" font-size="9">tokio::join! — both run concurrently</text>
+
+        <!-- State 0: PASS -->
+        <g id="du-s0" opacity="1">
+          <text x="450" y="215" text-anchor="middle" fill="#2ecc71" font-size="15" font-weight="bold">&#x2705; Pass — Outputs Match</text>
+
+          <!-- Animated dots: input → fork → both threads → converge → pass -->
+          <circle r="5" fill="#2ecc71">
+            <animateMotion dur="4s" repeatCount="indefinite" path="M170,95 L230,60 L480,60 L540,100 L620,105"/>
+          </circle>
+          <circle r="5" fill="#2ecc71">
+            <animateMotion dur="4s" begin="0.15s" repeatCount="indefinite" path="M170,115 L230,150 L480,150 L540,110 L620,105"/>
+          </circle>
+
+          <!-- Green border on compare box -->
+          <rect x="540" y="85" width="160" height="40" rx="6" fill="none" stroke="#2ecc71" stroke-width="2">
+            <animate attributeName="stroke-width" values="2;3;2" dur="2s" repeatCount="indefinite"/>
+          </rect>
+
+          <!-- Result flow -->
+          <line x1="700" y1="105" x2="760" y2="105" stroke="#2ecc71" stroke-width="1.5"/>
+          <polygon points="760,100 770,105 760,110" fill="#2ecc71"/>
+          <rect x="770" y="85" width="110" height="40" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="825" y="103" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">record_pass()</text>
+          <text x="825" y="118" text-anchor="middle" fill="#2ecc71" font-size="9">Ok(output1)</text>
+
+          <!-- Detail panel -->
+          <rect x="100" y="235" width="700" height="100" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="450" y="260" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">Deterministic &#x2714;</text>
+          <text x="150" y="285" fill="#e0e0e0" font-size="10">output1: 1024 bytes → blake3: 0xabc123…</text>
+          <text x="150" y="305" fill="#e0e0e0" font-size="10">output2: 1024 bytes → blake3: 0xabc123…</text>
+          <text x="150" y="325" fill="#2ecc71" font-size="10" font-weight="bold">Byte-for-byte identical → same CAddr guaranteed</text>
+        </g>
+
+        <!-- State 1: FAIL -->
+        <g id="du-s1" opacity="0">
+          <text x="450" y="215" text-anchor="middle" fill="#e74c3c" font-size="15" font-weight="bold">&#x274C; Fail — DeterminismViolation</text>
+
+          <!-- Animated dots: red -->
+          <circle r="5" fill="#e74c3c">
+            <animateMotion dur="4s" repeatCount="indefinite" path="M170,95 L230,60 L480,60 L540,100 L620,105"/>
+          </circle>
+          <circle r="5" fill="#f39c12">
+            <animateMotion dur="4s" begin="0.15s" repeatCount="indefinite" path="M170,115 L230,150 L480,150 L540,110 L620,105"/>
+          </circle>
+
+          <!-- Red border on compare box -->
+          <rect x="540" y="85" width="160" height="40" rx="6" fill="none" stroke="#e74c3c" stroke-width="2">
+            <animate attributeName="stroke-width" values="2;3.5;2" dur="1s" repeatCount="indefinite"/>
+          </rect>
+
+          <!-- Error flow -->
+          <line x1="700" y1="105" x2="760" y2="105" stroke="#e74c3c" stroke-width="1.5"/>
+          <polygon points="760,100 770,105 760,110" fill="#e74c3c"/>
+          <rect x="770" y="85" width="110" height="40" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="825" y="103" text-anchor="middle" fill="#e74c3c" font-size="10" font-weight="bold">record_fail()</text>
+          <text x="825" y="118" text-anchor="middle" fill="#e74c3c" font-size="9">Err(violation)</text>
+
+          <!-- Error detail panel -->
+          <rect x="100" y="235" width="700" height="100" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1"/>
+          <text x="450" y="258" text-anchor="middle" fill="#e74c3c" font-size="11" font-weight="bold">DeterminismViolation</text>
+          <text x="150" y="278" fill="#e74c3c" font-size="10" font-family="Consolas, monospace">addr: "caddr(0x7f3a…)"</text>
+          <text x="150" y="295" fill="#e74c3c" font-size="10" font-family="Consolas, monospace">function_id: "summarize/v1"</text>
+          <text x="500" y="278" fill="#e74c3c" font-size="10" font-family="Consolas, monospace">output_1_hash: 0xabc123…</text>
+          <text x="500" y="295" fill="#e74c3c" font-size="10" font-family="Consolas, monospace">output_2_hash: 0xdef456…</text>
+          <text x="150" y="325" fill="#f39c12" font-size="10">&#x26A0; Same length (1024 bytes) but different content — likely HashMap iteration order</text>
+        </g>
+
+        <!-- Shared: code snippet -->
+        <rect x="100" y="350" width="700" height="42" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text x="120" y="368" fill="#b0bec5" font-size="9">// Parallel dual execution — both threads run simultaneously</text>
+        <text x="120" y="384" fill="#81d4fa" font-size="9" font-family="Consolas, monospace">let (r1, r2) = tokio::join!(spawn_blocking(func1.execute(in1)), spawn_blocking(func2.execute(in2)));</text>
+
+        <!-- Hint -->
+        <rect x="310" y="400" width="280" height="24" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text id="du-hint" x="450" y="417" text-anchor="middle" fill="#90a4ae" font-size="11">Click to see failure case &#x2192;</text>
+      </svg>
+      <p class="figure-caption">Figure 14: Dual-compute data flow — pass and fail outcomes when outputs match or diverge.</p>
+    </div>
+
+    <p>
+        The choice of <code>spawn_blocking</code> over <code>spawn</code> is deliberate. Compute functions are CPU-bound — they transform input bytes into output bytes, often involving serialization, hashing, or numerical computation. Running CPU-bound work on the async runtime's cooperative threads would starve I/O tasks (cache lookups, network calls, semaphore operations). <code>spawn_blocking</code> moves each execution to a dedicated OS thread from Tokio's blocking thread pool, keeping the async runtime responsive. The <code>tokio::join!</code> combinator awaits both blocking tasks concurrently without consuming an async thread while waiting.
+    </p>
+
+    <div class="code-block">
+        <pre>
+async fn execute_verified(
+    &self, addr: &CAddr, func: Arc&lt;dyn ComputeFunction&gt;,
+    input_bytes: Vec&lt;Bytes&gt;, params: &BTreeMap&lt;String, Value&gt;,
+) -> Result&lt;Bytes&gt; {
+    let should_verify = match self.config.verification {
+        VerificationMode::Off => false,
+        VerificationMode::DualCompute => true,
+        VerificationMode::Sampled { rate } => {
+            let sample = (addr.as_bytes()[0] as f64) / 255.0;
+            sample < rate
+        }
+    };
+
+    if !should_verify {
+        return tokio::task::spawn_blocking(move || {
+            func.execute(input_bytes, &params)
+        }).await??;
+    }
+
+    // Clone inputs for independent execution
+    let (func1, func2) = (Arc::clone(&func), Arc::clone(&func));
+    let (input1, input2) = (input_bytes.clone(), input_bytes);
+    let (params1, params2) = (params.clone(), params.clone());
+
+    let (result1, result2) = tokio::join!(
+        tokio::task::spawn_blocking(move || func1.execute(input1, &params1)),
+        tokio::task::spawn_blocking(move || func2.execute(input2, &params2))
+    );
+
+    let output1 = result1??;
+    let output2 = result2??;
+
+    if output1 == output2 {
+        self.verification_stats.record_pass();
+        Ok(output1)
+    } else {
+        let error = DerivaError::DeterminismViolation {
+            addr: format!("{:?}", addr),
+            function_id: func.id().to_string(),
+            output_1_hash: blake3::hash(&output1).to_hex().to_string(),
+            output_2_hash: blake3::hash(&output2).to_hex().to_string(),
+            output_1_len: output1.len(),
+            output_2_len: output2.len(),
+        };
+        self.verification_stats.record_fail(error.clone()).await;
+        Err(error)
+    }
+}</pre>
+    </div>
+
+    <h3>5.4 Verification Decision Flow</h3>
+
+    <p>
+        The <code>execute_verified()</code> function follows a three-way branch based on the configured <code>VerificationMode</code>. The decision is made once per materialization, before any compute work begins. For <code>Sampled</code> mode, the branch further depends on whether the CAddr falls within the sampling threshold — a deterministic check that always produces the same result for the same address.
+    </p>
+
+    <p>
+        The following visualization traces each path through the decision tree. Click to step through the four possible execution paths:
+    </p>
+
+    <div style="text-align: center; margin: 1.5em 0;">
+      <svg id="flow-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 460" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="460" rx="12" fill="#1a1e2e"/>
+
+        <!-- Shared: flowchart structure (always visible, dimmed nodes get highlighted per step) -->
+
+        <!-- Entry -->
+        <rect id="fl-entry" x="330" y="15" width="240" height="36" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+        <text x="450" y="38" text-anchor="middle" fill="#81d4fa" font-size="11" font-weight="bold">execute_verified(addr, func, inputs)</text>
+
+        <!-- Diamond: match mode -->
+        <polygon id="fl-match" points="450,70 560,110 450,150 340,110" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+        <text x="450" y="114" text-anchor="middle" fill="#e0e0e0" font-size="10" font-weight="bold">verification_mode?</text>
+
+        <!-- Branch: Off (left) -->
+        <line x1="340" y1="110" x2="260" y2="110" stroke="#3a3f5c" stroke-width="1.2"/>
+        <text x="250" y="103" text-anchor="middle" fill="#90a4ae" font-size="9">Off</text>
+        <rect id="fl-off" x="60" y="92" width="200" height="36" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text x="160" y="115" text-anchor="middle" fill="#b0bec5" font-size="10">spawn_blocking(func(inputs))</text>
+        <line x1="160" y1="128" x2="160" y2="160" stroke="#3a3f5c" stroke-width="1.2"/>
+        <rect id="fl-off-ret" x="90" y="160" width="140" height="30" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text x="160" y="180" text-anchor="middle" fill="#b0bec5" font-size="10">return Ok(output)</text>
+
+        <!-- Branch: DualCompute (right) -->
+        <line x1="560" y1="110" x2="640" y2="110" stroke="#3a3f5c" stroke-width="1.2"/>
+        <text x="650" y="103" text-anchor="middle" fill="#90a4ae" font-size="9">DualCompute</text>
+        <rect id="fl-dual" x="640" y="92" width="200" height="36" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text x="740" y="115" text-anchor="middle" fill="#b0bec5" font-size="10">tokio::join!(exec1, exec2)</text>
+        <line x1="740" y1="128" x2="740" y2="160" stroke="#3a3f5c" stroke-width="1.2"/>
+
+        <!-- Compare diamond -->
+        <polygon id="fl-cmp" points="740,160 810,185 740,210 670,185" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text x="740" y="189" text-anchor="middle" fill="#b0bec5" font-size="9">o1 == o2?</text>
+
+        <!-- Pass -->
+        <line x1="740" y1="210" x2="740" y2="230" stroke="#3a3f5c" stroke-width="1.2"/>
+        <text x="752" y="224" fill="#90a4ae" font-size="8">yes</text>
+        <rect id="fl-pass" x="690" y="230" width="100" height="30" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text x="740" y="250" text-anchor="middle" fill="#b0bec5" font-size="9">record_pass()</text>
+
+        <!-- Fail -->
+        <line x1="810" y1="185" x2="870" y2="185" stroke="#3a3f5c" stroke-width="1.2"/>
+        <text x="840" y="178" text-anchor="middle" fill="#90a4ae" font-size="8">no</text>
+        <rect id="fl-fail" x="820" y="205" width="60" height="26" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text x="850" y="222" text-anchor="middle" fill="#b0bec5" font-size="8">Err!</text>
+        <line x1="870" y1="185" x2="870" y2="205" stroke="#3a3f5c" stroke-width="1.2"/>
+
+        <!-- Branch: Sampled (center-down) -->
+        <line x1="450" y1="150" x2="450" y2="175" stroke="#3a3f5c" stroke-width="1.2"/>
+        <text x="465" y="167" fill="#90a4ae" font-size="9">Sampled</text>
+        <polygon id="fl-sample" points="450,175 540,205 450,235 360,205" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text x="450" y="203" text-anchor="middle" fill="#b0bec5" font-size="8">byte[0]/255</text>
+        <text x="450" y="215" text-anchor="middle" fill="#b0bec5" font-size="8">&lt; rate?</text>
+
+        <!-- Sampled → Yes (right, goes to dual path) -->
+        <line x1="540" y1="205" x2="640" y2="205" stroke="#3a3f5c" stroke-width="1.2" stroke-dasharray="4,3"/>
+        <text x="590" y="198" text-anchor="middle" fill="#90a4ae" font-size="8">yes → dual</text>
+
+        <!-- Sampled → No (left, goes to off path) -->
+        <line x1="360" y1="205" x2="260" y2="205" stroke="#3a3f5c" stroke-width="1.2" stroke-dasharray="4,3"/>
+        <line x1="260" y1="205" x2="260" y2="160" stroke="#3a3f5c" stroke-width="1.2" stroke-dasharray="4,3"/>
+        <line x1="260" y1="160" x2="230" y2="160" stroke="#3a3f5c" stroke-width="1.2" stroke-dasharray="4,3"/>
+        <text x="310" y="198" text-anchor="middle" fill="#90a4ae" font-size="8">no → off</text>
+
+        <!-- Step 0: Off path highlighted -->
+        <g id="fl-s0" opacity="1">
+          <text x="450" y="275" text-anchor="middle" fill="#81d4fa" font-size="15" font-weight="bold">Path 1: Off — Single Execution</text>
+
+          <!-- Highlight entry → match → Off → return -->
+          <rect x="330" y="15" width="240" height="36" rx="6" fill="none" stroke="#81d4fa" stroke-width="2.5"/>
+          <polygon points="450,70 560,110 450,150 340,110" fill="none" stroke="#81d4fa" stroke-width="2.5"/>
+          <line x1="340" y1="110" x2="260" y2="110" stroke="#81d4fa" stroke-width="2.5"/>
+          <rect x="60" y="92" width="200" height="36" rx="6" fill="none" stroke="#81d4fa" stroke-width="2.5"/>
+          <line x1="160" y1="128" x2="160" y2="160" stroke="#81d4fa" stroke-width="2.5"/>
+          <rect x="90" y="160" width="140" height="30" rx="6" fill="none" stroke="#81d4fa" stroke-width="2.5"/>
+
+          <!-- Animated dot along path -->
+          <circle r="6" fill="#81d4fa">
+            <animateMotion dur="3s" repeatCount="indefinite" path="M450,51 L450,70 L340,110 L160,110 L160,128 L160,175"/>
+          </circle>
+
+          <rect x="120" y="300" width="660" height="60" rx="8" fill="#232840" stroke="#81d4fa" stroke-width="1"/>
+          <text x="450" y="322" text-anchor="middle" fill="#81d4fa" font-size="11" font-weight="bold">Zero overhead — single spawn_blocking, no cloning, no comparison</text>
+          <text x="450" y="342" text-anchor="middle" fill="#b0bec5" font-size="10">CPU: 1× | Wall-clock: T | Default for trusted runtime workloads</text>
+        </g>
+
+        <!-- Step 1: DualCompute → pass -->
+        <g id="fl-s1" opacity="0">
+          <text x="450" y="275" text-anchor="middle" fill="#2ecc71" font-size="15" font-weight="bold">Path 2: DualCompute — Pass</text>
+
+          <rect x="330" y="15" width="240" height="36" rx="6" fill="none" stroke="#2ecc71" stroke-width="2.5"/>
+          <polygon points="450,70 560,110 450,150 340,110" fill="none" stroke="#2ecc71" stroke-width="2.5"/>
+          <line x1="560" y1="110" x2="640" y2="110" stroke="#2ecc71" stroke-width="2.5"/>
+          <rect x="640" y="92" width="200" height="36" rx="6" fill="none" stroke="#2ecc71" stroke-width="2.5"/>
+          <line x1="740" y1="128" x2="740" y2="160" stroke="#2ecc71" stroke-width="2.5"/>
+          <polygon points="740,160 810,185 740,210 670,185" fill="none" stroke="#2ecc71" stroke-width="2.5"/>
+          <line x1="740" y1="210" x2="740" y2="230" stroke="#2ecc71" stroke-width="2.5"/>
+          <rect x="690" y="230" width="100" height="30" rx="6" fill="none" stroke="#2ecc71" stroke-width="2.5"/>
+
+          <circle r="6" fill="#2ecc71">
+            <animateMotion dur="4s" repeatCount="indefinite" path="M450,51 L450,70 L560,110 L740,110 L740,160 L740,210 L740,245"/>
+          </circle>
+
+          <rect x="120" y="300" width="660" height="60" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="450" y="322" text-anchor="middle" fill="#2ecc71" font-size="11" font-weight="bold">Both executions match — record_pass(), return output</text>
+          <text x="450" y="342" text-anchor="middle" fill="#b0bec5" font-size="10">CPU: 2× | Wall-clock: ~T (parallel) | Function is deterministic &#x2714;</text>
+        </g>
+
+        <!-- Step 2: DualCompute → fail -->
+        <g id="fl-s2" opacity="0">
+          <text x="450" y="275" text-anchor="middle" fill="#e74c3c" font-size="15" font-weight="bold">Path 3: DualCompute — Fail</text>
+
+          <rect x="330" y="15" width="240" height="36" rx="6" fill="none" stroke="#e74c3c" stroke-width="2.5"/>
+          <polygon points="450,70 560,110 450,150 340,110" fill="none" stroke="#e74c3c" stroke-width="2.5"/>
+          <line x1="560" y1="110" x2="640" y2="110" stroke="#e74c3c" stroke-width="2.5"/>
+          <rect x="640" y="92" width="200" height="36" rx="6" fill="none" stroke="#e74c3c" stroke-width="2.5"/>
+          <line x1="740" y1="128" x2="740" y2="160" stroke="#e74c3c" stroke-width="2.5"/>
+          <polygon points="740,160 810,185 740,210 670,185" fill="none" stroke="#e74c3c" stroke-width="2.5"/>
+          <line x1="810" y1="185" x2="870" y2="185" stroke="#e74c3c" stroke-width="2.5"/>
+          <line x1="870" y1="185" x2="870" y2="205" stroke="#e74c3c" stroke-width="2.5"/>
+          <rect x="820" y="205" width="60" height="26" rx="6" fill="none" stroke="#e74c3c" stroke-width="2.5">
+            <animate attributeName="stroke-width" values="2.5;4;2.5" dur="1s" repeatCount="indefinite"/>
+          </rect>
+
+          <circle r="6" fill="#e74c3c">
+            <animateMotion dur="4s" repeatCount="indefinite" path="M450,51 L450,70 L560,110 L740,110 L740,160 L740,185 L810,185 L870,185 L870,218"/>
+          </circle>
+
+          <rect x="120" y="300" width="660" height="60" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1"/>
+          <text x="450" y="322" text-anchor="middle" fill="#e74c3c" font-size="11" font-weight="bold">Outputs differ — record_fail(), return DeterminismViolation</text>
+          <text x="450" y="342" text-anchor="middle" fill="#b0bec5" font-size="10">Error includes: addr, function_id, both output hashes and lengths</text>
+        </g>
+
+        <!-- Step 3: Sampled → threshold check -->
+        <g id="fl-s3" opacity="0">
+          <text x="450" y="275" text-anchor="middle" fill="#ce93d8" font-size="15" font-weight="bold">Path 4: Sampled — Deterministic Threshold</text>
+
+          <rect x="330" y="15" width="240" height="36" rx="6" fill="none" stroke="#ce93d8" stroke-width="2.5"/>
+          <polygon points="450,70 560,110 450,150 340,110" fill="none" stroke="#ce93d8" stroke-width="2.5"/>
+          <line x1="450" y1="150" x2="450" y2="175" stroke="#ce93d8" stroke-width="2.5"/>
+          <polygon points="450,175 540,205 450,235 360,205" fill="none" stroke="#ce93d8" stroke-width="2.5"/>
+
+          <!-- Both branches highlighted -->
+          <line x1="540" y1="205" x2="640" y2="205" stroke="#2ecc71" stroke-width="2" stroke-dasharray="5,3"/>
+          <text x="590" y="248" fill="#2ecc71" font-size="9" text-anchor="middle">below rate → dual compute</text>
+          <line x1="360" y1="205" x2="260" y2="205" stroke="#81d4fa" stroke-width="2" stroke-dasharray="5,3"/>
+          <line x1="260" y1="205" x2="260" y2="160" stroke="#81d4fa" stroke-width="2" stroke-dasharray="5,3"/>
+          <text x="290" y="248" fill="#81d4fa" font-size="9" text-anchor="middle">above rate → single exec</text>
+
+          <circle r="6" fill="#ce93d8">
+            <animateMotion dur="3s" repeatCount="indefinite" path="M450,51 L450,70 L450,150 L450,205"/>
+            <animate attributeName="opacity" values="1;1;1;0.5" dur="3s" repeatCount="indefinite"/>
+          </circle>
+
+          <rect x="120" y="300" width="660" height="60" rx="8" fill="#232840" stroke="#ce93d8" stroke-width="1"/>
+          <text x="450" y="322" text-anchor="middle" fill="#ce93d8" font-size="11" font-weight="bold">addr.as_bytes()[0] / 255.0 &lt; rate → dual, otherwise → single</text>
+          <text x="450" y="342" text-anchor="middle" fill="#b0bec5" font-size="10">Same CAddr always takes the same branch — failures are reproducible</text>
+        </g>
+
+        <!-- Step dots + hint -->
+        <circle id="fl-d0" cx="400" cy="400" r="5" fill="#81d4fa"/>
+        <circle id="fl-d1" cx="420" cy="400" r="5" fill="#3a3f5c"/>
+        <circle id="fl-d2" cx="440" cy="400" r="5" fill="#3a3f5c"/>
+        <circle id="fl-d3" cx="460" cy="400" r="5" fill="#3a3f5c"/>
+        <text id="fl-hint" x="450" y="430" text-anchor="middle" fill="#546e7a" font-size="11">Click to trace each decision path &#x2192;</text>
+      </svg>
+      <p class="figure-caption">Figure 15: Verification decision tree — four execution paths based on cache state and mode.</p>
+    </div>
+
+    <p>
+        The four paths cover every possible execution outcome. The <code>Off</code> path is the fast path — no cloning, no comparison, minimal overhead. The <code>DualCompute</code> path always forks, and its outcome depends on whether the function is deterministic. The <code>Sampled</code> path adds a threshold check that deterministically routes each CAddr to either the dual or single path. The threshold uses the first byte of the content address, which is uniformly distributed (BLAKE3 output), ensuring unbiased sampling without external RNG state.
+    </p>
+
+        <h3>5.5 Deterministic Sampling</h3>
+
+    <p>
+        Full dual-compute verification doubles CPU cost for every materialization. In practice, most compute functions are deterministic — only a small fraction contain hidden non-determinism from floating-point ordering, HashMap iteration, or timestamp embedding. <code>Sampled { rate }</code> mode addresses this by verifying only a fraction of materializations, chosen deterministically from the CAddr itself.
+    </p>
+
+    <p>
+        The sampling decision uses the first byte of the CAddr as a seed: <code>addr.as_bytes()[0] as f64 / 255.0</code>. Because Blake3 output bytes are uniformly distributed across 0–255, this produces an unbiased sample without any external random number generator. No <code>Mutex&lt;RNG&gt;</code>, no thread-local state, no coordination between threads — the CAddr alone determines whether verification occurs.
+    </p>
+
+    <p>
+        The critical property is <em>reproducibility</em>: the same CAddr always produces the same sampling decision. If sampling were random per-request, a flaky non-deterministic function might pass verification sometimes and fail other times for the same CAddr, making failures impossible to reproduce. With deterministic sampling, once a CAddr triggers a verification failure, it fails every time — the bug is pinned to a specific content address and can be debugged reliably.
+    </p>
+
+    <div class="code-block">
+        <pre>
+let sample = (addr.as_bytes()[0] as f64) / 255.0;
+let should_verify = sample < rate;</pre>
+    </div>
+
+    <p>
+        The following visualization shows how the sampling threshold partitions the CAddr space. Click to cycle through three views: 10% sampling rate, 50% sampling rate, and a demonstration that the same CAddr always receives the same decision regardless of when it is evaluated:
+    </p>
+
+    <div style="text-align: center; margin: 1.5em 0;">
+      <svg id="samp-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 400" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="400" rx="12" fill="#1a1e2e"/>
+
+        <!-- Title -->
+        <text x="450" y="30" text-anchor="middle" fill="#e0e0e0" font-size="14" font-weight="bold">Deterministic Sampling: bytes[0] / 255</text>
+
+        <!-- Number line (always visible) -->
+        <line x1="80" y1="100" x2="820" y2="100" stroke="#3a3f5c" stroke-width="2"/>
+        <text x="80" y="125" text-anchor="middle" fill="#90a4ae" font-size="10">0x00</text>
+        <text x="820" y="125" text-anchor="middle" fill="#90a4ae" font-size="10">0xFF</text>
+        <text x="450" y="125" text-anchor="middle" fill="#90a4ae" font-size="10">128</text>
+        <!-- Tick marks -->
+        <line x1="80" y1="96" x2="80" y2="104" stroke="#90a4ae" stroke-width="1"/>
+        <line x1="450" y1="96" x2="450" y2="104" stroke="#90a4ae" stroke-width="1"/>
+        <line x1="820" y1="96" x2="820" y2="104" stroke="#90a4ae" stroke-width="1"/>
+
+        <!-- 8 sample CAddrs as dots on the line (fixed positions) -->
+        <!-- bytes[0] values: 12, 45, 78, 102, 140, 180, 210, 245 -->
+        <!-- x = 80 + (val/255)*740 -->
+        <!-- 12→115, 45→211, 78→306, 102→376, 140→486, 180→602, 210→689, 245→791 -->
+
+        <!-- CAddr labels above -->
+        <text x="115" y="82" text-anchor="middle" fill="#90a4ae" font-size="7">0x0C…</text>
+        <text x="211" y="82" text-anchor="middle" fill="#90a4ae" font-size="7">0x2D…</text>
+        <text x="306" y="82" text-anchor="middle" fill="#90a4ae" font-size="7">0x4E…</text>
+        <text x="376" y="82" text-anchor="middle" fill="#90a4ae" font-size="7">0x66…</text>
+        <text x="486" y="82" text-anchor="middle" fill="#90a4ae" font-size="7">0x8C…</text>
+        <text x="602" y="82" text-anchor="middle" fill="#90a4ae" font-size="7">0xB4…</text>
+        <text x="689" y="82" text-anchor="middle" fill="#90a4ae" font-size="7">0xD2…</text>
+        <text x="791" y="82" text-anchor="middle" fill="#90a4ae" font-size="7">0xF5…</text>
+
+        <!-- Step 0: rate = 10% — threshold at byte 25 → x = 80 + (25/255)*740 ≈ 153 -->
+        <g id="sa-s0" opacity="1">
+          <rect x="80" y="92" width="73" height="16" rx="2" fill="#2ecc71" opacity="0.15"/>
+          <line x1="153" y1="70" x2="153" y2="130" stroke="#2ecc71" stroke-width="2" stroke-dasharray="4,3"/>
+          <text x="153" y="65" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">rate = 0.10</text>
+          <text x="116" y="145" text-anchor="middle" fill="#2ecc71" font-size="8">VERIFY</text>
+          <text x="490" y="145" text-anchor="middle" fill="#90a4ae" font-size="8">SKIP</text>
+
+          <!-- Dots: only 12 is below 25 -->
+          <circle cx="115" cy="100" r="6" fill="#2ecc71" stroke="#2ecc71" stroke-width="1.5"/>
+          <circle cx="211" cy="100" r="6" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/>
+          <circle cx="306" cy="100" r="6" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/>
+          <circle cx="376" cy="100" r="6" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/>
+          <circle cx="486" cy="100" r="6" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/>
+          <circle cx="602" cy="100" r="6" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/>
+          <circle cx="689" cy="100" r="6" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/>
+          <circle cx="791" cy="100" r="6" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/>
+
+          <!-- Info panel -->
+          <rect x="120" y="170" width="660" height="80" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="450" y="195" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">10% Sampling — Low overhead, broad coverage over time</text>
+          <text x="450" y="215" text-anchor="middle" fill="#b0bec5" font-size="10">Threshold: bytes[0] &lt; 25 → 1 of 8 CAddrs verified (12.5% actual)</text>
+          <text x="450" y="235" text-anchor="middle" fill="#b0bec5" font-size="10">CPU overhead: ~10% increase vs no verification</text>
+
+          <!-- Step indicator -->
+          <circle cx="420" cy="280" r="5" fill="#2ecc71"/><circle cx="440" cy="280" r="5" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/><circle cx="460" cy="280" r="5" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/>
+        </g>
+
+        <!-- Step 1: rate = 50% — threshold at byte 128 → x = 80 + (128/255)*740 ≈ 451 -->
+        <g id="sa-s1" opacity="0">
+          <rect x="80" y="92" width="371" height="16" rx="2" fill="#81d4fa" opacity="0.15"/>
+          <line x1="451" y1="70" x2="451" y2="130" stroke="#81d4fa" stroke-width="2" stroke-dasharray="4,3"/>
+          <text x="451" y="65" text-anchor="middle" fill="#81d4fa" font-size="10" font-weight="bold">rate = 0.50</text>
+          <text x="265" y="145" text-anchor="middle" fill="#81d4fa" font-size="8">VERIFY</text>
+          <text x="640" y="145" text-anchor="middle" fill="#90a4ae" font-size="8">SKIP</text>
+
+          <!-- Dots: 12,45,78,102 below 128 -->
+          <circle cx="115" cy="100" r="6" fill="#81d4fa" stroke="#81d4fa" stroke-width="1.5"/>
+          <circle cx="211" cy="100" r="6" fill="#81d4fa" stroke="#81d4fa" stroke-width="1.5"/>
+          <circle cx="306" cy="100" r="6" fill="#81d4fa" stroke="#81d4fa" stroke-width="1.5"/>
+          <circle cx="376" cy="100" r="6" fill="#81d4fa" stroke="#81d4fa" stroke-width="1.5"/>
+          <circle cx="486" cy="100" r="6" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/>
+          <circle cx="602" cy="100" r="6" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/>
+          <circle cx="689" cy="100" r="6" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/>
+          <circle cx="791" cy="100" r="6" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/>
+
+          <!-- Info panel -->
+          <rect x="120" y="170" width="660" height="80" rx="8" fill="#232840" stroke="#81d4fa" stroke-width="1"/>
+          <text x="450" y="195" text-anchor="middle" fill="#81d4fa" font-size="12" font-weight="bold">50% Sampling — Balanced coverage and cost</text>
+          <text x="450" y="215" text-anchor="middle" fill="#b0bec5" font-size="10">Threshold: bytes[0] &lt; 128 → 4 of 8 CAddrs verified (50% actual)</text>
+          <text x="450" y="235" text-anchor="middle" fill="#b0bec5" font-size="10">CPU overhead: ~50% increase vs no verification</text>
+
+          <!-- Step indicator -->
+          <circle cx="420" cy="280" r="5" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/><circle cx="440" cy="280" r="5" fill="#81d4fa"/><circle cx="460" cy="280" r="5" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/>
+        </g>
+
+        <!-- Step 2: Reproducibility demo — same CAddr, two runs, same decision -->
+        <g id="sa-s2" opacity="0">
+          <rect x="80" y="92" width="73" height="16" rx="2" fill="#f39c12" opacity="0.15"/>
+          <line x1="153" y1="70" x2="153" y2="130" stroke="#f39c12" stroke-width="2" stroke-dasharray="4,3"/>
+          <text x="153" y="65" text-anchor="middle" fill="#f39c12" font-size="10" font-weight="bold">rate = 0.10</text>
+
+          <!-- Highlight CAddr 0x0C with pulsing ring -->
+          <circle cx="115" cy="100" r="6" fill="#f39c12" stroke="#f39c12" stroke-width="1.5"/>
+          <circle cx="115" cy="100" r="11" fill="none" stroke="#f39c12" stroke-width="1.5">
+            <animate attributeName="r" values="11;15;11" dur="1.5s" repeatCount="indefinite"/>
+            <animate attributeName="opacity" values="1;0.3;1" dur="1.5s" repeatCount="indefinite"/>
+          </circle>
+          <!-- Other dots dim -->
+          <circle cx="211" cy="100" r="6" fill="#3a3f5c" stroke="#3a3f5c" stroke-width="1"/>
+          <circle cx="306" cy="100" r="6" fill="#3a3f5c" stroke="#3a3f5c" stroke-width="1"/>
+          <circle cx="376" cy="100" r="6" fill="#3a3f5c" stroke="#3a3f5c" stroke-width="1"/>
+          <circle cx="486" cy="100" r="6" fill="#3a3f5c" stroke="#3a3f5c" stroke-width="1"/>
+          <circle cx="602" cy="100" r="6" fill="#3a3f5c" stroke="#3a3f5c" stroke-width="1"/>
+          <circle cx="689" cy="100" r="6" fill="#3a3f5c" stroke="#3a3f5c" stroke-width="1"/>
+          <circle cx="791" cy="100" r="6" fill="#3a3f5c" stroke="#3a3f5c" stroke-width="1"/>
+
+          <!-- Two run boxes showing same decision -->
+          <rect x="160" y="170" width="260" height="70" rx="8" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+          <text x="290" y="192" text-anchor="middle" fill="#f39c12" font-size="11" font-weight="bold">Run 1 — Tuesday 14:03</text>
+          <text x="290" y="210" text-anchor="middle" fill="#b0bec5" font-size="10">CAddr 0x0C… → bytes[0]=12</text>
+          <text x="290" y="228" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">12/255 = 0.047 &lt; 0.10 → VERIFY ✓</text>
+
+          <rect x="480" y="170" width="260" height="70" rx="8" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+          <text x="610" y="192" text-anchor="middle" fill="#f39c12" font-size="11" font-weight="bold">Run 2 — Friday 09:17</text>
+          <text x="610" y="210" text-anchor="middle" fill="#b0bec5" font-size="10">CAddr 0x0C… → bytes[0]=12</text>
+          <text x="610" y="228" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">12/255 = 0.047 &lt; 0.10 → VERIFY ✓</text>
+
+          <!-- Equals sign between -->
+          <text x="450" y="210" text-anchor="middle" fill="#f39c12" font-size="20" font-weight="bold">=</text>
+
+          <!-- Info panel -->
+          <rect x="120" y="260" width="660" height="50" rx="8" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+          <text x="450" y="280" text-anchor="middle" fill="#f39c12" font-size="11" font-weight="bold">Same CAddr → same bytes[0] → same decision, every time</text>
+          <text x="450" y="298" text-anchor="middle" fill="#b0bec5" font-size="10">Failures are reproducible — no RNG, no flaky sampling</text>
+
+          <!-- Step indicator -->
+          <circle cx="420" cy="330" r="5" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/><circle cx="440" cy="330" r="5" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/><circle cx="460" cy="330" r="5" fill="#f39c12"/>
+        </g>
+
+        <!-- Hint -->
+        <text id="sa-hint" x="450" y="380" text-anchor="middle" fill="#546e7a" font-size="11">Click to cycle: 10% rate → 50% rate → reproducibility demo →</text>
+      </svg>
+      <p class="figure-caption">Figure 16: Sampling-based verification — CAddr space partitioning at different sampling rates.</p>
+    </div>
+
+    <ul>
+        <li><strong>Reproducibility:</strong> The same CAddr is always verified or never verified — not random per-request. A non-deterministic function that fails verification for CAddr <code>0x0C…</code> will fail every time that CAddr is materialized, making the bug reproducible and debuggable.</li>
+        <li><strong>Uniform distribution:</strong> Blake3 output bytes are uniformly distributed across 0–255, so the sampling fraction closely matches the configured rate across any population of CAddrs.</li>
+        <li><strong>No external RNG:</strong> No <code>Mutex&lt;RNG&gt;</code>, no thread-local state, no coordination between threads. The CAddr is the only input to the sampling decision, eliminating an entire class of concurrency concerns.</li>
+    </ul>
+
+    <div class="code-block">
+        <pre>
+CAddr bytes[0] distribution (uniform 0-255):
+
+rate = 0.10 (10%):
+  Verified:   bytes[0] < 25   (addrs 0x00.. to 0x19..)
+  Unverified: bytes[0] >= 25  (addrs 0x1a.. to 0xff..)
+
+rate = 0.50 (50%):
+  Verified:   bytes[0] < 128  (addrs 0x00.. to 0x7f..)
+  Unverified: bytes[0] >= 128 (addrs 0x80.. to 0xff..)</pre>
+    </div>
+
+    <p>
+        <strong>Why deterministic?</strong> If sampling were random, a flaky non-deterministic function might pass sometimes and fail sometimes for the same CAddr, making debugging impossible. With deterministic sampling, the same CAddr always triggers verification, so failures are reproducible.
+    </p>
+
+
+        <h3>5.6 Parallel Execution: Wall-Clock vs CPU Cost</h3>
+
+    <p>
+        <code>tokio::join!</code> runs both executions concurrently on separate blocking threads. This means verification adds ~2× CPU cost but only ~1× wall-clock time — the two executions overlap completely. On multi-core systems, the wall-clock overhead is just the comparison plus <code>tokio::join!</code> coordination, roughly 5% in benchmarks. The critical resource to monitor is CPU utilization, not latency.
+    </p>
+
+    <p>
+        This distinction matters for capacity planning. A service running at 40% CPU can enable DualCompute verification and rise to ~80% CPU without any increase in response latency. A service already at 80% CPU would need to scale horizontally first, or use <code>Sampled</code> mode to limit the CPU multiplier to <code>1 + rate</code> instead of 2×.
+    </p>
+
+    <p>
+        The following visualization compares three execution strategies. Click to cycle through them — animated dots on each thread show work progressing through time:
+    </p>
+
+    <div style="text-align: center; margin: 1.5em 0;">
+      <svg id="wall-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 420" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="420" rx="12" fill="#1a1e2e"/>
+
+        <!-- Title -->
+        <text x="450" y="30" text-anchor="middle" fill="#e0e0e0" font-size="14" font-weight="bold">Wall-Clock vs CPU Cost</text>
+
+        <!-- Shared: time axis -->
+        <text x="130" y="60" fill="#90a4ae" font-size="10">Time →</text>
+        <line x1="170" y1="57" x2="780" y2="57" stroke="#3a3f5c" stroke-width="1" stroke-dasharray="4,3"/>
+
+        <!-- Step 0: Normal mode (Off) — 1 thread, T wall, T CPU -->
+        <g id="wl-s0" opacity="1">
+          <text x="80" y="105" text-anchor="middle" fill="#81d4fa" font-size="12" font-weight="bold">Off</text>
+          <text x="80" y="120" text-anchor="middle" fill="#90a4ae" font-size="9">Normal mode</text>
+
+          <!-- Thread 1 -->
+          <text x="140" y="105" fill="#90a4ae" font-size="9">Thread 1</text>
+          <rect x="200" y="90" width="400" height="30" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="400" y="110" text-anchor="middle" fill="#81d4fa" font-size="10">func.execute(inputs)</text>
+          <!-- Moving dot -->
+          <circle r="5" fill="#81d4fa">
+            <animateMotion dur="3s" repeatCount="indefinite" path="M200,105 L600,105"/>
+          </circle>
+
+          <!-- Thread 2 idle -->
+          <text x="140" y="150" fill="#3a3f5c" font-size="9">Thread 2</text>
+          <rect x="200" y="135" width="400" height="30" rx="6" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1" stroke-dasharray="4,3"/>
+          <text x="400" y="155" text-anchor="middle" fill="#3a3f5c" font-size="10">idle</text>
+
+          <!-- Time markers -->
+          <line x1="200" y1="80" x2="200" y2="175" stroke="#3a3f5c" stroke-width="1" stroke-dasharray="2,3"/>
+          <line x1="600" y1="80" x2="600" y2="175" stroke="#81d4fa" stroke-width="1" stroke-dasharray="2,3"/>
+          <text x="600" y="190" text-anchor="middle" fill="#81d4fa" font-size="9">T</text>
+
+          <!-- Stats panel -->
+          <rect x="120" y="210" width="660" height="70" rx="8" fill="#232840" stroke="#81d4fa" stroke-width="1"/>
+          <text x="450" y="235" text-anchor="middle" fill="#81d4fa" font-size="12" font-weight="bold">Normal Execution — No Verification</text>
+          <text x="300" y="258" text-anchor="middle" fill="#b0bec5" font-size="10">Wall-clock: T</text>
+          <text x="450" y="258" text-anchor="middle" fill="#b0bec5" font-size="10">CPU: T</text>
+          <text x="600" y="258" text-anchor="middle" fill="#b0bec5" font-size="10">Overhead: 0%</text>
+
+          <!-- Step dots -->
+          <circle cx="420" cy="310" r="5" fill="#81d4fa"/><circle cx="440" cy="310" r="5" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/><circle cx="460" cy="310" r="5" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/>
+        </g>
+
+        <!-- Step 1: DualCompute parallel — 2 threads, T wall, 2T CPU -->
+        <g id="wl-s1" opacity="0">
+          <text x="80" y="105" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">Dual</text>
+          <text x="80" y="120" text-anchor="middle" fill="#90a4ae" font-size="9">Parallel</text>
+
+          <!-- Thread 1 -->
+          <text x="140" y="105" fill="#90a4ae" font-size="9">Thread 1</text>
+          <rect x="200" y="90" width="400" height="30" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="400" y="110" text-anchor="middle" fill="#2ecc71" font-size="10">func.execute(inputs₁)</text>
+          <circle r="5" fill="#2ecc71">
+            <animateMotion dur="3s" repeatCount="indefinite" path="M200,105 L600,105"/>
+          </circle>
+
+          <!-- Thread 2 -->
+          <text x="140" y="150" fill="#90a4ae" font-size="9">Thread 2</text>
+          <rect x="200" y="135" width="400" height="30" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="400" y="155" text-anchor="middle" fill="#2ecc71" font-size="10">func.execute(inputs₂)</text>
+          <circle r="5" fill="#2ecc71">
+            <animateMotion dur="3s" repeatCount="indefinite" path="M200,150 L600,150"/>
+          </circle>
+
+          <!-- Compare box after both finish -->
+          <rect x="620" y="112" width="100" height="30" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="670" y="132" text-anchor="middle" fill="#2ecc71" font-size="9">compare</text>
+          <line x1="600" y1="105" x2="620" y2="125" stroke="#2ecc71" stroke-width="1.2"/>
+          <line x1="600" y1="150" x2="620" y2="130" stroke="#2ecc71" stroke-width="1.2"/>
+
+          <!-- Time markers -->
+          <line x1="200" y1="80" x2="200" y2="175" stroke="#3a3f5c" stroke-width="1" stroke-dasharray="2,3"/>
+          <line x1="600" y1="80" x2="600" y2="175" stroke="#2ecc71" stroke-width="1" stroke-dasharray="2,3"/>
+          <text x="600" y="190" text-anchor="middle" fill="#2ecc71" font-size="9">T</text>
+          <line x1="720" y1="108" x2="720" y2="148" stroke="#2ecc71" stroke-width="1" stroke-dasharray="2,3"/>
+          <text x="720" y="160" text-anchor="middle" fill="#2ecc71" font-size="8">~T+5%</text>
+
+          <!-- tokio::join! label -->
+          <text x="400" y="82" text-anchor="middle" fill="#90a4ae" font-size="8">tokio::join! — both run concurrently</text>
+
+          <!-- Stats panel -->
+          <rect x="120" y="210" width="660" height="70" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="450" y="235" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">Parallel Dual Compute — tokio::join!</text>
+          <text x="300" y="258" text-anchor="middle" fill="#b0bec5" font-size="10">Wall-clock: ~T (+5%)</text>
+          <text x="450" y="258" text-anchor="middle" fill="#e74c3c" font-size="10">CPU: 2T</text>
+          <text x="600" y="258" text-anchor="middle" fill="#b0bec5" font-size="10">Latency overhead: ~5%</text>
+
+          <!-- Step dots -->
+          <circle cx="420" cy="310" r="5" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/><circle cx="440" cy="310" r="5" fill="#2ecc71"/><circle cx="460" cy="310" r="5" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/>
+        </g>
+
+        <!-- Step 2: Hypothetical sequential — 1 thread, 2T wall, 2T CPU -->
+        <g id="wl-s2" opacity="0">
+          <text x="80" y="105" text-anchor="middle" fill="#e74c3c" font-size="12" font-weight="bold">Dual</text>
+          <text x="80" y="120" text-anchor="middle" fill="#90a4ae" font-size="9">Sequential ✗</text>
+
+          <!-- Thread 1: two blocks back to back -->
+          <text x="140" y="105" fill="#90a4ae" font-size="9">Thread 1</text>
+          <rect x="200" y="90" width="200" height="30" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="300" y="110" text-anchor="middle" fill="#e74c3c" font-size="9">exec 1</text>
+          <rect x="400" y="90" width="200" height="30" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="500" y="110" text-anchor="middle" fill="#e74c3c" font-size="9">exec 2</text>
+          <!-- Dot traverses both blocks -->
+          <circle r="5" fill="#e74c3c">
+            <animateMotion dur="4s" repeatCount="indefinite" path="M200,105 L400,105 L400,105 L600,105"/>
+          </circle>
+
+          <!-- Thread 2 idle -->
+          <text x="140" y="150" fill="#3a3f5c" font-size="9">Thread 2</text>
+          <rect x="200" y="135" width="400" height="30" rx="6" fill="#1a1e2e" stroke="#3a3f5c" stroke-width="1" stroke-dasharray="4,3"/>
+          <text x="400" y="155" text-anchor="middle" fill="#3a3f5c" font-size="10">idle</text>
+
+          <!-- Time markers -->
+          <line x1="200" y1="80" x2="200" y2="175" stroke="#3a3f5c" stroke-width="1" stroke-dasharray="2,3"/>
+          <line x1="400" y1="80" x2="400" y2="175" stroke="#e74c3c" stroke-width="1" stroke-dasharray="2,3"/>
+          <text x="400" y="190" text-anchor="middle" fill="#e74c3c" font-size="9">T</text>
+          <line x1="600" y1="80" x2="600" y2="175" stroke="#e74c3c" stroke-width="1" stroke-dasharray="2,3"/>
+          <text x="600" y="190" text-anchor="middle" fill="#e74c3c" font-size="9">2T</text>
+
+          <!-- Stats panel -->
+          <rect x="120" y="210" width="660" height="70" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1"/>
+          <text x="450" y="235" text-anchor="middle" fill="#e74c3c" font-size="12" font-weight="bold">Sequential Dual Compute — Not Used</text>
+          <text x="300" y="258" text-anchor="middle" fill="#e74c3c" font-size="10">Wall-clock: 2T</text>
+          <text x="450" y="258" text-anchor="middle" fill="#e74c3c" font-size="10">CPU: 2T</text>
+          <text x="600" y="258" text-anchor="middle" fill="#b0bec5" font-size="10">Latency overhead: 100% ✗</text>
+
+          <!-- Step dots -->
+          <circle cx="420" cy="310" r="5" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/><circle cx="440" cy="310" r="5" fill="#3a3f5c" stroke="#90a4ae" stroke-width="1"/><circle cx="460" cy="310" r="5" fill="#e74c3c"/>
+        </g>
+
+        <!-- Comparison table (always visible) -->
+        <rect x="120" y="330" width="660" height="55" rx="8" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+        <text x="230" y="350" text-anchor="middle" fill="#90a4ae" font-size="9" font-weight="bold">Mode</text>
+        <text x="400" y="350" text-anchor="middle" fill="#90a4ae" font-size="9" font-weight="bold">Wall-clock</text>
+        <text x="530" y="350" text-anchor="middle" fill="#90a4ae" font-size="9" font-weight="bold">CPU</text>
+        <text x="680" y="350" text-anchor="middle" fill="#90a4ae" font-size="9" font-weight="bold">Latency hit</text>
+        <line x1="140" y1="355" x2="760" y2="355" stroke="#3a3f5c" stroke-width="0.5"/>
+        <text x="230" y="370" text-anchor="middle" fill="#81d4fa" font-size="9">Off</text>
+        <text x="400" y="370" text-anchor="middle" fill="#b0bec5" font-size="9">T</text>
+        <text x="530" y="370" text-anchor="middle" fill="#b0bec5" font-size="9">T</text>
+        <text x="680" y="370" text-anchor="middle" fill="#b0bec5" font-size="9">0%</text>
+        <text x="230" y="383" text-anchor="middle" fill="#2ecc71" font-size="9">DualCompute</text>
+        <text x="400" y="383" text-anchor="middle" fill="#2ecc71" font-size="9">~T</text>
+        <text x="530" y="383" text-anchor="middle" fill="#e74c3c" font-size="9">2T</text>
+        <text x="680" y="383" text-anchor="middle" fill="#2ecc71" font-size="9">~5%</text>
+
+        <!-- Hint -->
+        <text id="wl-hint" x="450" y="410" text-anchor="middle" fill="#546e7a" font-size="11">Click to compare: Off → Parallel → Sequential →</text>
+      </svg>
+      <p class="figure-caption">Figure 17: Wall-clock impact — verification off, parallel dual-compute, and sequential strategies.</p>
+    </div>
+
+    <p>
+        On multi-core systems, the wall-clock overhead is just the comparison plus <code>tokio::join!</code> coordination — roughly 5% in benchmarks. The main cost is CPU utilization: monitor CPU usage when enabling verification to ensure sufficient headroom. A service at 40% CPU can enable DualCompute and rise to ~80% without latency impact; a service at 80% should use <code>Sampled</code> mode instead.
+    </p>
+
+
+        <h3>5.7 Verification Statistics</h3>
+
+    <p>
+        Verification is only useful if failures are visible. The executor maintains a <code>VerificationStats</code> struct with three atomic counters — <code>total_verified</code>, <code>total_passed</code>, and <code>total_failed</code> — plus a mutex-guarded <code>last_failure</code> holding the most recent <code>DerivaError</code>. All counters use <code>AtomicU64</code> with <code>Ordering::Relaxed</code>, which is sufficient because these are monotonic counters read only for observability — no correctness decisions depend on their exact values at any instant.
+    </p>
+
+    <p>
+        Every verification outcome calls either <code>record_pass()</code> or <code>record_fail()</code>, both of which increment <code>total_verified</code> first, then the outcome-specific counter. The <code>failure_rate()</code> method computes the ratio on demand, returning 0.0 when no verifications have occurred to avoid division by zero. This rate is the primary signal for alerting: a failure rate above zero in a system expected to be fully deterministic indicates a bug, while a sustained low rate in a system with known non-deterministic functions confirms that sampling is catching violations at the expected frequency.
+    </p>
+
+    <div class="code-block">
+        <pre>
+pub struct VerificationStats {
+    pub total_verified: AtomicU64,
+    pub total_passed: AtomicU64,
+    pub total_failed: AtomicU64,
+    pub last_failure: tokio::sync::Mutex&lt;Option&lt;DerivaError&gt;&gt;,
+}
+
+impl VerificationStats {
+    pub fn record_pass(&self) {
+        self.total_verified.fetch_add(1, Ordering::Relaxed);
+        self.total_passed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub async fn record_fail(&self, error: DerivaError) {
+        self.total_verified.fetch_add(1, Ordering::Relaxed);
+        self.total_failed.fetch_add(1, Ordering::Relaxed);
+        *self.last_failure.lock().await = Some(error);
+    }
+
+    pub fn failure_rate(&self) -> f64 {
+        let verified = self.total_verified.load(Ordering::Relaxed);
+        if verified == 0 { return 0.0; }
+        let failed = self.total_failed.load(Ordering::Relaxed);
+        failed as f64 / verified as f64
+    }
+}</pre>
+    </div>
+
+    <p>
+        The <code>last_failure</code> field uses a <code>tokio::sync::Mutex</code> rather than a standard mutex because it is accessed from async contexts (the gRPC Status RPC handler). Storing only the most recent failure rather than a full history keeps memory bounded — in practice, the first failure is the most diagnostic, and subsequent failures for the same function tend to carry identical information.
+    </p>
+
+    <p>
+        These statistics feed into Prometheus metrics (§8) and the gRPC Status RPC, enabling monitoring dashboards to track verification health at runtime. A typical alert configuration fires when <code>failure_rate()</code> exceeds zero for more than one reporting interval, since any non-zero rate in a deterministic system warrants investigation.
+    </p>
+
+        <h3>5.8 Error Details for Debugging</h3>
+
+    <p>
+        A verification failure is only useful if it carries enough context to reproduce and diagnose the root cause. When <code>execute_verified()</code> detects a mismatch, it constructs a <code>DeterminismViolation</code> error containing the CAddr, the function identifier, both output hashes, and both output lengths. This combination uniquely identifies <em>what</em> was computed, <em>which function</em> computed it, and <em>how</em> the two outputs differed — without requiring the full output bytes to be retained in the error.
+    </p>
+
+    <div class="code-block">
+        <pre>
+DeterminismViolation {
+    addr: "caddr(0xabc123...)",
+    function_id: "transform/v1",
+    output_1_hash: "0xdef456...",
+    output_2_hash: "0x789abc...",
+    output_1_len: 1024,
+    output_2_len: 1024,
+}</pre>
+    </div>
+
+    <p>
+        The relationship between output length and hash provides the first diagnostic signal. When both lengths are identical but hashes differ, the content itself varies — the most common causes are HashMap iteration order, floating-point non-associativity from parallel reductions, or timestamp embedding. When lengths differ, the divergence is structural: conditional logic with side effects, buffer allocation differences, or serialization format variations. This distinction narrows the search space before any code inspection begins.
+    </p>
+
+    <p>
+        The <code>function_id</code> field pins the failure to a specific compute function registration, which is critical in systems with hundreds of registered functions. Combined with the CAddr, it provides a fully reproducible test case: fetch the inputs for that CAddr, invoke that function twice, and compare. No log correlation or request tracing is needed — the error itself contains the reproduction recipe.
+    </p>
+
+    <p>
+        Failure patterns also carry diagnostic information:
+    </p>
+
+    <ul>
+        <li><strong>Same length, different hash:</strong> Content differs — likely HashMap ordering or floating-point non-associativity</li>
+        <li><strong>Different length:</strong> Structural divergence — conditional logic with side effects, or serialization format variation</li>
+        <li><strong>Reproducible on every run:</strong> The function is fundamentally non-deterministic for this input — run with <code>DualCompute</code> to confirm</li>
+        <li><strong>Intermittent:</strong> Race condition or timing-dependent behavior — use <code>Sampled { rate: 1.0 }</code> with many iterations to increase detection probability and collect multiple failure instances</li>
+    </ul>
+
+        <h3>5.9 Verification Scope</h3>
+
+    <p>
+        Verification is scoped to exactly one step in the materialization pipeline: <code>func.execute()</code>. This is a deliberate design choice, not a limitation. Every other step in the pipeline — cache lookup, leaf store reads, DAG traversal, recursive input resolution — is deterministic by construction. Cache lookups return bytes keyed by content address; leaf reads return immutable raw data; DAG traversal follows fixed edges. None of these can produce different outputs for the same inputs, so verifying them would consume CPU without catching any bugs.
+    </p>
+
+    <div class="code-block">
+        <pre>
+materialize(addr)
+    │
+    ├── cache.get()        ← NOT verified (no computation)
+    ├── leaf_store.get()   ← NOT verified (raw data)
+    ├── dag.get_recipe()   ← NOT verified (graph lookup)
+    ├── resolve inputs     ← NOT verified (recursive, each node verified individually)
+    │
+    ├── func.execute()     ← VERIFIED (this is where non-determinism can occur)
+    │
+    └── cache.put()        ← NOT verified (stores verified result)</pre>
+    </div>
+
+    <p>
+        The compute function is the only point where arbitrary user-supplied code runs, and arbitrary code is the only source of non-determinism in a content-addressed system. HashMap iteration order, floating-point reduction order, thread-local caches, timestamp calls, random number generators — all of these live inside <code>func.execute()</code>. By focusing verification on this single boundary, the system achieves maximum detection coverage with minimum overhead.
+    </p>
+
+    <p>
+        Recursive input resolution does not need separate verification because each node in the DAG is verified individually during its own materialization. If node A depends on nodes B and C, then B and C are each verified when they are materialized. By the time A's <code>func.execute()</code> runs, its inputs are already verified outputs — the verification guarantee composes transitively through the DAG without any additional mechanism.
+    </p>
+
+        <h3>5.10 Configuration and Deployment</h3>
+
+    <p>
+        Verification mode is a field on <code>ExecutorConfig</code>, defaulting to <code>Off</code>. This means existing deployments gain no overhead and require no code changes — verification is purely opt-in. The default concurrency limit of <code>num_cpus::get() * 2</code> provides enough thread headroom for dual-compute without starving other work, since each verification doubles the blocking threads for a single materialization but the semaphore still bounds total concurrency.
+    </p>
+
+    <div class="code-block">
+        <pre>
+pub struct ExecutorConfig {
+    pub max_concurrency: usize,
+    pub dedup_channel_capacity: usize,
+    pub verification: VerificationMode,
+}
+
+impl Default for ExecutorConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrency: num_cpus::get() * 2,
+            dedup_channel_capacity: 16,
+            verification: VerificationMode::Off,
+        }
+    }
+}</pre>
+    </div>
+
+    <p>
+        The recommended deployment strategy varies by environment. In development and CI/CD, <code>DualCompute</code> catches non-determinism before code reaches any shared environment — test suites that exercise compute functions will fail immediately if any function produces inconsistent outputs. After function updates, temporarily enabling <code>DualCompute</code> verifies that the new version maintains determinism for the same inputs, catching regressions that unit tests might miss because they typically test with a single invocation.
+    </p>
+
+    <p>
+        In deployed environments, <code>Sampled { rate: 0.05 }</code> provides continuous auditing at roughly 5% additional CPU cost. This catches non-determinism that only manifests under real workload conditions — thread contention patterns, memory pressure, or input distributions that differ from test data. The rate can be tuned per-environment: higher in staging where CPU headroom is plentiful, lower where utilization is tight.
+    </p>
+
+    <ul>
+        <li><strong>Development:</strong> <code>DualCompute</code> — catch bugs before commit</li>
+        <li><strong>CI/CD:</strong> <code>DualCompute</code> — gate merges on determinism</li>
+        <li><strong>Deployed (default):</strong> <code>Off</code> — zero overhead until opted in</li>
+        <li><strong>Deployed (auditing):</strong> <code>Sampled { rate: 0.05 }</code> — continuous 5% sampling</li>
+        <li><strong>After function updates:</strong> <code>DualCompute</code> temporarily to verify new versions</li>
+    </ul>
+
+    <h3>5.11 Comparison with Build Systems</h3>
+    
+    <p>
+        Build systems (Bazel, Ninja) also require deterministic build actions, but they detect non-determinism differently:
+    </p>
+
+    <ul>
+        <li><strong>Bazel:</strong> Sandboxing + hermetic builds — prevents non-determinism by restricting access to timestamps, network, etc. Does not verify outputs.</li>
+        <li><strong>Ninja:</strong> Assumes determinism — no verification. Relies on developers to ensure build rules are deterministic.</li>
+        <li><strong>Deriva:</strong> Active verification — executes twice and compares. Catches non-determinism that sandboxing misses (e.g., HashMap iteration, floating-point).</li>
+    </ul>
+
+    <p>
+        Deriva's approach is more expensive (2× compute) but provides stronger guarantees: it detects non-determinism in the actual output, not just in the environment. This is critical for computation addressing, where the CAddr IS the identity — any non-determinism breaks the system's fundamental invariant.
+    </p>
+
+    </section>
+</div>

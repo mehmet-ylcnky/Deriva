@@ -1,0 +1,1105 @@
+<div class="section-content">
+    <section id="tradeoffs">
+    <h2>10. Tradeoffs</h2>
+    
+    <p>
+        The robustness features presented here involve deliberate tradeoffs between correctness, performance, complexity, and operational cost. This section examines the design decisions and their implications for real-world deployments.
+    </p>
+
+        <h3>10.1 Persistent DAG: Storage vs Speed</h3>
+
+    <p>
+        The original Deriva DAG was an in-memory <code>HashMap&lt;CAddr, Vec&lt;CAddr&gt;&gt;</code> — zero storage cost, instant startup, and trivial implementation. But every restart discarded the entire dependency graph, forcing full recomputation of all recipes. Worse, without reverse edges (child → parent), there was no way to answer "what depends on this address?" — making cascade invalidation and garbage collection impossible.
+    </p>
+
+    <p>
+        The persistent DAG (sled-backed B-trees with forward and reverse edge indices) trades insert latency and storage for crash recovery, invalidation, and GC. The cost is measurable: 0.5–5ms per insert versus ~0.1ms in-memory, and ~12 MB storage for 10,000 recipes. But inserts are rare compared to reads (roughly 1:1000 in typical workloads), so the latency penalty applies to a small fraction of operations. The storage cost is negligible relative to the blob data it indexes.
+    </p>
+
+    <div class="svg-container" style="margin: 1.5rem 0;">
+      <svg id="td-dag-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 340" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="340" rx="12" fill="#1a1e2e"/>
+        <text x="450" y="25" text-anchor="middle" fill="#e0e0e0" font-size="14" font-weight="bold">Persistent DAG: Storage vs Speed</text>
+
+        <!-- State 0: In-memory -->
+        <g id="td-s0" style="opacity:1">
+          <text x="450" y="50" text-anchor="middle" fill="#81d4fa" font-size="11" font-weight="bold">In-Memory HashMap</text>
+
+          <!-- HashMap box -->
+          <rect x="300" y="65" width="300" height="100" rx="8" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="450" y="88" text-anchor="middle" fill="#81d4fa" font-size="10" font-weight="bold">HashMap&lt;CAddr, Vec&lt;CAddr&gt;&gt;</text>
+          <text x="320" y="110" fill="#b0bec5" font-size="9">addr_A → [addr_B, addr_C]</text>
+          <text x="320" y="126" fill="#b0bec5" font-size="9">addr_D → [addr_A]</text>
+          <text x="320" y="142" fill="#b0bec5" font-size="9">addr_E → [addr_D, addr_C]</text>
+          <text x="320" y="158" fill="#90a4ae" font-size="8">Forward edges only</text>
+
+          <!-- Pros column -->
+          <rect x="50" y="185" width="250" height="110" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="175" y="205" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Advantages</text>
+          <text x="70" y="225" fill="#b0bec5" font-size="9">✓ Insert: ~0.1ms (direct hash)</text>
+          <text x="70" y="243" fill="#b0bec5" font-size="9">✓ Storage: 0 bytes on disk</text>
+          <text x="70" y="261" fill="#b0bec5" font-size="9">✓ Startup: instant</text>
+          <text x="70" y="279" fill="#b0bec5" font-size="9">✓ No external dependencies</text>
+
+          <!-- Cons column -->
+          <rect x="600" y="185" width="250" height="110" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1"/>
+          <text x="725" y="205" text-anchor="middle" fill="#e74c3c" font-size="10" font-weight="bold">Limitations</text>
+          <text x="620" y="225" fill="#e74c3c" font-size="9">✗ Lost on restart → full recompute</text>
+          <text x="620" y="243" fill="#e74c3c" font-size="9">✗ No reverse edges</text>
+          <text x="620" y="261" fill="#e74c3c" font-size="9">✗ No cascade invalidation</text>
+          <text x="620" y="279" fill="#e74c3c" font-size="9">✗ No garbage collection</text>
+
+          <text x="450" y="320" text-anchor="middle" fill="#90a4ae" font-size="10">Click to see persistent alternative →</text>
+        </g>
+
+        <!-- State 1: Persistent -->
+        <g id="td-s1" style="opacity:0">
+          <text x="450" y="50" text-anchor="middle" fill="#2ecc71" font-size="11" font-weight="bold">Persistent Sled B-Trees</text>
+
+          <!-- Sled box with two trees -->
+          <rect x="150" y="65" width="260" height="100" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="280" y="85" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Forward Tree</text>
+          <text x="170" y="103" fill="#b0bec5" font-size="9">addr_A → [addr_B, addr_C]</text>
+          <text x="170" y="119" fill="#b0bec5" font-size="9">addr_D → [addr_A]</text>
+          <text x="170" y="135" fill="#b0bec5" font-size="9">addr_E → [addr_D, addr_C]</text>
+          <text x="170" y="155" fill="#90a4ae" font-size="8">Materialization path</text>
+
+          <rect x="490" y="65" width="260" height="100" rx="8" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+          <text x="620" y="85" text-anchor="middle" fill="#f39c12" font-size="10" font-weight="bold">Reverse Tree</text>
+          <text x="510" y="103" fill="#b0bec5" font-size="9">addr_B → [addr_A]</text>
+          <text x="510" y="119" fill="#b0bec5" font-size="9">addr_C → [addr_A, addr_E]</text>
+          <text x="510" y="135" fill="#b0bec5" font-size="9">addr_A → [addr_D]</text>
+          <text x="510" y="155" fill="#90a4ae" font-size="8">Invalidation + GC path</text>
+
+          <!-- Animated dot on forward tree -->
+          <circle r="3" fill="#2ecc71" opacity="0.9">
+            <animate attributeName="cx" values="150;410;150" dur="3s" repeatCount="indefinite"/>
+            <animate attributeName="cy" values="100;100;100" dur="3s" repeatCount="indefinite"/>
+          </circle>
+          <!-- Animated dot on reverse tree -->
+          <circle r="3" fill="#f39c12" opacity="0.9">
+            <animate attributeName="cx" values="750;490;750" dur="3s" repeatCount="indefinite"/>
+            <animate attributeName="cy" values="120;120;120" dur="3s" repeatCount="indefinite"/>
+          </circle>
+
+          <!-- Cost/benefit summary -->
+          <rect x="50" y="185" width="380" height="110" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="240" y="205" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Gained</text>
+          <text x="70" y="225" fill="#b0bec5" font-size="9">✓ Crash recovery — DAG survives restarts</text>
+          <text x="70" y="243" fill="#b0bec5" font-size="9">✓ Cascade invalidation via reverse edges</text>
+          <text x="70" y="261" fill="#b0bec5" font-size="9">✓ Garbage collection via reachability</text>
+          <text x="70" y="279" fill="#b0bec5" font-size="9">✓ Read latency: ~0.2ms (B-tree lookup)</text>
+
+          <rect x="470" y="185" width="380" height="110" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+          <text x="660" y="205" text-anchor="middle" fill="#f39c12" font-size="10" font-weight="bold">Cost</text>
+          <text x="490" y="225" fill="#b0bec5" font-size="9">Insert: 0.5–5ms (B-tree + fsync)</text>
+          <text x="490" y="243" fill="#b0bec5" font-size="9">Storage: ~12 MB per 10k recipes</text>
+          <text x="490" y="261" fill="#b0bec5" font-size="9">Dependency: sled embedded DB</text>
+          <text x="490" y="279" fill="#90a4ae" font-size="9">Insert:Read ratio ≈ 1:1000 → cost is rare</text>
+
+          <text x="450" y="320" text-anchor="middle" fill="#90a4ae" font-size="10">Click to compare with in-memory →</text>
+        </g>
+
+        <text id="td-hint" x="450" y="336" text-anchor="middle" fill="#90a4ae" font-size="9">Click to toggle: In-Memory ↔ Persistent</text>
+      </svg>
+      <p class="figure-caption">Figure 26: Persistent DAG tradeoff — in-memory speed vs crash-safe durability.</p>
+    </div>
+
+    <p>
+        The decision to persist is not primarily about performance — it is about enabling capabilities that are impossible without reverse edges and crash recovery. Cascade invalidation (§6), garbage collection (§7), and restart-safe materialization (§3.4) all depend on the persistent DAG. The insert latency cost is paid once per recipe creation; the benefits are realized on every invalidation, every GC cycle, and every server restart.
+    </p>
+
+    <h3>10.2 Async Executor: Complexity vs Parallelism</h3>
+
+    <p>
+        The original synchronous executor materialized DAG nodes in a simple recursive loop: resolve inputs, compute, store, return. The control flow was straightforward, stack traces were readable, and there was no async runtime overhead. But sequential execution meant that independent branches of the DAG were materialized one at a time, leaving CPU cores idle while waiting for I/O or compute on a single branch.
+    </p>
+
+    <p>
+        The async executor (§4) replaces the recursive loop with <code>tokio::spawn</code> per DAG node, a semaphore for concurrency control, and broadcast channels for deduplication. The complexity cost is real: <code>Send + 'static</code> bounds propagate through the codebase, async stack traces are harder to read, and the tokio runtime adds a dependency. But the parallelism gains are substantial — 1.5× to 8.5× speedup depending on DAG shape — because independent branches execute concurrently and duplicate requests are coalesced rather than recomputed.
+    </p>
+
+    <div class="svg-container" style="margin: 1.5rem 0;">
+      <svg id="td-async-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 360" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="360" rx="12" fill="#1a1e2e"/>
+        <text x="450" y="25" text-anchor="middle" fill="#e0e0e0" font-size="14" font-weight="bold">Async Executor: Complexity vs Parallelism</text>
+
+        <!-- State 0: Synchronous -->
+        <g id="ta-s0" style="opacity:1">
+          <text x="450" y="50" text-anchor="middle" fill="#81d4fa" font-size="11" font-weight="bold">Synchronous Executor</text>
+
+          <!-- Timeline -->
+          <line x1="80" y1="80" x2="820" y2="80" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="60" y="84" text-anchor="end" fill="#90a4ae" font-size="9">t</text>
+
+          <!-- Sequential blocks -->
+          <rect x="80" y="90" width="180" height="30" rx="4" fill="#81d4fa" opacity="0.3" stroke="#81d4fa" stroke-width="1"/>
+          <text x="170" y="110" text-anchor="middle" fill="#e0e0e0" font-size="9">input_1 (180ms)</text>
+
+          <rect x="260" y="90" width="180" height="30" rx="4" fill="#2ecc71" opacity="0.3" stroke="#2ecc71" stroke-width="1"/>
+          <text x="350" y="110" text-anchor="middle" fill="#e0e0e0" font-size="9">input_2 (180ms)</text>
+
+          <rect x="440" y="90" width="260" height="30" rx="4" fill="#f39c12" opacity="0.3" stroke="#f39c12" stroke-width="1"/>
+          <text x="570" y="110" text-anchor="middle" fill="#e0e0e0" font-size="9">input_3 (260ms)</text>
+
+          <rect x="700" y="90" width="100" height="30" rx="4" fill="#ce93d8" opacity="0.3" stroke="#ce93d8" stroke-width="1"/>
+          <text x="750" y="110" text-anchor="middle" fill="#e0e0e0" font-size="9">final (100ms)</text>
+
+          <text x="820" y="140" text-anchor="end" fill="#e74c3c" font-size="11" font-weight="bold">Total: 720ms</text>
+
+          <!-- Idle CPU indicator -->
+          <text x="80" y="160" fill="#90a4ae" font-size="9">CPU cores:</text>
+          <rect x="80" y="168" width="720" height="10" rx="2" fill="#3a3f5c"/>
+          <rect x="80" y="168" width="720" height="10" rx="2" fill="#81d4fa" opacity="0.3"/>
+          <text x="440" y="176" text-anchor="middle" fill="#e0e0e0" font-size="7">1 core active</text>
+          <rect x="80" y="182" width="720" height="10" rx="2" fill="#3a3f5c"/>
+          <text x="440" y="190" text-anchor="middle" fill="#90a4ae" font-size="7">idle</text>
+          <rect x="80" y="196" width="720" height="10" rx="2" fill="#3a3f5c"/>
+          <text x="440" y="204" text-anchor="middle" fill="#90a4ae" font-size="7">idle</text>
+
+          <!-- Pros/cons -->
+          <rect x="50" y="220" width="380" height="90" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="240" y="240" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Simple</text>
+          <text x="70" y="258" fill="#b0bec5" font-size="9">✓ Readable stack traces</text>
+          <text x="70" y="274" fill="#b0bec5" font-size="9">✓ No Send bounds, no runtime</text>
+          <text x="70" y="290" fill="#b0bec5" font-size="9">✓ Deterministic execution order</text>
+
+          <rect x="470" y="220" width="380" height="90" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1"/>
+          <text x="660" y="240" text-anchor="middle" fill="#e74c3c" font-size="10" font-weight="bold">Slow</text>
+          <text x="490" y="258" fill="#e74c3c" font-size="9">✗ Sequential — no parallelism</text>
+          <text x="490" y="274" fill="#e74c3c" font-size="9">✗ No deduplication</text>
+          <text x="490" y="290" fill="#e74c3c" font-size="9">✗ CPU cores sit idle</text>
+
+          <text x="450" y="335" text-anchor="middle" fill="#90a4ae" font-size="10">Click to see async alternative →</text>
+        </g>
+
+        <!-- State 1: Async -->
+        <g id="ta-s1" style="opacity:0">
+          <text x="450" y="50" text-anchor="middle" fill="#2ecc71" font-size="11" font-weight="bold">Async Executor (tokio)</text>
+
+          <!-- Timeline -->
+          <line x1="80" y1="80" x2="820" y2="80" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="60" y="84" text-anchor="end" fill="#90a4ae" font-size="9">t</text>
+
+          <!-- Parallel blocks -->
+          <rect x="80" y="90" width="180" height="30" rx="4" fill="#81d4fa" opacity="0.3" stroke="#81d4fa" stroke-width="1"/>
+          <text x="170" y="110" text-anchor="middle" fill="#e0e0e0" font-size="9">input_1 (180ms)</text>
+
+          <rect x="80" y="125" width="180" height="30" rx="4" fill="#2ecc71" opacity="0.3" stroke="#2ecc71" stroke-width="1"/>
+          <text x="170" y="145" text-anchor="middle" fill="#e0e0e0" font-size="9">input_2 (180ms)</text>
+
+          <rect x="80" y="160" width="260" height="30" rx="4" fill="#f39c12" opacity="0.3" stroke="#f39c12" stroke-width="1"/>
+          <text x="210" y="180" text-anchor="middle" fill="#e0e0e0" font-size="9">input_3 (260ms)</text>
+
+          <rect x="340" y="125" width="100" height="30" rx="4" fill="#ce93d8" opacity="0.3" stroke="#ce93d8" stroke-width="1"/>
+          <text x="390" y="145" text-anchor="middle" fill="#e0e0e0" font-size="9">final (100ms)</text>
+
+          <!-- Animated dots flowing through parallel lanes -->
+          <circle r="3" fill="#81d4fa" opacity="0.9">
+            <animate attributeName="cx" values="80;260;80" dur="2s" repeatCount="indefinite"/>
+            <animate attributeName="cy" values="105;105;105" dur="2s" repeatCount="indefinite"/>
+          </circle>
+          <circle r="3" fill="#2ecc71" opacity="0.9">
+            <animate attributeName="cx" values="80;260;80" dur="2s" repeatCount="indefinite"/>
+            <animate attributeName="cy" values="140;140;140" dur="2s" repeatCount="indefinite"/>
+          </circle>
+          <circle r="3" fill="#f39c12" opacity="0.9">
+            <animate attributeName="cx" values="80;340;80" dur="2.8s" repeatCount="indefinite"/>
+            <animate attributeName="cy" values="175;175;175" dur="2.8s" repeatCount="indefinite"/>
+          </circle>
+
+          <text x="440" y="200" text-anchor="start" fill="#2ecc71" font-size="11" font-weight="bold">Total: 360ms (2.0× speedup)</text>
+
+          <!-- CPU utilization -->
+          <text x="80" y="218" fill="#90a4ae" font-size="9">CPU cores:</text>
+          <rect x="80" y="226" width="360" height="10" rx="2" fill="#81d4fa" opacity="0.3"/>
+          <text x="260" y="234" text-anchor="middle" fill="#e0e0e0" font-size="7">core 1: input_1 → final</text>
+          <rect x="80" y="240" width="260" height="10" rx="2" fill="#2ecc71" opacity="0.3"/>
+          <text x="210" y="248" text-anchor="middle" fill="#e0e0e0" font-size="7">core 2: input_2</text>
+          <rect x="80" y="254" width="260" height="10" rx="2" fill="#f39c12" opacity="0.3"/>
+          <text x="210" y="262" text-anchor="middle" fill="#e0e0e0" font-size="7">core 3: input_3</text>
+
+          <!-- Pros/cons -->
+          <rect x="50" y="275" width="380" height="55" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="240" y="295" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Fast (1.5–8.5× speedup)</text>
+          <text x="70" y="315" fill="#b0bec5" font-size="9">✓ Parallel branches + dedup + full CPU use</text>
+
+          <rect x="470" y="275" width="380" height="55" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+          <text x="660" y="295" text-anchor="middle" fill="#f39c12" font-size="10" font-weight="bold">Complex</text>
+          <text x="490" y="315" fill="#b0bec5" font-size="9">Send bounds, async traces, tokio dependency</text>
+
+          <text x="450" y="350" text-anchor="middle" fill="#90a4ae" font-size="10">Click to compare with synchronous →</text>
+        </g>
+
+        <text id="ta-hint" x="450" y="356" text-anchor="middle" fill="#90a4ae" font-size="9">Click to toggle: Synchronous ↔ Async</text>
+      </svg>
+      <p class="figure-caption">Figure 27: Async executor tradeoff — synchronous simplicity vs concurrent parallelism gains.</p>
+    </div>
+
+    <p>
+        The speedup depends on DAG shape. A linear chain (A → B → C → D) sees no benefit because each node depends on the previous one — there is nothing to parallelize. A wide DAG with many independent branches (A depends on B, C, D, E independently) sees near-linear speedup up to the semaphore limit. Real-world DAGs fall between these extremes, typically achieving 2–4× speedup. The broadcast-channel deduplication (§4.2) adds further value: when multiple requests materialize overlapping subgraphs, the second request subscribes to the first's broadcast rather than recomputing, turning redundant work into a channel receive.
+    </p>
+
+        <h3>10.3 Verification Mode: Cost vs Confidence</h3>
+
+    <p>
+        Verification (§5) detects non-determinism by re-executing compute functions and comparing outputs. The tradeoff is direct: more verification means more confidence but higher CPU cost. The three modes — Off, DualCompute, and Sampled — represent distinct points on this curve, and the right choice depends on the environment.
+    </p>
+
+    <div class="svg-container" style="margin: 1.5rem 0;">
+      <svg id="td-verify-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 370" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="370" rx="12" fill="#1a1e2e"/>
+        <text x="450" y="25" text-anchor="middle" fill="#e0e0e0" font-size="14" font-weight="bold">Verification Mode: Cost vs Confidence</text>
+
+        <!-- Step 0: Off -->
+        <g id="tv-s0" style="opacity:1">
+          <text x="450" y="52" text-anchor="middle" fill="#e74c3c" font-size="12" font-weight="bold">Mode: Off</text>
+
+          <!-- Pipeline -->
+          <rect x="100" y="70" width="130" height="36" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="165" y="93" text-anchor="middle" fill="#81d4fa" font-size="10">Resolve inputs</text>
+          <line x1="230" y1="88" x2="290" y2="88" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#tv-arr)"/>
+
+          <rect x="290" y="70" width="130" height="36" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="355" y="93" text-anchor="middle" fill="#2ecc71" font-size="10">Compute (1×)</text>
+          <line x1="420" y1="88" x2="480" y2="88" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#tv-arr)"/>
+
+          <rect x="480" y="70" width="130" height="36" rx="6" fill="#232840" stroke="#ce93d8" stroke-width="1.5"/>
+          <text x="545" y="93" text-anchor="middle" fill="#ce93d8" font-size="10">Store result</text>
+
+          <!-- No verification -->
+          <rect x="290" y="120" width="130" height="28" rx="6" fill="#3a3f5c" stroke="#e74c3c" stroke-width="1" stroke-dasharray="4,3"/>
+          <text x="355" y="139" text-anchor="middle" fill="#e74c3c" font-size="9">No verification</text>
+
+          <!-- Cost bar -->
+          <text x="100" y="180" fill="#90a4ae" font-size="9">CPU overhead:</text>
+          <rect x="200" y="170" width="500" height="16" rx="3" fill="#3a3f5c"/>
+          <rect x="200" y="170" width="5" height="16" rx="3" fill="#2ecc71"/>
+          <text x="215" y="182" fill="#2ecc71" font-size="9" font-weight="bold">0%</text>
+
+          <text x="100" y="210" fill="#90a4ae" font-size="9">Coverage:</text>
+          <rect x="200" y="200" width="500" height="16" rx="3" fill="#3a3f5c"/>
+          <rect x="200" y="200" width="5" height="16" rx="3" fill="#e74c3c"/>
+          <text x="215" y="212" fill="#e74c3c" font-size="9" font-weight="bold">0%</text>
+
+          <!-- Verdict -->
+          <rect x="100" y="235" width="700" height="55" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="120" y="258" fill="#e74c3c" font-size="11" font-weight="bold">⚠ Risk: Silent non-determinism</text>
+          <text x="120" y="278" fill="#b0bec5" font-size="10">Non-deterministic compute functions produce wrong results with no warning. Bugs propagate silently through the DAG.</text>
+
+          <text x="450" y="320" text-anchor="middle" fill="#90a4ae" font-size="10">Click to see DualCompute →</text>
+        </g>
+
+        <!-- Step 1: DualCompute -->
+        <g id="tv-s1" style="opacity:0">
+          <text x="450" y="52" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">Mode: DualCompute</text>
+
+          <!-- Pipeline with dual compute -->
+          <rect x="60" y="70" width="110" height="36" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="115" y="93" text-anchor="middle" fill="#81d4fa" font-size="10">Resolve</text>
+          <line x1="170" y1="80" x2="230" y2="72" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#tv-arr)"/>
+          <line x1="170" y1="96" x2="230" y2="104" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#tv-arr)"/>
+
+          <rect x="230" y="55" width="130" height="30" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="295" y="75" text-anchor="middle" fill="#2ecc71" font-size="9">Compute #1</text>
+          <rect x="230" y="92" width="130" height="30" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+          <text x="295" y="112" text-anchor="middle" fill="#f39c12" font-size="9">Compute #2</text>
+
+          <line x1="360" y1="72" x2="420" y2="88" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#tv-arr)"/>
+          <line x1="360" y1="104" x2="420" y2="88" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#tv-arr)"/>
+
+          <rect x="420" y="72" width="90" height="32" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="465" y="92" text-anchor="middle" fill="#81d4fa" font-size="9">o1 == o2?</text>
+
+          <line x1="510" y1="88" x2="560" y2="78" stroke="#2ecc71" stroke-width="1.5" marker-end="url(#tv-arr-g)"/>
+          <text x="570" y="78" fill="#2ecc71" font-size="9">✓ Store</text>
+          <line x1="510" y1="88" x2="560" y2="100" stroke="#e74c3c" stroke-width="1.5" marker-end="url(#tv-arr-r)"/>
+          <text x="570" y="102" fill="#e74c3c" font-size="9">✗ Error</text>
+
+          <!-- Animated dots -->
+          <circle r="3" fill="#2ecc71" opacity="0.8"><animate attributeName="cx" values="170;295;420" dur="1.5s" repeatCount="indefinite"/><animate attributeName="cy" values="80;70;88" dur="1.5s" repeatCount="indefinite"/></circle>
+          <circle r="3" fill="#f39c12" opacity="0.8"><animate attributeName="cx" values="170;295;420" dur="1.5s" repeatCount="indefinite"/><animate attributeName="cy" values="96;107;88" dur="1.5s" repeatCount="indefinite"/></circle>
+
+          <!-- Cost bars -->
+          <text x="100" y="155" fill="#90a4ae" font-size="9">CPU overhead:</text>
+          <rect x="200" y="145" width="500" height="16" rx="3" fill="#3a3f5c"/>
+          <rect x="200" y="145" width="500" height="16" rx="3" fill="#f39c12" opacity="0.5"/>
+          <text x="460" y="157" text-anchor="middle" fill="#e0e0e0" font-size="9" font-weight="bold">+100% CPU (2× compute)</text>
+
+          <text x="100" y="185" fill="#90a4ae" font-size="9">Wall-clock:</text>
+          <rect x="200" y="175" width="500" height="16" rx="3" fill="#3a3f5c"/>
+          <rect x="200" y="175" width="30" height="16" rx="3" fill="#f39c12" opacity="0.5"/>
+          <text x="240" y="187" fill="#f39c12" font-size="9" font-weight="bold">+6% (parallel execution)</text>
+
+          <text x="100" y="215" fill="#90a4ae" font-size="9">Coverage:</text>
+          <rect x="200" y="205" width="500" height="16" rx="3" fill="#3a3f5c"/>
+          <rect x="200" y="205" width="500" height="16" rx="3" fill="#2ecc71" opacity="0.5"/>
+          <text x="450" y="217" text-anchor="middle" fill="#e0e0e0" font-size="9" font-weight="bold">100% — every compute verified</text>
+
+          <!-- Verdict -->
+          <rect x="100" y="240" width="700" height="55" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="120" y="263" fill="#2ecc71" font-size="11" font-weight="bold">✓ Best for: CI/CD pipelines</text>
+          <text x="120" y="280" fill="#b0bec5" font-size="10">Full coverage catches all non-determinism. The 2× CPU cost is acceptable in test environments where correctness matters most.</text>
+
+          <text x="450" y="320" text-anchor="middle" fill="#90a4ae" font-size="10">Click to see Sampled →</text>
+        </g>
+
+        <!-- Step 2: Sampled -->
+        <g id="tv-s2" style="opacity:0">
+          <text x="450" y="52" text-anchor="middle" fill="#f39c12" font-size="12" font-weight="bold">Mode: Sampled(0.05)</text>
+
+          <!-- Pipeline with sampling gate -->
+          <rect x="80" y="70" width="110" height="36" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="135" y="93" text-anchor="middle" fill="#81d4fa" font-size="10">Compute</text>
+          <line x1="190" y1="88" x2="260" y2="88" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#tv-arr)"/>
+
+          <rect x="260" y="70" width="120" height="36" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+          <text x="320" y="85" text-anchor="middle" fill="#f39c12" font-size="9">Sample gate</text>
+          <text x="320" y="99" text-anchor="middle" fill="#f39c12" font-size="9" font-weight="bold">5% chance</text>
+
+          <!-- 95% path: skip -->
+          <line x1="380" y1="80" x2="450" y2="72" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#tv-arr)"/>
+          <rect x="450" y="58" width="120" height="28" rx="6" fill="#232840" stroke="#90a4ae" stroke-width="1"/>
+          <text x="510" y="77" text-anchor="middle" fill="#90a4ae" font-size="9">95%: skip → store</text>
+
+          <!-- 5% path: verify -->
+          <line x1="380" y1="96" x2="450" y2="104" stroke="#f39c12" stroke-width="1.5" marker-end="url(#tv-arr)"/>
+          <rect x="450" y="92" width="120" height="28" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="510" y="111" text-anchor="middle" fill="#2ecc71" font-size="9">5%: re-compute</text>
+
+          <line x1="570" y1="106" x2="630" y2="106" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#tv-arr)"/>
+          <rect x="630" y="92" width="90" height="28" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="675" y="111" text-anchor="middle" fill="#81d4fa" font-size="9">o1 == o2?</text>
+
+          <!-- Cost bars -->
+          <text x="100" y="155" fill="#90a4ae" font-size="9">CPU overhead:</text>
+          <rect x="200" y="145" width="500" height="16" rx="3" fill="#3a3f5c"/>
+          <rect x="200" y="145" width="25" height="16" rx="3" fill="#2ecc71" opacity="0.5"/>
+          <text x="235" y="157" fill="#2ecc71" font-size="9" font-weight="bold">+5% CPU</text>
+
+          <text x="100" y="185" fill="#90a4ae" font-size="9">Wall-clock:</text>
+          <rect x="200" y="175" width="500" height="16" rx="3" fill="#3a3f5c"/>
+          <rect x="200" y="175" width="5" height="16" rx="3" fill="#2ecc71" opacity="0.5"/>
+          <text x="215" y="187" fill="#2ecc71" font-size="9" font-weight="bold">+0.3%</text>
+
+          <text x="100" y="215" fill="#90a4ae" font-size="9">Coverage:</text>
+          <rect x="200" y="205" width="500" height="16" rx="3" fill="#3a3f5c"/>
+          <rect x="200" y="205" width="25" height="16" rx="3" fill="#f39c12" opacity="0.5"/>
+          <text x="235" y="217" fill="#f39c12" font-size="9" font-weight="bold">5% — statistical detection</text>
+
+          <!-- Verdict -->
+          <rect x="100" y="240" width="700" height="55" rx="8" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+          <text x="120" y="263" fill="#f39c12" font-size="11" font-weight="bold">✓ Best for: Deployed systems</text>
+          <text x="120" y="280" fill="#b0bec5" font-size="10">Low overhead catches persistent non-determinism over time. A 5% sample detects a bug that occurs 10% of the time within ~20 requests.</text>
+
+          <text x="450" y="320" text-anchor="middle" fill="#90a4ae" font-size="10">Click to restart →</text>
+        </g>
+
+        <defs>
+          <marker id="tv-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#3a3f5c"/></marker>
+          <marker id="tv-arr-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#2ecc71"/></marker>
+          <marker id="tv-arr-r" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#e74c3c"/></marker>
+        </defs>
+
+        <text id="tv-hint" x="450" y="360" text-anchor="middle" fill="#90a4ae" font-size="9">Click to cycle: Off → DualCompute → Sampled →</text>
+      </svg>
+      <p class="figure-caption">Figure 28: Verification tradeoff — confidence level vs CPU cost across three modes.</p>
+    </div>
+
+    <p>
+        The recommended deployment strategy uses DualCompute in CI/CD (where the 2× CPU cost is acceptable and full coverage catches regressions before release) and Sampled(0.05) in deployed systems (where the 0.3% wall-clock overhead is negligible and statistical detection catches persistent bugs over time). Off mode is appropriate only for compute functions that are provably deterministic by construction — pure arithmetic, deterministic serialization — where verification adds cost without value.
+    </p>
+
+        <h3>10.4 Semaphore Placement: Deadlock Prevention vs Throughput</h3>
+
+    <p>
+        The async executor uses a semaphore to limit concurrent compute operations (§4.3). The critical design question is <em>when</em> the semaphore permit is acquired. Acquiring before input resolution is simpler — one acquire/release pair wraps the entire operation — but creates a deadlock risk: a parent node holds a permit while waiting for child nodes to complete, but the children cannot acquire permits because the parent is holding one. In a deep DAG with a semaphore limit of N, N+1 levels of nesting guarantees deadlock.
+    </p>
+
+    <p>
+        The chosen design acquires the permit only during the CPU-bound compute phase, releasing it before any I/O or recursive materialization. This eliminates deadlock entirely (a node never holds a permit while waiting for another node) and improves throughput by 20–30% (permits are held for milliseconds of compute rather than seconds of I/O wait).
+    </p>
+
+    <div class="svg-container" style="margin: 1.5rem 0;">
+      <svg id="td-sem-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 350" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="350" rx="12" fill="#1a1e2e"/>
+        <text x="450" y="25" text-anchor="middle" fill="#e0e0e0" font-size="14" font-weight="bold">Semaphore Placement: Deadlock Prevention vs Throughput</text>
+
+        <!-- State 0: Acquire before (dangerous) -->
+        <g id="ts-s0" style="opacity:1">
+          <text x="450" y="52" text-anchor="middle" fill="#e74c3c" font-size="12" font-weight="bold">Option A: Acquire Before Input Resolution</text>
+
+          <!-- Timeline with permit held across everything -->
+          <text x="60" y="82" fill="#90a4ae" font-size="9">Node A:</text>
+          <rect x="120" y="70" width="680" height="24" rx="4" fill="#e74c3c" opacity="0.15" stroke="#e74c3c" stroke-width="1" stroke-dasharray="4,3"/>
+          <text x="130" y="86" fill="#e74c3c" font-size="8">permit held</text>
+          <rect x="140" y="73" width="80" height="18" rx="3" fill="#81d4fa" opacity="0.3"/>
+          <text x="180" y="86" text-anchor="middle" fill="#e0e0e0" font-size="7">resolve</text>
+          <rect x="240" y="73" width="400" height="18" rx="3" fill="#f39c12" opacity="0.3"/>
+          <text x="440" y="86" text-anchor="middle" fill="#e0e0e0" font-size="7">waiting for children...</text>
+          <rect x="660" y="73" width="120" height="18" rx="3" fill="#2ecc71" opacity="0.3"/>
+          <text x="720" y="86" text-anchor="middle" fill="#e0e0e0" font-size="7">compute</text>
+
+          <text x="60" y="115" fill="#90a4ae" font-size="9">Node B:</text>
+          <rect x="240" y="103" width="200" height="24" rx="4" fill="#e74c3c" opacity="0.15" stroke="#e74c3c" stroke-width="1" stroke-dasharray="4,3"/>
+          <text x="250" y="119" fill="#e74c3c" font-size="8">permit held</text>
+          <rect x="260" y="106" width="60" height="18" rx="3" fill="#81d4fa" opacity="0.3"/>
+          <rect x="340" y="106" width="80" height="18" rx="3" fill="#f39c12" opacity="0.3"/>
+          <text x="380" y="119" text-anchor="middle" fill="#e0e0e0" font-size="7">waiting...</text>
+
+          <text x="60" y="148" fill="#90a4ae" font-size="9">Node C:</text>
+          <rect x="340" y="136" width="30" height="24" rx="4" fill="#e74c3c" opacity="0.15" stroke="#e74c3c" stroke-width="1"/>
+          <text x="380" y="152" fill="#e74c3c" font-size="9" font-weight="bold">✗ BLOCKED — no permits left!</text>
+
+          <!-- Semaphore indicator -->
+          <rect x="650" y="130" width="180" height="50" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="740" y="150" text-anchor="middle" fill="#e74c3c" font-size="10" font-weight="bold">Semaphore(2)</text>
+          <text x="740" y="166" text-anchor="middle" fill="#e74c3c" font-size="9">0 available → DEADLOCK</text>
+
+          <!-- Explanation -->
+          <rect x="80" y="195" width="740" height="50" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="100" y="215" fill="#e74c3c" font-size="11" font-weight="bold">⚠ Deadlock: Parent holds permit while waiting for child that needs a permit</text>
+          <text x="100" y="233" fill="#b0bec5" font-size="9">With semaphore(N), any DAG deeper than N levels will deadlock. This is not a theoretical risk — real DAGs have 5–20 levels.</text>
+
+          <rect x="200" y="260" width="500" height="40" rx="6" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="450" y="278" text-anchor="middle" fill="#90a4ae" font-size="9">Throughput: Low — permits held during I/O wait (seconds), not just compute (milliseconds)</text>
+          <text x="450" y="292" text-anchor="middle" fill="#e74c3c" font-size="9">Deadlock risk: High — guaranteed for deep DAGs</text>
+
+          <text x="450" y="330" text-anchor="middle" fill="#90a4ae" font-size="10">Click to see safe alternative →</text>
+        </g>
+
+        <!-- State 1: Acquire during compute only (safe) -->
+        <g id="ts-s1" style="opacity:0">
+          <text x="450" y="52" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">Option B: Acquire Only During Compute (chosen)</text>
+
+          <!-- Timeline with permit held only during compute -->
+          <text x="60" y="82" fill="#90a4ae" font-size="9">Node A:</text>
+          <rect x="140" y="73" width="80" height="18" rx="3" fill="#81d4fa" opacity="0.3"/>
+          <text x="180" y="86" text-anchor="middle" fill="#e0e0e0" font-size="7">resolve</text>
+          <rect x="240" y="73" width="200" height="18" rx="3" fill="#f39c12" opacity="0.3"/>
+          <text x="340" y="86" text-anchor="middle" fill="#e0e0e0" font-size="7">wait for children (no permit)</text>
+          <rect x="460" y="70" width="120" height="24" rx="4" fill="#2ecc71" opacity="0.15" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="520" y="86" text-anchor="middle" fill="#2ecc71" font-size="8" font-weight="bold">compute ✓</text>
+
+          <text x="60" y="115" fill="#90a4ae" font-size="9">Node B:</text>
+          <rect x="260" y="106" width="60" height="18" rx="3" fill="#81d4fa" opacity="0.3"/>
+          <rect x="340" y="103" width="80" height="24" rx="4" fill="#2ecc71" opacity="0.15" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="380" y="119" text-anchor="middle" fill="#2ecc71" font-size="8" font-weight="bold">compute ✓</text>
+
+          <text x="60" y="148" fill="#90a4ae" font-size="9">Node C:</text>
+          <rect x="260" y="139" width="60" height="18" rx="3" fill="#81d4fa" opacity="0.3"/>
+          <rect x="340" y="136" width="80" height="24" rx="4" fill="#2ecc71" opacity="0.15" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="380" y="152" text-anchor="middle" fill="#2ecc71" font-size="8" font-weight="bold">compute ✓</text>
+
+          <!-- Animated dots -->
+          <circle r="3" fill="#2ecc71" opacity="0.8"><animate attributeName="cx" values="460;580;460" dur="1.5s" repeatCount="indefinite"/><animate attributeName="cy" values="82;82;82" dur="1.5s" repeatCount="indefinite"/></circle>
+          <circle r="3" fill="#2ecc71" opacity="0.8"><animate attributeName="cx" values="340;420;340" dur="1.2s" repeatCount="indefinite"/><animate attributeName="cy" values="115;115;115" dur="1.2s" repeatCount="indefinite"/></circle>
+
+          <!-- Semaphore indicator -->
+          <rect x="650" y="130" width="180" height="50" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="740" y="150" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Semaphore(2)</text>
+          <text x="740" y="166" text-anchor="middle" fill="#2ecc71" font-size="9">Always available → no deadlock</text>
+
+          <!-- Explanation -->
+          <rect x="80" y="195" width="740" height="50" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="100" y="215" fill="#2ecc71" font-size="11" font-weight="bold">✓ Deadlock-free: No node holds a permit while waiting for another node</text>
+          <text x="100" y="233" fill="#b0bec5" font-size="9">Permits are held only during CPU-bound compute (milliseconds), released before any I/O or recursive materialization.</text>
+
+          <rect x="200" y="260" width="500" height="40" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="450" y="278" text-anchor="middle" fill="#2ecc71" font-size="9">Throughput: +20–30% — permits recycled quickly, more concurrent computes</text>
+          <text x="450" y="292" text-anchor="middle" fill="#2ecc71" font-size="9">Deadlock risk: Zero — mathematically impossible regardless of DAG depth</text>
+
+          <text x="450" y="330" text-anchor="middle" fill="#90a4ae" font-size="10">Click to compare with Option A →</text>
+        </g>
+
+        <text id="ts-hint" x="450" y="346" text-anchor="middle" fill="#90a4ae" font-size="9">Click to toggle: Acquire-Before ↔ Acquire-During-Compute</text>
+      </svg>
+      <p class="figure-caption">Figure 29: Semaphore placement tradeoff — full-scope holding vs compute-only acquisition.</p>
+    </div>
+
+    <p>
+        The complexity cost of the chosen design is an RAII guard pattern that acquires the permit, executes compute, and releases on drop — roughly 5 lines of code. The alternative (deadlock in deep DAGs) is an operational catastrophe that is difficult to diagnose and impossible to recover from without restarting the server. The tradeoff is unambiguous: a small increase in code complexity eliminates an entire class of failure.
+    </p>
+
+        <h3>10.5 Cascade Invalidation: Correctness vs Performance</h3>
+
+    <p>
+        When a leaf blob changes, the original Deriva invalidated only that single address — fast (0.1ms) but incorrect. Any recipe that depended on the changed blob, directly or transitively, retained its cached output computed from the old data. Clients reading those recipes got stale results with no indication that the underlying data had changed. This is the "silent stale data" problem described in §6.1.
+    </p>
+
+    <p>
+        Full cascade invalidation (§6) traverses the reverse edge index to find all transitive dependents and evicts their cached outputs. The cost scales with the number of dependents: 0.3ms for 10 dependents, 31ms for 1,000. This is slower than single-address invalidation, but the operation is rare (invalidation happens when source data changes, not on every read) and the alternative — serving stale data — violates the fundamental correctness guarantee of computation addressing.
+    </p>
+
+    <div class="svg-container" style="margin: 1.5rem 0;">
+      <svg id="td-casc-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 370" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="370" rx="12" fill="#1a1e2e"/>
+        <text x="450" y="25" text-anchor="middle" fill="#e0e0e0" font-size="14" font-weight="bold">Cascade Invalidation: Correctness vs Performance</text>
+
+        <!-- State 0: Single-address (broken) -->
+        <g id="tc-s0" style="opacity:1">
+          <text x="450" y="52" text-anchor="middle" fill="#e74c3c" font-size="12" font-weight="bold">Single-Address Invalidation (original)</text>
+
+          <!-- DAG: leaf → A → B → C -->
+          <rect x="80" y="80" width="90" height="32" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+          <text x="125" y="100" text-anchor="middle" fill="#f39c12" font-size="9">Leaf (changed)</text>
+
+          <line x1="170" y1="96" x2="240" y2="96" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#tc-arr)"/>
+
+          <rect x="240" y="80" width="90" height="32" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="285" y="100" text-anchor="middle" fill="#2ecc71" font-size="9">Recipe A</text>
+
+          <line x1="330" y1="96" x2="400" y2="96" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#tc-arr)"/>
+
+          <rect x="400" y="80" width="90" height="32" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="445" y="100" text-anchor="middle" fill="#2ecc71" font-size="9">Recipe B</text>
+
+          <line x1="490" y1="96" x2="560" y2="96" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#tc-arr)"/>
+
+          <rect x="560" y="80" width="90" height="32" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="605" y="100" text-anchor="middle" fill="#2ecc71" font-size="9">Recipe C</text>
+
+          <!-- Only leaf invalidated -->
+          <line x1="125" y1="112" x2="125" y2="135" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="125" y="150" text-anchor="middle" fill="#e74c3c" font-size="9" font-weight="bold">✗ evicted</text>
+
+          <!-- A, B, C still cached (stale) -->
+          <text x="285" y="130" text-anchor="middle" fill="#f39c12" font-size="8">cached (STALE)</text>
+          <text x="445" y="130" text-anchor="middle" fill="#f39c12" font-size="8">cached (STALE)</text>
+          <text x="605" y="130" text-anchor="middle" fill="#f39c12" font-size="8">cached (STALE)</text>
+
+          <!-- Client reads stale -->
+          <rect x="700" y="80" width="80" height="32" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="740" y="100" text-anchor="middle" fill="#81d4fa" font-size="9">Client</text>
+          <line x1="650" y1="96" x2="700" y2="96" stroke="#e74c3c" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#tc-arr-r)"/>
+          <text x="675" y="88" fill="#e74c3c" font-size="7">stale!</text>
+
+          <!-- Cost/problem -->
+          <rect x="80" y="170" width="350" height="50" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="255" y="190" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Fast: 0.1ms</text>
+          <text x="255" y="208" text-anchor="middle" fill="#b0bec5" font-size="9">Only one cache eviction</text>
+
+          <rect x="470" y="170" width="350" height="50" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="645" y="190" text-anchor="middle" fill="#e74c3c" font-size="10" font-weight="bold">⚠ Incorrect: Stale dependents</text>
+          <text x="645" y="208" text-anchor="middle" fill="#b0bec5" font-size="9">Recipes A, B, C serve old data silently</text>
+
+          <text x="450" y="260" text-anchor="middle" fill="#90a4ae" font-size="10">Click to see cascade alternative →</text>
+        </g>
+
+        <!-- State 1: Full cascade (correct) -->
+        <g id="tc-s1" style="opacity:0">
+          <text x="450" y="52" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">Full Cascade Invalidation (chosen)</text>
+
+          <!-- Same DAG -->
+          <rect x="80" y="80" width="90" height="32" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+          <text x="125" y="100" text-anchor="middle" fill="#f39c12" font-size="9">Leaf (changed)</text>
+
+          <line x1="170" y1="96" x2="240" y2="96" stroke="#e74c3c" stroke-width="2" marker-end="url(#tc-arr-r)"/>
+
+          <rect x="240" y="80" width="90" height="32" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="285" y="100" text-anchor="middle" fill="#e74c3c" font-size="9">Recipe A</text>
+
+          <line x1="330" y1="96" x2="400" y2="96" stroke="#e74c3c" stroke-width="2" marker-end="url(#tc-arr-r)"/>
+
+          <rect x="400" y="80" width="90" height="32" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="445" y="100" text-anchor="middle" fill="#e74c3c" font-size="9">Recipe B</text>
+
+          <line x1="490" y1="96" x2="560" y2="96" stroke="#e74c3c" stroke-width="2" marker-end="url(#tc-arr-r)"/>
+
+          <rect x="560" y="80" width="90" height="32" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="605" y="100" text-anchor="middle" fill="#e74c3c" font-size="9">Recipe C</text>
+
+          <!-- All evicted -->
+          <text x="125" y="130" text-anchor="middle" fill="#e74c3c" font-size="8" font-weight="bold">✗ evicted</text>
+          <text x="285" y="130" text-anchor="middle" fill="#e74c3c" font-size="8" font-weight="bold">✗ evicted</text>
+          <text x="445" y="130" text-anchor="middle" fill="#e74c3c" font-size="8" font-weight="bold">✗ evicted</text>
+          <text x="605" y="130" text-anchor="middle" fill="#e74c3c" font-size="8" font-weight="bold">✗ evicted</text>
+
+          <!-- Animated cascade wave -->
+          <circle r="4" fill="#e74c3c" opacity="0.7">
+            <animate attributeName="cx" values="125;285;445;605" dur="2s" repeatCount="indefinite"/>
+            <animate attributeName="cy" values="96;96;96;96" dur="2s" repeatCount="indefinite"/>
+          </circle>
+
+          <!-- Client reads fresh -->
+          <rect x="700" y="80" width="80" height="32" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="740" y="100" text-anchor="middle" fill="#81d4fa" font-size="9">Client</text>
+          <line x1="650" y1="96" x2="700" y2="96" stroke="#2ecc71" stroke-width="1.5" marker-end="url(#tc-arr-g)"/>
+          <text x="675" y="88" fill="#2ecc71" font-size="7">fresh ✓</text>
+
+          <!-- Cost/benefit -->
+          <rect x="80" y="170" width="350" height="70" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+          <text x="255" y="190" text-anchor="middle" fill="#f39c12" font-size="10" font-weight="bold">Slower: 0.3–31ms</text>
+          <text x="255" y="208" text-anchor="middle" fill="#b0bec5" font-size="9">Scales with dependent count</text>
+          <text x="255" y="224" text-anchor="middle" fill="#90a4ae" font-size="8">10 deps → 0.3ms | 1000 deps → 31ms</text>
+
+          <rect x="470" y="170" width="350" height="70" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="645" y="190" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">✓ Correct: No stale data</text>
+          <text x="645" y="208" text-anchor="middle" fill="#b0bec5" font-size="9">All transitive dependents evicted</text>
+          <text x="645" y="224" text-anchor="middle" fill="#90a4ae" font-size="8">DryRun mode for impact preview</text>
+
+          <text x="450" y="280" text-anchor="middle" fill="#90a4ae" font-size="10">Click to compare with single-address →</text>
+        </g>
+
+        <defs>
+          <marker id="tc-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#3a3f5c"/></marker>
+          <marker id="tc-arr-r" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#e74c3c"/></marker>
+          <marker id="tc-arr-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#2ecc71"/></marker>
+        </defs>
+
+        <text id="tc-hint" x="450" y="360" text-anchor="middle" fill="#90a4ae" font-size="9">Click to toggle: Single-Address ↔ Full Cascade</text>
+      </svg>
+      <p class="figure-caption">Figure 30: Cascade invalidation tradeoff — single-address speed vs full transitive correctness.</p>
+    </div>
+
+    <p>
+        The DryRun mode (§6.9) mitigates the "may evict more than necessary" concern. Before committing a cascade, operators can preview exactly which addresses would be invalidated and how many cache entries would be evicted. If the blast radius is unexpectedly large, the invalidation can be scoped or deferred. This gives operators control over the performance cost without compromising the correctness guarantee — every committed cascade is complete.
+    </p>
+
+        <h3>10.6 Garbage Collection: Throughput vs Storage</h3>
+
+    <p>
+        Without garbage collection, every blob ever written persists indefinitely — even after the recipe that produced it has been replaced or deleted. Over time, orphaned blobs accumulate and storage grows without bound: benchmarks show 5.2 GB after one year of typical usage. GC (§7) reclaims this storage by removing blobs that are unreachable from any recipe in the DAG, but each GC cycle imposes a brief pause (~200ms) while the mark-and-sweep runs.
+    </p>
+
+    <p>
+        The tradeoff is between GC frequency and storage overhead. Aggressive collection (hourly) keeps storage minimal (~160 MB stable) but imposes 200ms pauses 24 times per day. Conservative collection (weekly) allows slightly more storage (~320 MB) but pauses only once per week. The 97% storage reduction compared to no GC is achieved by either schedule — the difference between hourly and weekly is marginal because most orphans accumulate over days, not hours.
+    </p>
+
+    <div class="svg-container" style="margin: 1.5rem 0;">
+      <svg id="td-gc-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 350" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="350" rx="12" fill="#1a1e2e"/>
+        <text x="450" y="25" text-anchor="middle" fill="#e0e0e0" font-size="14" font-weight="bold">Garbage Collection: Throughput vs Storage</text>
+
+        <!-- Step 0: No GC -->
+        <g id="tg-s0" style="opacity:1">
+          <text x="450" y="52" text-anchor="middle" fill="#e74c3c" font-size="12" font-weight="bold">No GC</text>
+
+          <!-- Storage growth chart -->
+          <line x1="100" y1="240" x2="750" y2="240" stroke="#3a3f5c" stroke-width="1"/>
+          <line x1="100" y1="80" x2="100" y2="240" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="90" y="85" text-anchor="end" fill="#90a4ae" font-size="8">5.2 GB</text>
+          <text x="90" y="245" text-anchor="end" fill="#90a4ae" font-size="8">0</text>
+          <text x="425" y="258" text-anchor="middle" fill="#90a4ae" font-size="8">Time (months)</text>
+
+          <!-- Rising line -->
+          <polyline points="100,235 200,220 300,200 400,170 500,140 600,105 700,80" fill="none" stroke="#e74c3c" stroke-width="2"/>
+          <circle cx="700" cy="80" r="4" fill="#e74c3c"/>
+          <text x="710" y="78" fill="#e74c3c" font-size="9" font-weight="bold">5.2 GB</text>
+
+          <!-- Animated dot rising -->
+          <circle r="3" fill="#e74c3c" opacity="0.8">
+            <animate attributeName="cx" values="100;700;100" dur="4s" repeatCount="indefinite"/>
+            <animate attributeName="cy" values="235;80;235" dur="4s" repeatCount="indefinite"/>
+          </circle>
+
+          <rect x="100" y="270" width="650" height="40" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="425" y="288" text-anchor="middle" fill="#e74c3c" font-size="10" font-weight="bold">⚠ Unbounded growth — storage cost increases linearly forever</text>
+          <text x="425" y="302" text-anchor="middle" fill="#b0bec5" font-size="9">Throughput: 0ms overhead | Storage: unbounded</text>
+
+          <text x="450" y="335" text-anchor="middle" fill="#90a4ae" font-size="10">Click to see hourly GC →</text>
+        </g>
+
+        <!-- Step 1: Aggressive (hourly) -->
+        <g id="tg-s1" style="opacity:0">
+          <text x="450" y="52" text-anchor="middle" fill="#f39c12" font-size="12" font-weight="bold">Aggressive GC (Hourly)</text>
+
+          <!-- Flat storage chart with sawtooth -->
+          <line x1="100" y1="240" x2="750" y2="240" stroke="#3a3f5c" stroke-width="1"/>
+          <line x1="100" y1="80" x2="100" y2="240" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="90" y="225" text-anchor="end" fill="#90a4ae" font-size="8">160 MB</text>
+
+          <!-- Sawtooth pattern -->
+          <polyline points="100,230 150,225 150,230 200,225 200,230 250,225 250,230 300,225 300,230 350,225 350,230 400,225 400,230 450,225 450,230 500,225 500,230 550,225 550,230 600,225 600,230 650,225 650,230 700,225" fill="none" stroke="#f39c12" stroke-width="2"/>
+
+          <!-- GC pause indicators -->
+          <line x1="150" y1="225" x2="150" y2="230" stroke="#f39c12" stroke-width="3"/>
+          <line x1="250" y1="225" x2="250" y2="230" stroke="#f39c12" stroke-width="3"/>
+          <line x1="350" y1="225" x2="350" y2="230" stroke="#f39c12" stroke-width="3"/>
+          <line x1="450" y1="225" x2="450" y2="230" stroke="#f39c12" stroke-width="3"/>
+          <line x1="550" y1="225" x2="550" y2="230" stroke="#f39c12" stroke-width="3"/>
+          <line x1="650" y1="225" x2="650" y2="230" stroke="#f39c12" stroke-width="3"/>
+          <text x="400" y="218" text-anchor="middle" fill="#f39c12" font-size="8">↓ 200ms pause each hour</text>
+
+          <text x="710" y="228" fill="#f39c12" font-size="9" font-weight="bold">160 MB</text>
+
+          <rect x="100" y="270" width="650" height="40" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+          <text x="425" y="288" text-anchor="middle" fill="#f39c12" font-size="10" font-weight="bold">Minimal storage, frequent pauses</text>
+          <text x="425" y="302" text-anchor="middle" fill="#b0bec5" font-size="9">Throughput: 200ms × 24/day = 4.8s/day | Storage: 160 MB stable</text>
+
+          <text x="450" y="335" text-anchor="middle" fill="#90a4ae" font-size="10">Click to see weekly GC →</text>
+        </g>
+
+        <!-- Step 2: Conservative (weekly) — chosen -->
+        <g id="tg-s2" style="opacity:0">
+          <text x="450" y="52" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">Conservative GC (Weekly) — chosen</text>
+
+          <!-- Flat storage with wider sawtooth -->
+          <line x1="100" y1="240" x2="750" y2="240" stroke="#3a3f5c" stroke-width="1"/>
+          <line x1="100" y1="80" x2="100" y2="240" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="90" y="218" text-anchor="end" fill="#90a4ae" font-size="8">320 MB</text>
+
+          <!-- Wider sawtooth -->
+          <polyline points="100,230 200,220 200,228 300,218 300,228 400,218 400,228 500,218 500,228 600,218 600,228 700,218" fill="none" stroke="#2ecc71" stroke-width="2"/>
+
+          <line x1="200" y1="220" x2="200" y2="228" stroke="#2ecc71" stroke-width="3"/>
+          <line x1="400" y1="218" x2="400" y2="228" stroke="#2ecc71" stroke-width="3"/>
+          <line x1="600" y1="218" x2="600" y2="228" stroke="#2ecc71" stroke-width="3"/>
+          <text x="400" y="210" text-anchor="middle" fill="#2ecc71" font-size="8">↓ 200ms pause once/week</text>
+
+          <text x="710" y="220" fill="#2ecc71" font-size="9" font-weight="bold">320 MB</text>
+
+          <!-- Comparison -->
+          <rect x="100" y="260" width="310" height="50" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="255" y="280" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">97% storage savings vs No GC</text>
+          <text x="255" y="298" text-anchor="middle" fill="#b0bec5" font-size="9">320 MB vs 5.2 GB</text>
+
+          <rect x="440" y="260" width="310" height="50" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="595" y="280" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Negligible throughput cost</text>
+          <text x="595" y="298" text-anchor="middle" fill="#b0bec5" font-size="9">200ms/week = 0.00003% overhead</text>
+
+          <text x="450" y="335" text-anchor="middle" fill="#90a4ae" font-size="10">Click to restart →</text>
+        </g>
+
+        <text id="tg-hint" x="450" y="346" text-anchor="middle" fill="#90a4ae" font-size="9">Click to cycle: No GC → Hourly → Weekly →</text>
+      </svg>
+      <p class="figure-caption">Figure 31: GC frequency tradeoff — storage overhead vs collection pause frequency.</p>
+    </div>
+
+    <p>
+        The pin set (§7.6) provides a safety valve: any address that must survive GC regardless of DAG reachability can be pinned. This decouples the GC schedule from data retention requirements — operators choose the GC frequency based on storage budget, and pin critical addresses independently.
+    </p>
+
+        <h3>10.7 Observability: Overhead vs Insight</h3>
+
+    <p>
+        The original Deriva had no metrics, no structured tracing, and no monitoring endpoints. Debugging required reading raw logs and guessing. The observability layer (§8) adds 40+ Prometheus metrics and structured tracing spans to every operation, at a measured cost of ~2% CPU overhead (atomic counter increments, histogram observations) and ~1% latency overhead (span creation and context propagation).
+    </p>
+
+    <div class="svg-container" style="margin: 1.5rem 0;">
+      <svg id="td-obs-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 320" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="320" rx="12" fill="#1a1e2e"/>
+        <text x="450" y="25" text-anchor="middle" fill="#e0e0e0" font-size="14" font-weight="bold">Observability: Overhead vs Insight</text>
+
+        <!-- State 0: No observability -->
+        <g id="to-s0" style="opacity:1">
+          <text x="450" y="52" text-anchor="middle" fill="#e74c3c" font-size="12" font-weight="bold">No Observability (original)</text>
+
+          <!-- Server black box -->
+          <rect x="250" y="70" width="400" height="80" rx="8" fill="#232840" stroke="#3a3f5c" stroke-width="2"/>
+          <text x="450" y="100" text-anchor="middle" fill="#90a4ae" font-size="12">Deriva Server</text>
+          <text x="450" y="120" text-anchor="middle" fill="#3a3f5c" font-size="10">No metrics • No traces • No alerts</text>
+
+          <!-- Operator confused -->
+          <rect x="50" y="85" width="120" height="36" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="110" y="108" text-anchor="middle" fill="#81d4fa" font-size="10">Operator</text>
+          <text x="110" y="140" text-anchor="middle" fill="#e74c3c" font-size="9">"Why is it slow?"</text>
+          <text x="110" y="155" text-anchor="middle" fill="#e74c3c" font-size="9">"Is it even running?"</text>
+          <text x="110" y="170" text-anchor="middle" fill="#e74c3c" font-size="9">"What broke?"</text>
+
+          <!-- No answers -->
+          <line x1="170" y1="103" x2="250" y2="103" stroke="#e74c3c" stroke-width="1.5" stroke-dasharray="4,3"/>
+          <text x="210" y="96" fill="#e74c3c" font-size="8">???</text>
+
+          <rect x="100" y="195" width="700" height="50" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="450" y="215" text-anchor="middle" fill="#e74c3c" font-size="10" font-weight="bold">⚠ Blind operations: hours of guesswork to diagnose any issue</text>
+          <text x="450" y="233" text-anchor="middle" fill="#b0bec5" font-size="9">Overhead: 0% CPU, 0% latency | Insight: none</text>
+
+          <text x="450" y="290" text-anchor="middle" fill="#90a4ae" font-size="10">Click to see instrumented version →</text>
+        </g>
+
+        <!-- State 1: Full observability -->
+        <g id="to-s1" style="opacity:0">
+          <text x="450" y="52" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">Full Observability (current)</text>
+
+          <!-- Server with metrics flowing out -->
+          <rect x="250" y="70" width="400" height="80" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="2"/>
+          <text x="450" y="95" text-anchor="middle" fill="#2ecc71" font-size="12">Deriva Server</text>
+          <text x="450" y="115" text-anchor="middle" fill="#b0bec5" font-size="9">40+ metrics • structured traces • /metrics endpoint</text>
+
+          <!-- Prometheus -->
+          <rect x="700" y="65" width="120" height="30" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+          <text x="760" y="84" text-anchor="middle" fill="#f39c12" font-size="9">Prometheus</text>
+          <line x1="650" y1="85" x2="700" y2="80" stroke="#f39c12" stroke-width="1.5"/>
+          <circle r="2" fill="#f39c12" opacity="0.8"><animate attributeName="cx" values="650;700;650" dur="1.5s" repeatCount="indefinite"/><animate attributeName="cy" values="85;80;85" dur="1.5s" repeatCount="indefinite"/></circle>
+
+          <!-- Tracing -->
+          <rect x="700" y="105" width="120" height="30" rx="6" fill="#232840" stroke="#ce93d8" stroke-width="1.5"/>
+          <text x="760" y="124" text-anchor="middle" fill="#ce93d8" font-size="9">Tracing logs</text>
+          <line x1="650" y1="115" x2="700" y2="120" stroke="#ce93d8" stroke-width="1.5"/>
+          <circle r="2" fill="#ce93d8" opacity="0.8"><animate attributeName="cx" values="650;700;650" dur="1.8s" repeatCount="indefinite"/><animate attributeName="cy" values="115;120;115" dur="1.8s" repeatCount="indefinite"/></circle>
+
+          <!-- Operator informed -->
+          <rect x="50" y="85" width="120" height="36" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="110" y="108" text-anchor="middle" fill="#81d4fa" font-size="10">Operator</text>
+          <text x="110" y="140" text-anchor="middle" fill="#2ecc71" font-size="9">"p99 = 120ms ✓"</text>
+          <text x="110" y="155" text-anchor="middle" fill="#2ecc71" font-size="9">"Cache hit: 85% ✓"</text>
+          <text x="110" y="170" text-anchor="middle" fill="#2ecc71" font-size="9">"Slow func found"</text>
+
+          <line x1="170" y1="103" x2="250" y2="103" stroke="#2ecc71" stroke-width="1.5"/>
+
+          <!-- Cost/benefit -->
+          <rect x="100" y="195" width="330" height="50" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+          <text x="265" y="215" text-anchor="middle" fill="#f39c12" font-size="10" font-weight="bold">Cost: ~2% CPU, ~1% latency</text>
+          <text x="265" y="233" text-anchor="middle" fill="#b0bec5" font-size="9">Atomic increments + span creation</text>
+
+          <rect x="470" y="195" width="330" height="50" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="635" y="215" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Insight: minutes to root cause</text>
+          <text x="635" y="233" text-anchor="middle" fill="#b0bec5" font-size="9">Metrics → Tracing → Action (§8.8)</text>
+
+          <text x="450" y="290" text-anchor="middle" fill="#90a4ae" font-size="10">Click to compare with no observability →</text>
+        </g>
+
+        <text id="to-hint" x="450" y="312" text-anchor="middle" fill="#90a4ae" font-size="9">Click to toggle: No Observability ↔ Full Observability</text>
+      </svg>
+      <p class="figure-caption">Figure 32: Observability tradeoff — zero overhead vs full metrics and tracing at ~2% CPU cost.</p>
+    </div>
+
+    <p>
+        The 2% overhead is a conservative upper bound measured under sustained load. In practice, most of the cost comes from histogram observations (which require finding the correct bucket), not counter increments (which are single atomic adds). The tracing overhead is dominated by span creation, not propagation — once a span exists, attaching it to an async future via <code>.instrument()</code> adds negligible cost. The alternative — operating blind — turns every incident into hours of log archaeology.
+    </p>
+
+        <h3>10.8 Broadcast Channels: Memory vs Deduplication</h3>
+
+    <p>
+        When multiple concurrent requests materialize the same address, the broadcast-channel deduplication mechanism (§4.2) ensures the compute runs once and all waiters receive the result. The channel capacity determines how many messages can be buffered before subscribers must consume them. A large capacity (1,024) guarantees no message drops but costs ~32 MB per 1,000 in-flight addresses. A small capacity (16) uses ~0.5 MB but risks dropping messages if a subscriber is slow to receive.
+    </p>
+
+    <p>
+        The chosen capacity of 16 reflects the observation that subscribers are fast — they clone a <code>Bytes</code> handle (a reference-counted pointer, not a deep copy) and return immediately. Drops are therefore rare in practice. When a drop does occur, the subscriber receives a <code>RecvError::Lagged</code> and retries the materialization, which will either hit the cache (if the first computation completed) or join a new broadcast. The retry cost is low, and the 64× memory savings over large-capacity channels is significant for high-concurrency workloads.
+    </p>
+
+    <div class="svg-container" style="margin: 1.5rem 0;">
+      <svg id="td-bcast-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 320" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="320" rx="12" fill="#1a1e2e"/>
+        <text x="450" y="25" text-anchor="middle" fill="#e0e0e0" font-size="14" font-weight="bold">Broadcast Channels: Memory vs Deduplication</text>
+
+        <!-- State 0: Large capacity -->
+        <g id="tb-s0" style="opacity:1">
+          <text x="450" y="52" text-anchor="middle" fill="#f39c12" font-size="12" font-weight="bold">Large Capacity (1,024)</text>
+
+          <!-- Channel buffer visualization -->
+          <rect x="200" y="70" width="500" height="40" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+          <text x="450" y="95" text-anchor="middle" fill="#f39c12" font-size="10">Channel buffer: 1,024 slots</text>
+          <!-- Many small slots -->
+          <line x1="220" y1="75" x2="220" y2="105" stroke="#f39c12" stroke-width="0.5" opacity="0.3"/>
+          <line x1="240" y1="75" x2="240" y2="105" stroke="#f39c12" stroke-width="0.5" opacity="0.3"/>
+          <line x1="260" y1="75" x2="260" y2="105" stroke="#f39c12" stroke-width="0.5" opacity="0.3"/>
+          <line x1="280" y1="75" x2="280" y2="105" stroke="#f39c12" stroke-width="0.5" opacity="0.3"/>
+          <text x="450" y="85" text-anchor="middle" fill="#90a4ae" font-size="7">... 1,024 slots ...</text>
+
+          <!-- Memory cost -->
+          <rect x="100" y="130" width="700" height="24" rx="4" fill="#3a3f5c"/>
+          <rect x="100" y="130" width="700" height="24" rx="4" fill="#f39c12" opacity="0.3"/>
+          <text x="450" y="146" text-anchor="middle" fill="#e0e0e0" font-size="9" font-weight="bold">Memory: ~32 MB per 1,000 in-flight addresses</text>
+
+          <!-- Pros/cons -->
+          <rect x="100" y="170" width="330" height="70" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="265" y="192" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Never drops messages</text>
+          <text x="120" y="210" fill="#b0bec5" font-size="9">✓ Subscribers always receive result</text>
+          <text x="120" y="226" fill="#b0bec5" font-size="9">✓ No retry logic needed</text>
+
+          <rect x="470" y="170" width="330" height="70" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1"/>
+          <text x="635" y="192" text-anchor="middle" fill="#e74c3c" font-size="10" font-weight="bold">High memory cost</text>
+          <text x="490" y="210" fill="#e74c3c" font-size="9">✗ 32 MB for 1,000 concurrent addrs</text>
+          <text x="490" y="226" fill="#e74c3c" font-size="9">✗ Most buffer space wasted (subscribers are fast)</text>
+
+          <text x="450" y="280" text-anchor="middle" fill="#90a4ae" font-size="10">Click to see small capacity →</text>
+        </g>
+
+        <!-- State 1: Small capacity (chosen) -->
+        <g id="tb-s1" style="opacity:0">
+          <text x="450" y="52" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">Small Capacity (16) — chosen</text>
+
+          <!-- Channel buffer visualization -->
+          <rect x="320" y="70" width="260" height="40" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="450" y="95" text-anchor="middle" fill="#2ecc71" font-size="10">Channel buffer: 16 slots</text>
+          <!-- Few slots -->
+          <line x1="336" y1="75" x2="336" y2="105" stroke="#2ecc71" stroke-width="1" opacity="0.5"/>
+          <line x1="352" y1="75" x2="352" y2="105" stroke="#2ecc71" stroke-width="1" opacity="0.5"/>
+          <line x1="368" y1="75" x2="368" y2="105" stroke="#2ecc71" stroke-width="1" opacity="0.5"/>
+          <line x1="384" y1="75" x2="384" y2="105" stroke="#2ecc71" stroke-width="1" opacity="0.5"/>
+
+          <!-- Animated dot through channel -->
+          <circle r="3" fill="#2ecc71" opacity="0.8">
+            <animate attributeName="cx" values="320;580;320" dur="1.5s" repeatCount="indefinite"/>
+            <animate attributeName="cy" values="90;90;90" dur="1.5s" repeatCount="indefinite"/>
+          </circle>
+
+          <!-- Memory cost -->
+          <rect x="100" y="130" width="700" height="24" rx="4" fill="#3a3f5c"/>
+          <rect x="100" y="130" width="11" height="24" rx="4" fill="#2ecc71" opacity="0.5"/>
+          <text x="120" y="146" fill="#2ecc71" font-size="9" font-weight="bold">Memory: ~0.5 MB per 1,000 in-flight (64× less)</text>
+
+          <!-- How drops are handled -->
+          <rect x="100" y="170" width="700" height="70" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="120" y="192" fill="#2ecc71" font-size="10" font-weight="bold">Why this works:</text>
+          <text x="120" y="210" fill="#b0bec5" font-size="9">Subscribers clone a Bytes handle (ref-counted pointer) — takes nanoseconds, never falls behind</text>
+          <text x="120" y="226" fill="#b0bec5" font-size="9">On rare drop: RecvError::Lagged → retry → hits cache or joins new broadcast. Cost: one extra lookup.</text>
+
+          <text x="450" y="280" text-anchor="middle" fill="#90a4ae" font-size="10">Click to compare with large capacity →</text>
+        </g>
+
+        <text id="tb-hint" x="450" y="312" text-anchor="middle" fill="#90a4ae" font-size="9">Click to toggle: Large Capacity ↔ Small Capacity</text>
+      </svg>
+      <p class="figure-caption">Figure 33: Broadcast channel capacity — large buffers vs small capacity with retry on lag.</p>
+    </div>
+
+        <h3>10.9 Sled vs Alternatives</h3>
+
+    <p>
+        The persistent DAG requires an embedded key-value store that supports ordered iteration (for live set computation during GC), ACID transactions (for atomic multi-key inserts), and efficient prefix scans (for reverse edge lookups). Three candidates were evaluated: sled, RocksDB, and SQLite.
+    </p>
+
+    <div class="svg-container" style="margin: 1.5rem 0;">
+      <svg id="td-sled-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 370" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="370" rx="12" fill="#1a1e2e"/>
+        <text x="450" y="25" text-anchor="middle" fill="#e0e0e0" font-size="14" font-weight="bold">Sled vs Alternatives</text>
+
+        <!-- Step 0: Sled (chosen) -->
+        <g id="tl-s0" style="opacity:1">
+          <text x="450" y="52" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">Sled — chosen</text>
+
+          <rect x="200" y="65" width="500" height="36" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="450" y="88" text-anchor="middle" fill="#2ecc71" font-size="11">Pure Rust embedded B-tree database</text>
+
+          <rect x="60" y="115" width="380" height="120" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="250" y="137" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Advantages</text>
+          <text x="80" y="157" fill="#b0bec5" font-size="9">✓ Pure Rust — no C/C++ build dependencies</text>
+          <text x="80" y="175" fill="#b0bec5" font-size="9">✓ Embedded — no separate process to manage</text>
+          <text x="80" y="193" fill="#b0bec5" font-size="9">✓ ACID transactions for atomic multi-key ops</text>
+          <text x="80" y="211" fill="#b0bec5" font-size="9">✓ Ordered iteration for GC live set scan</text>
+          <text x="80" y="225" fill="#b0bec5" font-size="9">✓ Small binary footprint</text>
+
+          <rect x="460" y="115" width="380" height="120" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+          <text x="650" y="137" text-anchor="middle" fill="#f39c12" font-size="10" font-weight="bold">Limitations</text>
+          <text x="480" y="157" fill="#b0bec5" font-size="9">△ Beta stability (not yet 1.0)</text>
+          <text x="480" y="175" fill="#b0bec5" font-size="9">△ Write latency: 0.5–5ms (B-tree + fsync)</text>
+          <text x="480" y="193" fill="#b0bec5" font-size="9">△ Single-node only (no replication)</text>
+          <text x="480" y="211" fill="#90a4ae" font-size="9">Acceptable: writes are rare (1:1000 ratio)</text>
+          <text x="480" y="225" fill="#90a4ae" font-size="9">Acceptable: single-node is current scope</text>
+
+          <rect x="150" y="250" width="600" height="40" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="450" y="275" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Best fit: pure-Rust ecosystem, simple deployment, sufficient performance</text>
+
+          <text x="450" y="320" text-anchor="middle" fill="#90a4ae" font-size="10">Click to see RocksDB →</text>
+        </g>
+
+        <!-- Step 1: RocksDB -->
+        <g id="tl-s1" style="opacity:0">
+          <text x="450" y="52" text-anchor="middle" fill="#81d4fa" font-size="12" font-weight="bold">RocksDB — future option</text>
+
+          <rect x="200" y="65" width="500" height="36" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="450" y="88" text-anchor="middle" fill="#81d4fa" font-size="11">C++ LSM-tree (Facebook), Rust bindings</text>
+
+          <rect x="60" y="115" width="380" height="120" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="250" y="137" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Advantages</text>
+          <text x="80" y="157" fill="#b0bec5" font-size="9">✓ Battle-tested (Facebook, CockroachDB, TiKV)</text>
+          <text x="80" y="175" fill="#b0bec5" font-size="9">✓ Write latency: ~1ms (LSM-tree, write-optimized)</text>
+          <text x="80" y="193" fill="#b0bec5" font-size="9">✓ Mature replication ecosystem</text>
+          <text x="80" y="211" fill="#b0bec5" font-size="9">✓ Proven at petabyte scale</text>
+
+          <rect x="460" y="115" width="380" height="120" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1"/>
+          <text x="650" y="137" text-anchor="middle" fill="#e74c3c" font-size="10" font-weight="bold">Limitations</text>
+          <text x="480" y="157" fill="#e74c3c" font-size="9">✗ C++ dependency — complex cross-compilation</text>
+          <text x="480" y="175" fill="#e74c3c" font-size="9">✗ Larger binary size (~15 MB vs ~3 MB)</text>
+          <text x="480" y="193" fill="#e74c3c" font-size="9">✗ LSM compaction spikes (unpredictable latency)</text>
+          <text x="480" y="211" fill="#e74c3c" font-size="9">✗ More complex tuning (dozens of knobs)</text>
+
+          <rect x="150" y="250" width="600" height="40" rx="8" fill="#232840" stroke="#81d4fa" stroke-width="1"/>
+          <text x="450" y="275" text-anchor="middle" fill="#81d4fa" font-size="10">Candidate for future distributed extension requiring replication</text>
+
+          <text x="450" y="320" text-anchor="middle" fill="#90a4ae" font-size="10">Click to see SQLite →</text>
+        </g>
+
+        <!-- Step 2: SQLite -->
+        <g id="tl-s2" style="opacity:0">
+          <text x="450" y="52" text-anchor="middle" fill="#ce93d8" font-size="12" font-weight="bold">SQLite — rejected</text>
+
+          <rect x="200" y="65" width="500" height="36" rx="6" fill="#232840" stroke="#ce93d8" stroke-width="1.5"/>
+          <text x="450" y="88" text-anchor="middle" fill="#ce93d8" font-size="11">C relational database, ubiquitous</text>
+
+          <rect x="60" y="115" width="380" height="100" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="250" y="137" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Advantages</text>
+          <text x="80" y="157" fill="#b0bec5" font-size="9">✓ Ubiquitous — most deployed DB in the world</text>
+          <text x="80" y="175" fill="#b0bec5" font-size="9">✓ Extremely stable (decades of testing)</text>
+          <text x="80" y="193" fill="#b0bec5" font-size="9">✓ Rich query language (SQL)</text>
+
+          <rect x="460" y="115" width="380" height="100" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="650" y="137" text-anchor="middle" fill="#e74c3c" font-size="10" font-weight="bold">Limitations</text>
+          <text x="480" y="157" fill="#e74c3c" font-size="9">✗ No native ordered key iteration</text>
+          <text x="480" y="175" fill="#e74c3c" font-size="9">✗ SQL layer adds overhead for simple k/v ops</text>
+          <text x="480" y="193" fill="#e74c3c" font-size="9">✗ C dependency (same build issue as RocksDB)</text>
+
+          <rect x="150" y="230" width="600" height="55" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1"/>
+          <text x="450" y="252" text-anchor="middle" fill="#e74c3c" font-size="10" font-weight="bold">Poor fit: relational model adds impedance mismatch</text>
+          <text x="450" y="270" text-anchor="middle" fill="#b0bec5" font-size="9">DAG operations (forward/reverse edge traversal, prefix scans) map naturally to ordered k/v, not SQL tables</text>
+
+          <text x="450" y="320" text-anchor="middle" fill="#90a4ae" font-size="10">Click to restart →</text>
+        </g>
+
+        <text id="tl-hint" x="450" y="360" text-anchor="middle" fill="#90a4ae" font-size="9">Click to cycle: Sled → RocksDB → SQLite →</text>
+      </svg>
+      <p class="figure-caption">Figure 34: Embedded store comparison — sled, RocksDB, and SQLite tradeoffs for the persistent DAG.</p>
+    </div>
+
+    <p>
+        The decision is pragmatic rather than permanent. Sled's pure-Rust implementation eliminates cross-compilation issues and keeps the dependency tree simple — important for a research system where build reproducibility matters. If Deriva evolves toward a distributed architecture requiring multi-node replication, RocksDB's mature ecosystem (used by CockroachDB, TiKV, and others for distributed storage) would justify the build complexity tradeoff. The DAG abstraction layer isolates the storage backend, so switching requires changing one module without affecting the rest of the system.
+    </p>
+
+    <h3>10.10 Design Principles</h3>
+    
+    <p>
+        These tradeoffs follow three principles that guided every design decision. These principles emerged from the fundamental requirements of computation-addressed storage: the system must be correct (computation addressing breaks if results are non-deterministic or stale), it must be practical (operators need to tune overhead for their specific workloads), and it must be observable (deployed systems require monitoring and debugging capabilities).
+    </p>
+
+    <ul>
+        <li><strong>Correctness over performance:</strong> Cascade invalidation, verification mode, and deadlock-free semaphore placement prioritize correctness even when it costs performance. Silent bugs are unacceptable in a computation-addressed store because they violate the fundamental invariant: the same CAddr must always resolve to the same data. A stale cache entry or a non-deterministic function doesn't just produce wrong results — it undermines the entire addressing model. Every design decision that trades performance for correctness is justified by this principle.</li>
+        <li><strong>Pay-as-you-go:</strong> Features like verification and GC are optional and configurable. Deployments can tune overhead (Sampled vs DualCompute, weekly vs daily GC, max concurrency) based on requirements. This principle recognizes that different workloads have different robustness needs: a CI/CD pipeline benefits from DualCompute verification (catch bugs before deployment), while a latency-sensitive serving system should use Sampled mode (minimize overhead). The system provides knobs, not mandates.</li>
+        <li><strong>Operational visibility:</strong> Observability is non-negotiable. The 2% overhead is justified by the ability to debug, monitor, and alert in deployed systems. Without metrics, operators cannot diagnose cache hit rate degradation, identify non-deterministic functions, measure GC effectiveness, or plan capacity. Every feature in This implementation exposes Prometheus metrics and structured tracing spans, enabling operators to understand system behavior without reading source code.</li>
+    </ul>
+
+    <h3>10.11 When NOT to Use These Features</h3>
+    
+    <div class="code-block">
+        <pre>
+Scenario: Ephemeral workloads (CI builds, one-off scripts)
+  → Skip persistent DAG (use the original in-memory DagStore)
+  → Skip GC (process exits before orphans accumulate)
+  → Use DualCompute verification (catch bugs early)
+
+Scenario: Latency-critical serving (p99 &lt; 10ms)
+  → Disable verification (6% overhead may exceed budget)
+  → Use aggressive caching (minimize compute)
+  → Monitor with metrics but disable tracing (1% overhead)
+
+Scenario: Memory-constrained environments (embedded, edge)
+  → Use in-memory DAG (save 12 MB)
+  → Disable observability (save 2% CPU)
+  → Manual invalidation instead of cascade
+
+Scenario: Trusted compute functions (pure math, cryptography)
+  → Disable verification (functions are deterministic by design)
+  → Use cascade invalidation (still need correctness)
+  → Use GC (still need storage management)</pre>
+    </div>
+
+    <h3>10.12 Future Tradeoff Considerations</h3>
+    
+    <p>
+        a future distributed extension will introduce new tradeoffs:
+    </p>
+
+    <ul>
+        <li><strong>Consistency vs availability:</strong> Strong consistency (linearizable reads) vs eventual consistency (lower latency, higher availability).</li>
+        <li><strong>Replication factor:</strong> Higher replication (better durability, availability) vs lower storage cost.</li>
+        <li><strong>Network overhead:</strong> Cross-node materialization (better load balancing) vs local-only (lower latency).</li>
+        <li><strong>Coordination:</strong> Centralized coordinator (simpler) vs distributed consensus (more scalable).</li>
+    </ul>
+
+    <p>
+        The single-node design avoids these tradeoffs, focusing on robustness within a single process. The persistent DAG and async executor provide a solid foundation for distributed extension.
+    </p>
+
+    </section>
+</div>

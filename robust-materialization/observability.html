@@ -1,0 +1,619 @@
+<div class="section-content">
+    <section id="observability">
+    <h2>8. Observability</h2>
+    
+    <p>
+        The initial implementation had zero observability beyond a single <code>Status</code> RPC returning 5 aggregate counters. There was no way to trace individual requests, identify slow materializations, monitor cache hit rates over time, or alert on error spikes. This work adds comprehensive observability via structured tracing (tokio-tracing) and Prometheus metrics, enabling operational monitoring, debugging, and performance analysis.
+    </p>
+
+    <h3>8.1 The Observability Gap</h3>
+    
+    <p>
+        Without observability, operators cannot answer basic questions:
+    </p>
+
+    <ul>
+        <li><strong>Request tracing:</strong> "Why did this Get request take 5 seconds?" — No per-request breakdown of cache/DAG/compute time.</li>
+        <li><strong>Hot recipes:</strong> "Which recipes are materialized most frequently?" — No per-address metrics.</li>
+        <li><strong>Cache effectiveness:</strong> "Is cache hit rate improving over time?" — Only instantaneous snapshot, no history.</li>
+        <li><strong>Error rates:</strong> "Are compute failures increasing?" — No error counters or alerts.</li>
+        <li><strong>Concurrency:</strong> "How many parallel materializations are running?" — No visibility into async executor state.</li>
+        <li><strong>Function profiling:</strong> "Which compute functions are slowest?" — No per-function latency metrics.</li>
+    </ul>
+
+    <h3>8.2 Two-Layer Observability Architecture</h3>
+    
+    <div class="code-block">
+        <pre>
+Layer 1: Tracing (per-request detail)
+┌──────────────────────────────────────────────────────┐
+│ GET caddr=0xabc123 [request_id=req-42]               │
+│  ├─ cache_lookup: MISS (2μs)                         │
+│  ├─ dag_resolve: 3 nodes (15μs)                      │
+│  ├─ materialize input_1: cache HIT (1μs)             │
+│  ├─ materialize input_2: compute (45ms)              │
+│  │   ├─ function: transform/v1                       │
+│  │   └─ output: 1024 bytes                           │
+│  ├─ compute final: concat/v1 (2ms)                   │
+│  └─ cache_put: 2048 bytes (5μs)                      │
+│ Total: 47ms                                          │
+└──────────────────────────────────────────────────────┘
+
+Layer 2: Metrics (aggregate dashboards)
+┌──────────────────────────────────────────────────────┐
+│ deriva_get_duration_seconds{quantile="0.99"} 0.12    │
+│ deriva_cache_hit_total 45231                         │
+│ deriva_cache_miss_total 8921                         │
+│ deriva_compute_duration_seconds{fn="transform/v1"}   │
+│ deriva_dag_depth{quantile="0.50"} 3                  │
+│ deriva_active_materializations 7                     │
+└──────────────────────────────────────────────────────┘</pre>
+    </div>
+
+    <p>
+        <strong>Layer 1 (Tracing):</strong> Per-request structured logs with nested spans. Used for debugging individual slow requests. Emitted to stdout (development) or JSON files (deployment).
+    </p>
+
+    <p>
+        <strong>Layer 2 (Metrics):</strong> Aggregate counters, histograms, and gauges. Used for dashboards (Grafana), alerts (Alertmanager), and capacity planning. Scraped by Prometheus via <code>/metrics</code> endpoint.
+    </p>
+
+    <h3>8.3 Prometheus Metrics Catalog</h3>
+    
+    <p>
+        This implementation exposes 40+ metrics across 7 categories:
+    </p>
+
+    <h4>8.3.1 RPC Metrics</h4>
+
+    <p>
+        RPC metrics track every client-facing API call. The <code>deriva_rpc_total</code> counter is labeled by method name (<code>Get</code>, <code>Put</code>, <code>Invalidate</code>) and outcome (<code>ok</code> or <code>error</code>), enabling operators to compute error rates per endpoint. The latency histogram (<code>deriva_rpc_duration_seconds</code>) records the full round-trip time from request receipt to response, including cache lookup, DAG resolution, and compute — its quantile buckets reveal tail latency problems that averages would hide. The <code>deriva_rpc_active</code> gauge tracks in-flight requests at any instant, useful for detecting connection pile-ups or backpressure.
+    </p>
+    
+    <div class="code-block">
+        <pre>
+// Total RPC calls by method and status
+deriva_rpc_total{method="Get", status="ok"} 12345
+deriva_rpc_total{method="Get", status="error"} 23
+
+// RPC latency histogram (p50 = 15ms, p99 = 120ms)
+deriva_rpc_duration_seconds{method="Get", quantile="0.50"} 0.015
+deriva_rpc_duration_seconds{method="Get", quantile="0.99"} 0.120
+
+// In-flight RPCs (gauge — instantaneous snapshot)
+deriva_rpc_active{method="Get"} 3</pre>
+    </div>
+
+    <h4>8.3.2 Materialization Metrics</h4>
+
+    <p>
+        Materialization metrics measure the core compute pipeline. The <code>deriva_materialize_total</code> counter distinguishes three outcomes: <code>cache_hit</code> (result already cached — fast path), <code>cache_miss</code> (required computation — slow path), and <code>error</code> (compute failure). The ratio of hits to total requests gives the effective cache hit rate. The latency histogram captures end-to-end materialization time including recursive input resolution, so a deep DAG will show higher p99 than a shallow one. The <code>deriva_materialize_active</code> gauge shows how many materializations are running concurrently — if this consistently equals <code>max_concurrency</code>, the semaphore is saturated and throughput is bottlenecked. The depth histogram reveals DAG complexity: a p99 depth of 12 means 1% of requests traverse 12 levels of dependencies.
+    </p>
+    
+    <div class="code-block">
+        <pre>
+// Total materializations by outcome
+deriva_materialize_total{result="cache_hit"} 45231
+deriva_materialize_total{result="cache_miss"} 8921
+deriva_materialize_total{result="error"} 47
+
+// End-to-end materialization latency (includes input resolution)
+deriva_materialize_duration_seconds{quantile="0.50"} 0.023
+deriva_materialize_duration_seconds{quantile="0.99"} 0.450
+
+// Concurrent materializations (saturates at max_concurrency)
+deriva_materialize_active 7
+
+// DAG depth per materialization (deeper = more recursive resolution)
+deriva_materialize_depth{quantile="0.50"} 3.0
+deriva_materialize_depth{quantile="0.99"} 12.0</pre>
+    </div>
+
+    <h4>8.3.3 Cache Metrics</h4>
+
+    <p>
+        Cache metrics expose the state and effectiveness of the <code>EvictableCache</code>. The <code>deriva_cache_total</code> counter tracks hits, misses, and evictions separately — a rising eviction count signals that the cache is under memory pressure and the LRU policy is actively discarding entries. The gauge metrics provide an instantaneous snapshot: <code>deriva_cache_size_bytes</code> shows current memory consumption (useful for capacity planning), <code>deriva_cache_entries</code> shows the number of cached results, and <code>deriva_cache_hit_rate</code> is a pre-computed ratio (hits / (hits + misses)) for convenient dashboard display. An operator seeing hit rate drop below 80% should investigate whether the working set has grown beyond cache capacity.
+    </p>
+    
+    <div class="code-block">
+        <pre>
+// Cache operation counters
+deriva_cache_total{result="hit"} 45231
+deriva_cache_total{result="miss"} 8921
+deriva_cache_total{result="eviction"} 234
+
+// Cache state gauges
+deriva_cache_size_bytes 524288000  // 500 MB current usage
+deriva_cache_entries 1234          // number of cached results
+deriva_cache_hit_rate 0.835        // 83.5% — hits / (hits + misses)</pre>
+    </div>
+
+    <h4>8.3.4 Compute Metrics</h4>
+
+    <p>
+        Compute metrics are labeled by function identity (<code>name/version</code>), enabling per-function performance profiling. The <code>deriva_compute_duration_seconds</code> histogram measures only the compute function's execution time — excluding cache lookup and input resolution — so it isolates the cost of the user-defined function itself. Comparing this with the materialization latency reveals how much time is spent in the executor overhead versus actual computation. The input/output byte histograms (<code>deriva_compute_input_bytes</code>, <code>deriva_compute_output_bytes</code>) track data volumes flowing through each function, which is essential for identifying functions that amplify data (output >> input) or reduce it (output << input). In the example below, <code>transform/v1</code> doubles its input size (4KB → 8KB), while <code>concat/v1</code> is a fast 2ms merge.
+    </p>
+    
+    <div class="code-block">
+        <pre>
+// Per-function compute latency (excludes cache/DAG overhead)
+deriva_compute_duration_seconds{function="transform/v1", quantile="0.50"} 0.045
+deriva_compute_duration_seconds{function="concat/v1", quantile="0.50"} 0.002
+
+// Per-function data flow (input → output size)
+deriva_compute_input_bytes{function="transform/v1", quantile="0.50"} 4096
+deriva_compute_output_bytes{function="transform/v1", quantile="0.50"} 8192</pre>
+    </div>
+
+    <h4>8.3.5 Verification Metrics</h4>
+
+    <p>
+        Verification metrics track the runtime non-determinism detection system (§6). The <code>deriva_verification_total</code> counter records how many dual-compute checks passed (both executions produced identical output) versus failed (outputs diverged, indicating a non-deterministic function). The <code>deriva_verification_failure_rate</code> gauge provides the ratio directly — any value above zero warrants investigation, as it means a registered compute function is producing different outputs for the same inputs. In the example below, 2 out of 1,236 verifications failed (0.16%), suggesting a function with a subtle non-determinism bug such as timestamp inclusion or random seed usage.
+    </p>
+    
+    <div class="code-block">
+        <pre>
+// Verification pass/fail counters
+deriva_verification_total{result="pass"} 1234
+deriva_verification_total{result="fail"} 2
+
+// Pre-computed failure rate (any value > 0 is a red flag)
+deriva_verification_failure_rate 0.0016  // 0.16% — 2 failures in 1236 checks</pre>
+    </div>
+
+    <h4>8.3.6 DAG Metrics</h4>
+
+    <p>
+        DAG metrics monitor the persistent dependency graph. The <code>deriva_dag_recipes</code> gauge tracks the total number of recipes stored in the sled-backed DAG — this grows monotonically unless GC removes orphaned recipes. The <code>deriva_dag_insert_duration_seconds</code> histogram measures the cost of adding a new recipe, which includes computing forward and reverse adjacency list updates within a sled transaction. A p99 of 5ms reflects the fsync overhead of sled's write-ahead log; if this degrades over time, it may indicate sled compaction pressure or disk I/O contention.
+    </p>
+    
+    <div class="code-block">
+        <pre>
+// Total recipes in the persistent DAG (monotonically increasing)
+deriva_dag_recipes 5432
+
+// Recipe insertion latency (includes sled transaction + fsync)
+deriva_dag_insert_duration_seconds{quantile="0.99"} 0.005</pre>
+    </div>
+
+    <h4>8.3.7 Storage & GC Metrics</h4>
+
+    <p>
+        Storage metrics track the blob store's physical footprint, while GC metrics monitor the mark-and-sweep collector (§7). The <code>deriva_storage_blobs</code> gauge and <code>deriva_storage_blob_bytes</code> gauge show how many blobs exist and their total size on disk — these should decrease after each GC cycle. The <code>deriva_gc_runs_total</code> counter is labeled by mode: <code>immediate</code> for actual sweeps that delete orphans, and <code>dry_run</code> for audit-only passes that report what would be deleted without modifying storage. The <code>deriva_gc_blobs_removed</code> and <code>deriva_gc_bytes_reclaimed</code> histograms show how much each cycle reclaims — useful for tuning GC frequency. The <code>deriva_gc_live_blobs</code> gauge reports the live set size (reachable from DAG + pin set), and <code>deriva_gc_pinned_count</code> shows how many addresses are held by the <code>PinSet</code> to protect in-flight computations from premature collection. Cascade invalidation metrics track how often invalidation is triggered and how many cache entries each cascade evicts.
+    </p>
+    
+    <div class="code-block">
+        <pre>
+// Blob store physical state
+deriva_storage_blobs 8921
+deriva_storage_blob_bytes 1073741824  // 1 GB on disk
+
+// GC cycle counters (immediate = actual delete, dry_run = audit only)
+deriva_gc_runs_total{mode="immediate"} 12
+deriva_gc_runs_total{mode="dry_run"} 5
+
+// Per-cycle reclamation (how much each sweep removes)
+deriva_gc_blobs_removed{quantile="0.50"} 47
+deriva_gc_bytes_reclaimed{quantile="0.50"} 12582912  // 12 MB median
+
+// GC cycle duration (mark + sweep phases combined)
+deriva_gc_duration_seconds{quantile="0.99"} 0.195
+
+// Live set tracking
+deriva_gc_live_blobs 8874    // reachable from DAG + pin set
+deriva_gc_pinned_count 5     // addresses protected by PinSet
+
+// Cascade invalidation (§6) — eviction events
+deriva_cascade_invalidation_total{policy="immediate"} 234
+deriva_cascade_evicted_count{quantile="0.99"} 47</pre>
+    </div>
+
+        <h3>8.4 Metrics Implementation</h3>
+
+    <p>
+        All metrics are declared as <code>lazy_static</code> globals using the <code>prometheus</code> crate's registration macros. This pattern — static metric handles initialized once at process start — avoids per-request allocation and allows any module to record observations by importing the metric variable directly. The <code>unwrap()</code> calls are safe because registration happens exactly once during static initialization; a duplicate name would panic at startup rather than silently dropping data at runtime.
+    </p>
+
+    <p>
+        The metric catalog is organized into four groups, each targeting a different operational concern:
+    </p>
+
+    <ul>
+        <li><strong>RPC metrics</strong> (<code>deriva_rpc_*</code>) — request rate, latency distribution, and in-flight count. The <code>method</code> and <code>status</code> labels enable per-endpoint dashboards and error-rate alerting. The histogram buckets span 1ms to 10s, covering both fast cache hits and slow materializations.</li>
+        <li><strong>Materialization metrics</strong> (<code>deriva_materialize_*</code>) — distinguish cache hits from misses and errors. The <code>result</code> label on the counter separates the three outcomes, while the histogram captures end-to-end latency including input resolution, compute, and cache write.</li>
+        <li><strong>Compute metrics</strong> (<code>deriva_compute_*</code>) — per-function latency and input size. The <code>function</code> label identifies which user-defined compute functions are slow or processing large inputs, enabling targeted optimization.</li>
+        <li><strong>GC metrics</strong> (<code>deriva_gc_*</code>) — cycle count by mode (actual vs dry-run), blobs removed, and bytes reclaimed. These feed into capacity planning: if <code>bytes_reclaimed</code> trends upward, orphan creation is outpacing collection frequency.</li>
+    </ul>
+
+    <div class="code-block">
+        <pre>
+// deriva-server/src/metrics.rs
+use lazy_static::lazy_static;
+use prometheus::*;
+
+lazy_static! {
+    // RPC metrics
+    pub static ref RPC_TOTAL: CounterVec = register_counter_vec!(
+        "deriva_rpc_total", "Total RPC calls", &["method", "status"]
+    ).unwrap();
+    
+    pub static ref RPC_DURATION: HistogramVec = register_histogram_vec!(
+        "deriva_rpc_duration_seconds", "RPC latency",
+        &["method"],
+        vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0]
+    ).unwrap();
+    
+    pub static ref RPC_ACTIVE: GaugeVec = register_gauge_vec!(
+        "deriva_rpc_active", "In-flight RPCs", &["method"]
+    ).unwrap();
+
+    // Materialization metrics
+    pub static ref MAT_TOTAL: CounterVec = register_counter_vec!(
+        "deriva_materialize_total", "Total materializations", &["result"]
+    ).unwrap();
+    
+    pub static ref MAT_DURATION: Histogram = register_histogram!(
+        "deriva_materialize_duration_seconds", "Materialization latency",
+        vec![0.001, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 30.0]
+    ).unwrap();
+    
+    pub static ref MAT_ACTIVE: Gauge = register_gauge!(
+        "deriva_materialize_active", "In-flight materializations"
+    ).unwrap();
+
+    // Compute metrics
+    pub static ref COMPUTE_DURATION: HistogramVec = register_histogram_vec!(
+        "deriva_compute_duration_seconds", "Compute function latency",
+        &["function"],
+        vec![0.0001, 0.001, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0]
+    ).unwrap();
+    
+    pub static ref COMPUTE_INPUT_BYTES: HistogramVec = register_histogram_vec!(
+        "deriva_compute_input_bytes", "Input size per compute",
+        &["function"],
+        vec![64.0, 256.0, 1024.0, 4096.0, 16384.0, 65536.0, 262144.0, 1048576.0]
+    ).unwrap();
+
+    // GC metrics
+    pub static ref GC_RUNS_TOTAL: CounterVec = register_counter_vec!(
+        "deriva_gc_runs_total", "Total GC cycles by mode", &["mode"]
+    ).unwrap();
+    
+    pub static ref GC_BLOBS_REMOVED: Histogram = register_histogram!(
+        "deriva_gc_blobs_removed", "Blobs removed per GC cycle",
+        vec![0.0, 1.0, 10.0, 100.0, 1000.0, 10000.0]
+    ).unwrap();
+    
+    pub static ref GC_BYTES_RECLAIMED: Histogram = register_histogram!(
+        "deriva_gc_bytes_reclaimed", "Bytes reclaimed per GC cycle",
+        vec![0.0, 1024.0, 1e6, 1e7, 1e8, 1e9]
+    ).unwrap();
+}</pre>
+    </div>
+
+    <p>
+        Histogram bucket boundaries are chosen to match expected operational ranges. RPC latency buckets start at 1ms (fast cache hits) and extend to 10s (worst-case deep materializations). Compute input size buckets use powers of 4 from 64 bytes to 1MB, matching the typical range of serialized inputs. GC byte reclamation buckets span 1KB to 1GB, covering both incremental cleanups and large backlog drains. Poorly chosen buckets produce histograms where all observations fall into a single bucket, losing distributional information — these boundaries are tuned from observed workloads.
+    </p>
+
+        <h3>8.5 Instrumentation Example: AsyncExecutor</h3>
+
+    <p>
+        The <code>materialize()</code> method demonstrates the instrumentation pattern used throughout Deriva. Three metric types are recorded at different points in the request lifecycle: a gauge tracks in-flight count (incremented on entry, decremented on exit via <code>scopeguard</code>), a counter records the outcome (cache hit, cache miss, or error), and a histogram captures end-to-end latency. The <code>scopeguard</code> pattern is critical — it guarantees the gauge is decremented even if the function returns early or panics, preventing gauge drift that would make the in-flight count permanently inaccurate.
+    </p>
+
+    <div class="code-block">
+        <pre>
+pub async fn materialize(&self, addr: CAddr) -> Result&lt;Bytes&gt; {
+    // Increment active gauge
+    MAT_ACTIVE.inc();
+    let _guard = scopeguard::guard((), |_| MAT_ACTIVE.dec());
+    
+    let start = Instant::now();
+    
+    // Cache check
+    if let Some(bytes) = self.cache.get(&addr).await {
+        MAT_TOTAL.with_label_values(&["cache_hit"]).inc();
+        CACHE_TOTAL.with_label_values(&["hit"]).inc();
+        MAT_DURATION.observe(start.elapsed().as_secs_f64());
+        return Ok(bytes);
+    }
+    
+    CACHE_TOTAL.with_label_values(&["miss"]).inc();
+    
+    // Compute
+    let result = self.materialize_inner(addr).await;
+    
+    match &result {
+        Ok(bytes) => {
+            MAT_TOTAL.with_label_values(&["cache_miss"]).inc();
+            MAT_DURATION.observe(start.elapsed().as_secs_f64());
+        }
+        Err(_) => {
+            MAT_TOTAL.with_label_values(&["error"]).inc();
+        }
+    }
+    
+    result
+}</pre>
+    </div>
+
+    <p>
+        The cache-hit path records latency before returning, capturing the full round-trip including cache lookup time. The cache-miss path records latency after <code>materialize_inner()</code> completes, capturing compute time as well. The error path intentionally omits a duration observation — error latency is typically dominated by timeout or retry logic and would skew the histogram if mixed with successful requests. A separate <code>MAT_ERROR_DURATION</code> histogram could be added if error latency analysis is needed, but in practice the error counter plus tracing logs provide sufficient diagnostic information.
+    </p>
+
+        <h3>8.6 Metrics Endpoint</h3>
+
+    <p>
+        Metrics are exposed via a standard <code>/metrics</code> HTTP endpoint in Prometheus text exposition format. The <code>prometheus::gather()</code> function collects all registered metric families from the global registry — the same registry that <code>lazy_static</code> metrics are registered into — and the <code>TextEncoder</code> serializes them into the line-based format that Prometheus expects. This is a pull-based model: Prometheus scrapes the endpoint at a configured interval (typically 15–30 seconds), and the server does no work between scrapes.
+    </p>
+
+    <div class="code-block">
+        <pre>
+// deriva-server/src/main.rs
+use prometheus::{Encoder, TextEncoder};
+
+async fn metrics_handler() -> impl warp::Reply {
+    let encoder = TextEncoder::new();
+    let metric_families = prometheus::gather();
+    let mut buffer = vec![];
+    encoder.encode(&metric_families, &mut buffer).unwrap();
+    warp::reply::with_header(buffer, "Content-Type", encoder.format_type())
+}
+
+// Warp route
+let metrics_route = warp::path("metrics")
+    .and(warp::get())
+    .and_then(metrics_handler);
+
+// Prometheus scrape config:
+// scrape_configs:
+//   - job_name: 'deriva'
+//     static_configs:
+//       - targets: ['localhost:8080']</pre>
+    </div>
+
+    <p>
+        The endpoint is deliberately simple — no authentication, no caching, no filtering. Authentication is unnecessary because the metrics endpoint exposes only aggregate statistics, not user data. Caching would defeat the purpose of real-time monitoring. Filtering (e.g., returning only RPC metrics) is handled by Prometheus's query language (PromQL) rather than at the exposition layer. The <code>gather()</code> call is cheap: it iterates the registered metrics and serializes their current values, with no locking beyond the atomic reads that counters and gauges already use internally.
+    </p>
+
+        <h3>8.7 Structured Tracing with tokio-tracing</h3>
+
+    <p>
+        Metrics answer "what is happening across all requests" but cannot explain "why this specific request is slow." Structured tracing fills that gap. The <code>tracing</code> crate (integrated with tokio's async runtime) attaches contextual spans to each operation, creating a tree of nested spans that mirrors the call graph. The <code>#[instrument]</code> attribute macro automatically creates a span for each function call, recording the function name and any fields specified in the <code>fields()</code> attribute. The <code>skip(self)</code> directive prevents the entire struct from being serialized into the span — only the <code>addr</code> field is recorded.
+    </p>
+
+    <div class="code-block">
+        <pre>
+use tracing::{info_span, instrument, Instrument};
+
+#[instrument(skip(self), fields(addr = %addr))]
+pub async fn materialize(&self, addr: CAddr) -> Result&lt;Bytes&gt; {
+    let span = info_span!("cache_check", addr = %addr);
+    let cached = self.cache.get(&addr).instrument(span).await;
+    
+    if let Some(bytes) = cached {
+        tracing::info!(bytes = bytes.len(), "cache hit");
+        return Ok(bytes);
+    }
+    
+    tracing::info!("cache miss, computing");
+    
+    let compute_span = info_span!("compute", function = %func.id());
+    let result = self.execute_verified(&addr, func, inputs, params)
+        .instrument(compute_span)
+        .await?;
+    
+    tracing::info!(output_bytes = result.len(), "compute complete");
+    Ok(result)
+}
+
+// Output:
+// INFO materialize{addr=caddr(0xabc123)}: cache_check: cache hit bytes=1024
+// INFO materialize{addr=caddr(0xdef456)}: cache miss, computing
+// INFO materialize{addr=caddr(0xdef456)}: compute{function=transform/v1}: compute complete output_bytes=2048</pre>
+    </div>
+
+    <p>
+        The <code>.instrument(span)</code> method attaches a span to an async future, ensuring the span is entered when the future is polled and exited when it yields. This is essential for async code where a single thread interleaves multiple tasks — without <code>.instrument()</code>, span context would leak between unrelated requests. The structured output format (key=value pairs rather than free-form strings) enables machine parsing: log aggregators can filter by <code>addr</code>, group by <code>function</code>, and compute latency distributions from span durations without regex extraction.
+    </p>
+
+    <p>
+        Metrics and tracing are complementary, not redundant. Metrics detect anomalies ("p99 latency spiked to 5s"), and tracing explains them ("request X spent 4.8s in <code>expensive_transform/v1</code>"). The combination is demonstrated in §8.8.
+    </p>
+
+        <h3>8.8 Observability in Action: Debugging a Slow Request</h3>
+
+    <p>
+        Metrics and tracing are most valuable when used together in a diagnostic workflow. The following scenario illustrates how the two layers complement each other: metrics identify <em>that</em> something is wrong and narrow the scope, while tracing explains <em>why</em> and pinpoints the exact bottleneck. This workflow — from alert to root cause to action — is the core loop that observability enables.
+    </p>
+
+    <div class="svg-container" style="margin: 1.5rem 0;">
+      <svg id="debug-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 420" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer;">
+        <rect width="900" height="420" rx="12" fill="#1a1e2e"/>
+
+        <text x="450" y="25" text-anchor="middle" fill="#e0e0e0" font-size="14" font-weight="bold">Debugging a Slow Request</text>
+
+        <!-- Step 0: Scenario overview -->
+        <g id="db-s0" style="opacity:1">
+          <!-- Client box -->
+          <rect x="30" y="60" width="120" height="40" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="90" y="84" text-anchor="middle" fill="#81d4fa" font-size="11" font-weight="bold">Client</text>
+
+          <!-- Arrow to server -->
+          <line x1="150" y1="80" x2="310" y2="80" stroke="#81d4fa" stroke-width="1.5" marker-end="url(#db-arrow)"/>
+          <text x="230" y="72" text-anchor="middle" fill="#b0bec5" font-size="9">Get(addr_X)</text>
+
+          <!-- Server box -->
+          <rect x="310" y="60" width="140" height="40" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+          <text x="380" y="84" text-anchor="middle" fill="#f39c12" font-size="11" font-weight="bold">Deriva Server</text>
+
+          <!-- Response arrow -->
+          <line x1="310" y1="95" x2="150" y2="95" stroke="#e74c3c" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#db-arrow-red)"/>
+          <text x="230" y="112" text-anchor="middle" fill="#e74c3c" font-size="10" font-weight="bold">5.0s — too slow!</text>
+
+          <!-- Clock icon -->
+          <circle cx="700" cy="80" r="35" fill="none" stroke="#e74c3c" stroke-width="2"/>
+          <line x1="700" y1="80" x2="700" y2="58" stroke="#e74c3c" stroke-width="2"/>
+          <line x1="700" y1="80" x2="718" y2="80" stroke="#e74c3c" stroke-width="2"/>
+          <text x="700" y="130" text-anchor="middle" fill="#e74c3c" font-size="11" font-weight="bold">p99 = 120ms</text>
+          <text x="700" y="145" text-anchor="middle" fill="#b0bec5" font-size="9">This request: 5s (outlier)</text>
+
+          <!-- Question -->
+          <text x="450" y="180" text-anchor="middle" fill="#e0e0e0" font-size="13" font-weight="bold">Where is the time going?</text>
+
+          <!-- Three investigation paths -->
+          <rect x="80" y="210" width="180" height="50" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1"/>
+          <text x="170" y="232" text-anchor="middle" fill="#81d4fa" font-size="10" font-weight="bold">Step 1</text>
+          <text x="170" y="248" text-anchor="middle" fill="#b0bec5" font-size="9">Check Prometheus metrics</text>
+
+          <rect x="360" y="210" width="180" height="50" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="450" y="232" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Step 2</text>
+          <text x="450" y="248" text-anchor="middle" fill="#b0bec5" font-size="9">Trace request spans</text>
+
+          <rect x="640" y="210" width="180" height="50" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+          <text x="730" y="232" text-anchor="middle" fill="#f39c12" font-size="10" font-weight="bold">Step 3</text>
+          <text x="730" y="248" text-anchor="middle" fill="#b0bec5" font-size="9">Identify &amp; fix bottleneck</text>
+
+          <text x="450" y="310" text-anchor="middle" fill="#90a4ae" font-size="10">Click to begin investigation →</text>
+        </g>
+
+        <!-- Step 1: Prometheus metrics -->
+        <g id="db-s1" style="opacity:0">
+          <text x="450" y="55" text-anchor="middle" fill="#81d4fa" font-size="12" font-weight="bold">Step 1: Check Prometheus Metrics</text>
+
+          <!-- Metric panel -->
+          <rect x="60" y="70" width="780" height="130" rx="8" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="80" y="95" fill="#81d4fa" font-size="10" font-weight="bold">$ curl localhost:8080/metrics | grep rpc_duration</text>
+
+          <text x="80" y="120" fill="#b0bec5" font-size="10" font-family="monospace">deriva_rpc_duration_seconds{method="Get", quantile="0.50"}  0.015</text>
+          <text x="80" y="138" fill="#b0bec5" font-size="10" font-family="monospace">deriva_rpc_duration_seconds{method="Get", quantile="0.95"}  0.085</text>
+          <text x="80" y="156" fill="#e74c3c" font-size="10" font-family="monospace" font-weight="bold">deriva_rpc_duration_seconds{method="Get", quantile="0.99"}  0.120</text>
+          <text x="80" y="180" fill="#b0bec5" font-size="10" font-family="monospace">deriva_materialize_active                                    3</text>
+
+          <!-- Insight box -->
+          <rect x="60" y="215" width="780" height="55" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="80" y="237" fill="#2ecc71" font-size="11" font-weight="bold">✓ Insight</text>
+          <text x="80" y="255" fill="#b0bec5" font-size="10">p99 = 120ms, so 5s is a clear outlier — not a systemic issue. Need per-request tracing to find the cause.</text>
+
+          <!-- Active materializations note -->
+          <rect x="200" y="290" width="500" height="40" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+          <text x="450" y="314" text-anchor="middle" fill="#f39c12" font-size="10">3 concurrent materializations — within normal range (max_concurrency = 8)</text>
+
+          <text x="450" y="370" text-anchor="middle" fill="#90a4ae" font-size="10">Click to trace the request →</text>
+        </g>
+
+        <!-- Step 2: Tracing spans -->
+        <g id="db-s2" style="opacity:0">
+          <text x="450" y="55" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">Step 2: Trace Request Spans</text>
+
+          <rect x="60" y="70" width="780" height="220" rx="8" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="80" y="95" fill="#2ecc71" font-size="10" font-weight="bold">GET caddr=addr_X [request_id=req-789]</text>
+
+          <!-- Span bars -->
+          <rect x="100" y="108" width="660" height="16" rx="3" fill="#3a3f5c"/>
+          <text x="105" y="120" fill="#b0bec5" font-size="9">total: 4.82s</text>
+
+          <rect x="100" y="130" width="3" height="14" rx="2" fill="#81d4fa"/>
+          <text x="110" y="141" fill="#b0bec5" font-size="9">cache_lookup: MISS (2μs)</text>
+
+          <rect x="100" y="150" width="5" height="14" rx="2" fill="#81d4fa"/>
+          <text x="110" y="161" fill="#b0bec5" font-size="9">dag_resolve: 5 nodes (20μs)</text>
+
+          <rect x="100" y="170" width="3" height="14" rx="2" fill="#2ecc71"/>
+          <text x="110" y="181" fill="#b0bec5" font-size="9">materialize input_1: cache HIT (1μs)</text>
+
+          <rect x="100" y="190" width="3" height="14" rx="2" fill="#2ecc71"/>
+          <text x="110" y="201" fill="#b0bec5" font-size="9">materialize input_2: cache HIT (1μs)</text>
+
+          <rect x="100" y="210" width="640" height="16" rx="3" fill="#e74c3c" opacity="0.7"/>
+          <text x="110" y="222" fill="#e0e0e0" font-size="9" font-weight="bold">materialize input_3: compute (4.8s) ← BOTTLENECK</text>
+
+          <rect x="120" y="232" width="620" height="12" rx="2" fill="#e74c3c" opacity="0.4"/>
+          <text x="130" y="242" fill="#b0bec5" font-size="8">function: expensive_transform/v1 → output: 1,048,576 bytes</text>
+
+          <rect x="740" y="250" width="15" height="14" rx="2" fill="#ce93d8"/>
+          <text x="680" y="261" fill="#b0bec5" font-size="9">compute final: concat/v1 (2ms)</text>
+
+          <!-- Insight -->
+          <rect x="60" y="300" width="780" height="55" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="80" y="322" fill="#e74c3c" font-size="11" font-weight="bold">⚠ Bottleneck Found</text>
+          <text x="80" y="340" fill="#b0bec5" font-size="10">expensive_transform/v1 consumed 99.6% of request time (4.8s / 4.82s). All other operations &lt; 1ms.</text>
+
+          <text x="450" y="390" text-anchor="middle" fill="#90a4ae" font-size="10">Click to confirm with per-function metrics →</text>
+        </g>
+
+        <!-- Step 3: Root cause + action -->
+        <g id="db-s3" style="opacity:0">
+          <text x="450" y="55" text-anchor="middle" fill="#f39c12" font-size="12" font-weight="bold">Step 3: Confirm &amp; Act</text>
+
+          <!-- Per-function metric -->
+          <rect x="60" y="70" width="780" height="70" rx="8" fill="#232840" stroke="#3a3f5c" stroke-width="1"/>
+          <text x="80" y="95" fill="#f39c12" font-size="10" font-weight="bold">$ curl localhost:8080/metrics | grep compute_duration</text>
+          <text x="80" y="118" fill="#e74c3c" font-size="10" font-family="monospace" font-weight="bold">deriva_compute_duration_seconds{function="expensive_transform/v1", quantile="0.99"}  4.5</text>
+
+          <!-- Verdict -->
+          <rect x="60" y="155" width="780" height="40" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="450" y="180" text-anchor="middle" fill="#e74c3c" font-size="11" font-weight="bold">Confirmed: expensive_transform/v1 is consistently slow (p99 = 4.5s)</text>
+
+          <!-- Action options -->
+          <text x="450" y="220" text-anchor="middle" fill="#e0e0e0" font-size="12" font-weight="bold">Remediation Options</text>
+
+          <rect x="60" y="240" width="250" height="60" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="185" y="262" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Option A: Optimize</text>
+          <text x="185" y="280" text-anchor="middle" fill="#b0bec5" font-size="9">Rewrite expensive_transform/v1</text>
+          <text x="185" y="292" text-anchor="middle" fill="#b0bec5" font-size="9">to reduce compute time</text>
+
+          <rect x="325" y="240" width="250" height="60" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="450" y="262" text-anchor="middle" fill="#81d4fa" font-size="10" font-weight="bold">Option B: Parallelize</text>
+          <text x="450" y="280" text-anchor="middle" fill="#b0bec5" font-size="9">Increase max_concurrency so</text>
+          <text x="450" y="292" text-anchor="middle" fill="#b0bec5" font-size="9">slow computes don't block others</text>
+
+          <rect x="590" y="240" width="250" height="60" rx="6" fill="#232840" stroke="#ce93d8" stroke-width="1.5"/>
+          <text x="715" y="262" text-anchor="middle" fill="#ce93d8" font-size="10" font-weight="bold">Option C: Cache Higher</text>
+          <text x="715" y="280" text-anchor="middle" fill="#b0bec5" font-size="9">Cache input_3's output to avoid</text>
+          <text x="715" y="292" text-anchor="middle" fill="#b0bec5" font-size="9">recomputing on every request</text>
+
+          <!-- Summary -->
+          <rect x="150" y="320" width="600" height="50" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="450" y="342" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Metrics → Tracing → Root Cause → Action</text>
+          <text x="450" y="358" text-anchor="middle" fill="#b0bec5" font-size="9">Total investigation time: ~2 minutes. Without observability: hours of guesswork.</text>
+
+          <text x="450" y="400" text-anchor="middle" fill="#90a4ae" font-size="10">Click to restart →</text>
+        </g>
+
+        <!-- Arrow markers -->
+        <defs>
+          <marker id="db-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#81d4fa"/></marker>
+          <marker id="db-arrow-red" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#e74c3c"/></marker>
+        </defs>
+
+        <!-- Hint -->
+        <text id="db-hint" x="450" y="412" text-anchor="middle" fill="#546e7a" font-size="9">Click to step through investigation →</text>
+      </svg>
+      <p class="figure-caption">Figure 25: Diagnostic workflow — from metric alert to tracing root cause to targeted action.</p>
+    </div>
+
+    <p>
+        The scenario above follows a three-step diagnostic loop that applies to any performance anomaly in Deriva. First, aggregate metrics establish whether the problem is systemic (all requests are slow) or isolated (one request is an outlier). This distinction determines the investigation strategy: systemic slowness points to resource exhaustion or configuration issues, while outliers point to specific data or compute paths. Second, structured tracing narrows the scope from "the request is slow" to "this specific span is slow," turning a vague symptom into a precise location. Third, per-function metrics confirm whether the bottleneck is a one-time anomaly or a consistent pattern, guiding the choice between optimization, architectural changes, or caching.
+    </p>
+
+    <p>
+        The key design decision is that metrics and tracing share the same label vocabulary. The <code>function</code> label in <code>deriva_compute_duration_seconds</code> matches the <code>function</code> field in the tracing span, so the transition from "p99 for <code>expensive_transform/v1</code> is 4.5s" to "request req-789 spent 4.8s in <code>expensive_transform/v1</code>" requires no mental translation. This shared vocabulary is not accidental — the metric labels and span fields are defined in the same <code>metrics.rs</code> module, ensuring they stay synchronized as the codebase evolves.
+    </p>
+
+    <h3>8.9 Comparison with Other Systems</h3>
+    
+    <ul>
+        <li><strong>Redis:</strong> <code>INFO</code> command returns stats, <code>MONITOR</code> for live command stream. No Prometheus metrics. Deriva has both structured metrics and tracing.</li>
+        <li><strong>Memcached:</strong> <code>stats</code> command, no tracing. Deriva's observability is more comprehensive.</li>
+        <li><strong>Bazel:</strong> <code>--profile</code> flag generates JSON trace, no live metrics. Deriva has both live metrics and tracing.</li>
+        <li><strong>Spark:</strong> Web UI with DAG visualization, metrics via JMX. Deriva's Prometheus metrics integrate with standard monitoring stacks.</li>
+        <li><strong>Kubernetes:</strong> Extensive Prometheus metrics, structured logs. Deriva follows the same patterns for cloud-native observability.</li>
+    </ul>
+
+    <p>
+        Deriva's observability follows cloud-native best practices: Prometheus for metrics (standard scrape format), structured tracing for debugging, and separation of concerns (metrics for aggregates, tracing for per-request detail).
+    </p>
+
+    </section>
+</div>

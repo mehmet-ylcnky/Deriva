@@ -150,9 +150,8 @@
                 <!-- Hint -->
                 <text id="cl-hint" x="360" y="240" text-anchor="middle" fill="#b0bec5" font-size="10" font-family="Roboto Condensed, sans-serif">▶ click to step through the chunk lifecycle</text>
             </svg>
+            <p class="figure-caption">Figure 4: StreamChunk lifecycle — Data flow, End termination, Error propagation, and channel cleanup.</p>
         </div>
-
-        <h3>3.4 Backpressure via Bounded Channels</h3>
 
         <p>
             Backpressure — the mechanism by which a slow consumer slows down a fast producer — is the single most important property for bounded-memory streaming. Without it, a fast producer would fill memory with buffered chunks until the system runs out of RAM. Deriva's backpressure is implicit: it falls out of the channel semantics with zero additional code.

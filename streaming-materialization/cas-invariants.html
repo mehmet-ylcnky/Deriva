@@ -9,11 +9,11 @@
         <h3>7.1 Deterministic CAddr</h3>
 
         <p>
-            The fundamental CAS invariant: <strong>the same recipe always produces the same CAddr</strong>. Streaming does not change this. The CAddr is computed from the recipe (function ID + input addresses + parameters), not from the output bytes. Whether the output is produced in one batch or 1,000 chunks, the recipe is identical, so the CAddr is identical.
+            The fundamental CAS invariant: <strong>the same recipe always produces the same CAddr</strong>. Streaming does not change this because the CAddr is computed from the recipe structure — the function ID, the ordered list of input addresses, and the parameter map — not from the output bytes. Whether the output is produced in one batch call or flows through 1,000 chunks across five concurrent stages, the recipe is identical, so the CAddr is identical. This is by design: the addressing model defined in <a href="../computation-addressed-storage/">the foundational architecture</a> deliberately decouples the address from the execution strategy.
         </p>
 
         <p>
-            Streaming is a <em>compute optimization</em>, not a <em>storage optimization</em>. The pipeline changes how bytes flow through the system, but the logical computation — and therefore the address — remains the same.
+            A subtlety: the output <em>bytes</em> must also be identical regardless of execution path. If a streaming function produced different bytes than its batch equivalent for the same inputs, the cache-after-collect strategy (<a href="#cas-invariants-container">§7</a>.2) would store a different value under the same CAddr — a silent correctness violation. The <code>StreamChunk</code> protocol (<a href="#stream-chunk-container">§3</a>) guarantees this: concatenating all <code>Data</code> chunk payloads in order yields exactly the same <code>Bytes</code> as the batch function's return value. This equivalence is verified empirically for all 20 built-in streaming functions in the test suite.
         </p>
 
         <h3>7.2 Caching Strategy: Cache-After-Collect</h3>
@@ -87,49 +87,52 @@
         </div>
 
         <p>
-            <strong>Decision: Option A.</strong> The cache stores full <code>Bytes</code> values, exactly as in batch mode. Streaming is a compute-path optimization — the storage layer is unchanged. After a streaming pipeline completes, the result is collected via <code>tee_stream</code> + <code>collect_stream</code> and cached normally. Future requests for the same CAddr get a cache hit and return the full value without recomputation.
+            <strong>Decision: Option A.</strong> The cache stores full <code>Bytes</code> values, exactly as in batch mode. Streaming is a compute-path optimization — the storage layer sees no difference. After a streaming pipeline completes, the executor uses <code>tee_stream</code> to fork the output: one branch delivers chunks to the client immediately, while the other feeds into <code>collect_stream()</code> which reassembles the chunks into a single <code>Bytes</code> value and stores it in the existing <code>AsyncMaterializationCache</code>. Future requests for the same CAddr get a cache hit and return the full value without recomputation — served as a batch response regardless of how it was originally produced.
+        </p>
+
+        <p>
+            The cost of this approach is one full-result buffer per pipeline execution (the collector must hold all chunks in memory before writing to cache). For a 512 MB result, this means 512 MB of temporary allocation. But this cost is incurred exactly once per unique computation — subsequent requests are served from cache with zero compute cost. Option B (chunk-level caching) would avoid this buffer but introduces cache fragmentation, chunk ordering complexity, and incompatibility with the existing GC and invalidation infrastructure. Option C (no caching) defeats the core value proposition of content-addressed storage.
         </p>
 
         <h3>7.3 Invalidation</h3>
 
         <p>
-            Cascade invalidation (Paper 2, §4) traverses reverse edges in the dependency DAG and evicts dependents. Streaming does not change the DAG structure — the same recipes, the same edges, the same reverse-edge index. When an input is invalidated:
+            Cascade invalidation (described in <a href="../robust-materialization/">Robust Materialization</a>, §6) traverses reverse edges in the persistent dependency DAG and evicts all transitive dependents of a changed input. Streaming does not alter the DAG structure — the same recipes produce the same forward and reverse edges, regardless of execution mode. When an input is invalidated:
         </p>
 
         <ol>
-            <li>The cached <code>Bytes</code> for all transitive dependents are evicted.</li>
-            <li>The next request for any evicted CAddr triggers a fresh materialization — which may now use the streaming pipeline instead of batch.</li>
+            <li>The cached <code>Bytes</code> for all transitive dependents are evicted via BFS over the reverse-edge index.</li>
+            <li>The next request for any evicted CAddr triggers a fresh materialization. The <code>StreamingExecutor</code> checks the cache first (<a href="#pipeline-container">§6</a>.3), finds a miss, and builds a new pipeline — which may use streaming, batch, or a mix depending on registry availability.</li>
         </ol>
 
         <p>
-            No streaming-specific invalidation logic is needed. The invariant holds: <em>if any input changes, the cached output is evicted, and recomputation produces the correct new result</em>.
+            No streaming-specific invalidation logic is needed. The invariant holds: <em>if any input changes, the cached output is evicted, and recomputation produces the correct new result</em>. The only edge case is invalidation during an in-progress pipeline: if a source node's data is invalidated while chunks are in transit, the pipeline completes with the old data and caches the (now stale) result. The next invalidation pass will evict it again. This is the same race condition that exists in batch mode — the invalidation protocol is eventually consistent, not transactional.
         </p>
 
         <h3>7.4 Verification</h3>
 
         <p>
-            Verification re-executes a recipe and compares the output hash against the stored CAddr. With streaming, the verification path is:
+            The verification system (described in <a href="../robust-materialization/">Robust Materialization</a>, §5) detects non-determinism by re-executing a recipe and comparing the output against the cached result. With streaming, the verification path becomes:
         </p>
 
         <ol>
-            <li>Build a streaming pipeline for the recipe.</li>
-            <li>Collect the output stream into <code>Bytes</code>.</li>
-            <li>Hash the collected bytes.</li>
-            <li>Compare against the expected CAddr.</li>
+            <li>Build a streaming pipeline for the recipe (identical to the normal materialization path).</li>
+            <li>Collect the output stream into <code>Bytes</code> via <code>collect_stream()</code>.</li>
+            <li>Hash the collected bytes and compare against the expected CAddr.</li>
         </ol>
 
         <p>
-            The collected bytes are identical whether produced by batch or streaming execution — the <code>StreamChunk</code> protocol guarantees that concatenating all <code>Data</code> chunks yields the same <code>Bytes</code> as the batch function's output. This is a testable invariant: the test suite (<a href="#evaluation-container">§8</a>) verifies batch/streaming equivalence for all 20 built-in functions.
+            The critical property: the collected bytes must be identical whether produced by the batch path or the streaming path. This holds because each streaming function is required to produce the same logical output as its batch equivalent — the <code>StreamChunk</code> protocol simply slices that output into bounded pieces for transport. The <code>collect_stream()</code> function reassembles them by concatenating all <code>Data</code> payloads in order, recovering the original <code>Bytes</code> value. All three verification modes (Off, DualCompute, Sampled) work unchanged — the mode selection is orthogonal to the execution strategy.
         </p>
 
         <h3>7.5 Garbage Collection</h3>
 
         <p>
-            GC operates on cached <code>Bytes</code> values identified by CAddr. Since streaming results are cached as full <code>Bytes</code> (<a href="#cas-invariants-container">§7</a>.2), GC sees no difference between a value produced by batch and one produced by streaming. The cost-aware eviction model, reference counting, and LRU policies all work unchanged.
+            GC (described in <a href="../robust-materialization/">Robust Materialization</a>, §7) operates on cached <code>Bytes</code> values identified by CAddr. Since streaming results are cached as full <code>Bytes</code> via cache-after-collect (<a href="#cas-invariants-container">§7</a>.2), GC sees no difference between a value produced by batch and one produced by streaming. The three-phase mark-sweep-report cycle, cost-aware eviction scoring, and LRU policies all work unchanged.
         </p>
 
         <p>
-            The only streaming-specific consideration: if a streaming pipeline is <em>in progress</em> when GC runs, the intermediate chunks in transit through channels are not visible to GC. They exist only as Tokio task state and channel buffers — not in the cache. GC cannot and need not evict them. Once the pipeline completes and the result is cached, it becomes a normal cache entry subject to normal eviction.
+            The only streaming-specific consideration: if a streaming pipeline is <em>in progress</em> when GC runs, the intermediate chunks in transit through channels are not visible to GC. They exist only as Tokio task state and bounded channel buffers — not in the cache or the blob store. GC cannot and need not evict them. Once the pipeline completes and the result is cached, it becomes a normal cache entry subject to normal eviction. If GC evicts a value that a running pipeline depends on (e.g., a cached intermediate that was already loaded as a <code>Cached</code> node), the pipeline is unaffected — the node holds its own <code>Bytes</code> copy, independent of the cache.
         </p>
 
     </section>

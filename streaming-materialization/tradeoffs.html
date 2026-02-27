@@ -3,7 +3,11 @@
         <h2>9. Tradeoffs &amp; Design Decisions</h2>
 
         <p>
-            Streaming materialization is not a free upgrade over batch. It introduces new complexity axes that system designers must navigate. This section maps the five key tradeoffs, explains when each matters, and provides concrete guidance for choosing between batch and streaming paths.
+            Streaming materialization is not a free upgrade over batch. It introduces new complexity axes that system designers must navigate: additional infrastructure (channels, spawned tasks, chunk framing), new failure modes (backpressure stalls, partial stream errors), and performance characteristics that depend on input size, pipeline depth, and function category. The batch path remains the right choice for a significant class of workloads — the benchmarks in <a href="#evaluation-container">§8</a> show batch winning by up to 9.3× for small inputs.
+        </p>
+
+        <p>
+            This section maps the five key tradeoffs, explains when each matters, and provides concrete guidance for choosing between batch and streaming paths. The tradeoff map below (Figure 6) organizes these dimensions visually — click any dimension to see a summary of the empirical data behind it. The subsections that follow expand each dimension with detailed analysis, decision criteria, and configuration guidance.
         </p>
 
         <p style="font-size:0.85rem; color:#6a737d;">▶ Click a tradeoff dimension to expand details.</p>
@@ -81,67 +85,92 @@
         <h3>9.1 When to Use Batch</h3>
 
         <p>
-            Batch materialization remains the right choice when:
+            Batch materialization remains the right choice when the overhead of the streaming infrastructure exceeds the benefit of pipeline parallelism. The decision is not about capability — every batch function can participate in a streaming pipeline via auto-wrapping (<a href="#auto-wrapping-container">§5</a>) — but about whether the streaming path actually improves performance for the specific workload.
         </p>
 
         <ul>
-            <li><strong>Data is small (&lt;3 MB)</strong> — streaming's fixed overhead (channel creation, Tokio task spawning, chunk framing) exceeds the benefit of pipeline parallelism. At 1 MB, batch is 9.3× faster.</li>
-            <li><strong>Single-stage computation</strong> — with no pipeline parallelism to exploit, streaming adds overhead with no upside. A direct <code>blob_store_get</code> returns 1 MB in 398 µs; streaming identity takes 1.59 ms.</li>
-            <li><strong>Result will be immediately cached</strong> — if the output is small and will be served from cache on subsequent reads, the streaming infrastructure cost is wasted.</li>
+            <li><strong>Data is small (&lt;3 MB).</strong> The batch vs streaming sweep in <a href="#evaluation-container">§8</a> shows a clear crossover point around 3–4 MB for a 5-stage identity pipeline. At 1 MB, batch completes in 0.17 ms while streaming takes 1.59 ms — a 9.3× penalty. At 2 MB, the gap narrows to 5.7× (0.41 ms vs 2.36 ms). The streaming overhead is fixed: creating 5 channel pairs (~5 × 200 ns), spawning 5 Tokio tasks (~5 × 1 µs), and framing the input into chunks (~16 chunks at 64 KB). For small inputs, this fixed cost dominates the actual computation. The future size-aware execution mode (§1 in future improvements) will automate this decision by checking input size against a configurable threshold before selecting the execution path.</li>
+            <li><strong>Single-stage computation.</strong> Streaming's primary advantage is pipeline parallelism — overlapping the execution of multiple stages so that stage N+1 begins processing before stage N finishes. With only one stage, there is nothing to overlap. A direct <code>blob_store_get → execute → return</code> path avoids all channel overhead. The streaming path still provides bounded memory and cancellation, but if the function is a simple transform on small data, these benefits are irrelevant.</li>
+            <li><strong>Result will be immediately cached and is small.</strong> If the output is under a few MB and will be served from the CAS cache on all subsequent reads, the streaming infrastructure cost is amortized over exactly one execution. The cache stores the final <code>Bytes</code> value, not the stream — so the streaming path must collect the output into <code>Bytes</code> for caching anyway (see <a href="#cas-invariants-container">§7</a>). For a 500 KB result that will be read 1,000 times from cache, the one-time streaming overhead of ~1 ms is negligible, but it is also unnecessary.</li>
+            <li><strong>The function is inherently batch.</strong> Some operations require the full input before producing any output: sorting, global deduplication, JSON schema validation, PDF page extraction, Parquet column projection. These functions would call <code>collect_stream</code> internally even if given a streaming interface. Using them through auto-wrapping is not a compromise — it is the correct execution strategy. The 148 batch-only functions identified in the format-aware function catalog fall into this category.</li>
         </ul>
 
         <h3>9.2 When to Use Streaming</h3>
 
         <p>
-            Streaming materialization wins when:
+            Streaming materialization wins when the workload can exploit pipeline parallelism, when memory must be bounded, or when the consumer benefits from seeing partial results early. The advantage grows with input size and pipeline depth:
         </p>
 
         <ul>
-            <li><strong>Multi-stage pipelines on data &gt;3 MB</strong> — pipeline parallelism overlaps stages. At 32 MB with 5 stages, streaming is 2.7× faster than batch.</li>
-            <li><strong>Time-to-first-byte matters</strong> — streaming delivers the first 64 KB chunk in ~1.6 ms regardless of data size or pipeline depth. Batch must complete all stages first.</li>
-            <li><strong>Memory must be bounded</strong> — a 5-stage streaming pipeline on 512 MB data uses at most 2.5 MB of buffer memory (D × N × chunk_size = 5 × 8 × 64 KB). Batch would buffer 5 × 512 MB = 2.5 GB.</li>
-            <li><strong>Graceful cancellation</strong> — streaming pipelines can be cancelled mid-stream by dropping the receiver. Batch is all-or-nothing.</li>
+            <li><strong>Multi-stage pipelines on data &gt;3 MB.</strong> Pipeline parallelism overlaps the execution of adjacent stages: while stage 3 processes chunk N, stage 2 processes chunk N+1, and stage 1 processes chunk N+2. The more stages and the larger the data, the greater the overlap. At 32 MB with 5 stages, streaming is 2.7× faster than batch (14.4 ms vs 38.7 ms) — the peak advantage in the benchmark sweep. Even at 512 MB, streaming maintains a 1.3× advantage (564 ms vs 744 ms). The diminishing advantage at very large sizes reflects the fact that the pipeline eventually becomes compute-bound rather than latency-bound, and the overlap benefit saturates.</li>
+            <li><strong>Time-to-first-byte matters.</strong> Streaming delivers the first 64 KB chunk in ~1.6 ms regardless of data size or pipeline depth. This is the time to create the channel chain, spawn the tasks, read the first chunk from the source, and propagate it through one stage. Batch must complete <em>all</em> stages before the client sees any data — for a 512 MB, 5-stage pipeline, that is 744 ms of silence followed by the full result. For interactive applications (file previews, progressive rendering, HTTP range requests), the streaming path provides a qualitatively different user experience: the client begins receiving data almost immediately.</li>
+            <li><strong>Memory must be bounded.</strong> A 5-stage streaming pipeline on 512 MB data uses at most 2.5 MB of buffer memory: 5 stages × 8 channel slots × 64 KB chunk size (see the capacity sweep in <a href="#evaluation-container">§8.7</a>). The same pipeline in batch mode buffers the full input at each stage: 5 × 512 MB = 2.5 GB in the worst case (though in practice, stages execute sequentially and release memory, so the peak is closer to 2 × 512 MB). The 1,000× memory difference is the most compelling argument for streaming on large data — it determines whether a pipeline can run on a constrained worker node or requires a large-memory instance.</li>
+            <li><strong>Graceful cancellation.</strong> Streaming pipelines can be cancelled mid-stream by dropping the output receiver. The cancellation propagates backward through the channel chain (see <a href="#stream-chunk-container">§3.5</a>): each stage detects the closed channel on its next <code>send()</code> and exits. For a <code>StreamingTake(1_000_000)</code> on a 512 MB input, only ~1 MB is actually read and processed — the remaining 511 MB is never touched. Batch is all-or-nothing: the function runs to completion even if the consumer only needs the first byte of the result.</li>
+            <li><strong>Backpressure is needed.</strong> When a fast producer feeds a slow consumer (e.g., a compression stage feeding a network writer), the bounded channel automatically throttles the producer. Without streaming, the producer would generate the full output in memory, potentially exhausting available RAM before the consumer finishes. The channel capacity acts as an automatic flow-control valve — no explicit rate-limiting logic is needed.</li>
         </ul>
 
         <h3>9.3 Chunk Size Selection Guide</h3>
 
         <p>
-            The default 64 KB chunk size balances three concerns:
+            The default 64 KB chunk size was chosen empirically from the chunk size sensitivity benchmarks and balances three competing concerns. Changing it affects every stage in the pipeline, so the choice has system-wide implications:
         </p>
 
         <ul>
-            <li><strong>Channel overhead</strong> — each chunk requires one <code>mpsc::send</code> + <code>recv</code> (~100 ns uncontended). At 1 KB chunks, a 1 MB input generates 1,000 round-trips (8.56 ms). At 64 KB, only 16 round-trips (1.50 ms).</li>
-            <li><strong>First-byte latency</strong> — smaller chunks mean faster TTFB. At 64 KB, the first chunk arrives after ~94 µs of compute. At 1 MB, TTFB equals total latency.</li>
-            <li><strong>Memory footprint</strong> — per-stage buffer = channel_capacity × chunk_size. At 64 KB with 8 slots: 512 KB per stage. At 1 MB: 8 MB per stage.</li>
+            <li><strong>Channel overhead.</strong> Each chunk requires one <code>mpsc::send()</code> + <code>recv()</code> pair per stage (~100 ns uncontended, more under contention). The total channel operations for a pipeline are <code>(input_size / chunk_size) × num_stages</code>. At 1 KB chunks, a 1 MB input through 5 stages generates 5,000 channel round-trips, costing 8.56 ms in overhead alone. At 64 KB, the same pipeline generates only 80 round-trips (1.50 ms). At 256 KB, 20 round-trips (1.62 ms) — the marginal improvement from 64 KB to 256 KB is only 8%, because channel overhead is no longer the bottleneck. This is why 64 KB sits at the knee of the curve: further increases yield diminishing returns.</li>
+            <li><strong>First-byte latency.</strong> TTFB is approximately the time to fill one chunk at the source plus one channel hop per stage. Smaller chunks mean faster TTFB: at 1 KB, the first chunk arrives in ~50 µs; at 64 KB, ~94 µs; at 1 MB, TTFB equals total latency because the entire input is a single chunk and there is no pipeline overlap. For interactive use cases where the consumer begins rendering or transmitting as soon as the first bytes arrive, smaller chunks provide a measurably better experience — but below 16 KB, the channel overhead penalty outweighs the TTFB benefit.</li>
+            <li><strong>Memory footprint.</strong> Per-stage buffer memory is <code>channel_capacity × chunk_size</code>. With the default capacity of 8: at 64 KB chunks, each stage buffers up to 512 KB; at 256 KB, 2 MB; at 1 MB, 8 MB. For a 5-stage pipeline, the total buffer ranges from 2.5 MB (64 KB chunks) to 40 MB (1 MB chunks). On memory-constrained workers, this 16× difference determines whether the pipeline fits in the available headroom.</li>
         </ul>
 
         <p>
-            Override the default only when you have a specific reason: use smaller chunks (16 KB) for latency-sensitive interactive responses, larger chunks (256 KB+) for bulk ETL where throughput dominates.
+            Override the default only when you have a specific reason:
+        </p>
+
+        <ul>
+            <li><strong>16 KB</strong> — for latency-sensitive interactive responses where TTFB dominates (e.g., streaming a file preview to a web client). Accept the ~17% throughput penalty (1.76 ms vs 1.50 ms at 1 MB) for faster first-byte delivery.</li>
+            <li><strong>256 KB</strong> — for bulk ETL pipelines where throughput dominates and TTFB is irrelevant. Reduces channel operations by 4× compared to 64 KB, with a modest memory increase (2 MB per stage instead of 512 KB).</li>
+            <li><strong>1 MB+</strong> — rarely justified. At this size, each "chunk" is large enough that the streaming benefit (pipeline overlap, bounded memory) is minimal. The pipeline degenerates toward batch behavior. Only consider this for single-stage pipelines on very large inputs where you want to minimize channel overhead to near zero.</li>
+        </ul>
+
+        <p>
+            The chunk size is set globally in <code>PipelineConfig::chunk_size</code> and applies to all stages uniformly. A future improvement (adaptive chunk sizing, §2 in future improvements) would allow per-stage chunk sizes based on observed throughput — but the uniform default works well for the common case because most streaming functions have similar per-chunk processing costs.
         </p>
 
         <h3>9.4 The Auto-Wrap Tax</h3>
 
         <p>
-            Auto-wrapping (<a href="#auto-wrapping-container">§5</a>) lets any batch <code>ComputeFunction</code> participate in a streaming pipeline by collecting all input chunks, running the batch function, and re-chunking the output. This preserves API compatibility but defeats two key streaming benefits:
+            Auto-wrapping (<a href="#auto-wrapping-container">§5</a>) lets any batch <code>ComputeFunction</code> participate in a streaming pipeline by collecting all input chunks into a single <code>Bytes</code>, running the batch function, and re-chunking the output via <code>batch_to_stream</code>. This preserves API compatibility — the 4 existing batch functions and any user-registered functions work without modification — but it defeats two key streaming benefits:
         </p>
 
         <ul>
-            <li><strong>Bounded memory</strong> — the wrapper must buffer the entire input before calling the batch function, reverting to O(n) memory for that stage.</li>
-            <li><strong>Pipeline parallelism</strong> — the wrapped stage cannot overlap with its predecessor because it waits for all input before starting. Downstream stages are blocked until the batch function completes.</li>
+            <li><strong>Bounded memory.</strong> The <code>collect_stream</code> step buffers the entire input before calling the batch function, reverting to O(n) memory for that stage. In a pipeline where 3 of 5 stages are auto-wrapped, the memory profile is a hybrid: the 2 streaming stages use O(chunk_size) memory, but the 3 batch stages each hold the full input. The worst case is a pipeline where every stage is auto-wrapped — at that point, the streaming infrastructure adds overhead (channels, tasks) with none of the memory benefits. This is strictly worse than running the pipeline in pure batch mode.</li>
+            <li><strong>Pipeline parallelism.</strong> The wrapped stage cannot overlap with its predecessor because <code>collect_stream</code> waits for all input before starting the batch function. Downstream stages are blocked until the batch function completes and <code>batch_to_stream</code> begins emitting chunks. In a 5-stage pipeline where stage 3 is auto-wrapped, stages 1–2 run with full streaming overlap, then the pipeline stalls at stage 3 while it collects and executes, then stages 4–5 resume streaming from the re-chunked output. The stall duration equals the collection time plus the batch execution time — for a 64 MB input through a moderately expensive function, this could be 50–100 ms of dead time where no downstream progress occurs.</li>
         </ul>
 
         <p>
-            Auto-wrap is a migration tool, not a long-term solution. For performance-critical pipelines, implement native <code>StreamingFunction</code> variants. The 20 built-in streaming functions (<a href="#streaming-functions-container">§4</a>) cover the most common operations.
+            Auto-wrap is a migration tool, not a long-term solution. It exists to ensure that the streaming pipeline is a <em>universal</em> execution engine from day one — every function works, even if not optimally. For performance-critical pipelines, the path forward is implementing native <code>StreamingComputeFunction</code> variants. The 20 built-in streaming functions (<a href="#streaming-functions-container">§4</a>) cover the most common operations, and the <code>spawn_map</code> / <code>spawn_accumulate</code> helpers make adding new ones straightforward (~15 lines per function). The registry resolution in <a href="#auto-wrapping-container">§5.1</a> ensures that upgrading a function from batch to streaming is transparent: register the streaming variant, and all pipelines automatically use it on the next execution.
         </p>
 
         <h3>9.5 Accumulator Stages</h3>
 
         <p>
-            Accumulators (SHA-256, byte count, checksum) are inherently non-streaming in their output — they must consume all input before emitting a result. However, they still benefit from streaming <em>input</em>: instead of buffering the full input in memory, they update internal state chunk-by-chunk (e.g., <code>Sha256::update(chunk)</code>) and emit one summary chunk on <code>StreamChunk::End</code>.
+            Accumulators (SHA-256, byte count, checksum) are inherently non-streaming in their output — they must consume all input before emitting a result. A SHA-256 hash cannot produce any output bytes until the last input byte has been processed, because every input byte affects every output byte. However, accumulators still benefit from streaming <em>input</em>: instead of buffering the full input in memory, they update fixed-size internal state chunk-by-chunk (e.g., <code>Sha256::update(chunk)</code> updates 32 bytes of hasher state) and emit one summary chunk on <code>StreamChunk::End</code>. For a 512 MB input, the accumulator uses 32 bytes of state instead of 512 MB of buffer — a 16-million-fold reduction.
         </p>
 
         <p>
-            An accumulator in the middle of a pipeline creates a <strong>pipeline bubble</strong>: downstream stages stall until the accumulator finishes. Place accumulators at the end of pipelines when possible, or use <code>StreamingTeeCount</code> / <code>StreamingTeeChecksum</code> to compute metadata in parallel with the main data flow without blocking downstream.
+            An accumulator in the middle of a pipeline creates a <strong>pipeline bubble</strong>: all downstream stages stall until the accumulator finishes consuming its entire input. Consider a pipeline <code>[Uppercase → SHA-256 → Base64Encode]</code> on a 64 MB input. The Uppercase stage streams chunks to SHA-256 with full overlap — while SHA-256 processes chunk N, Uppercase processes chunk N+1. But Base64Encode sees nothing until SHA-256 emits its 32-byte digest after all ~1,000 chunks have been processed. The pipeline's effective throughput is gated by the accumulator: the total latency is approximately <code>time(Uppercase + SHA-256) + time(Base64Encode)</code> rather than <code>max(time(Uppercase), time(SHA-256), time(Base64Encode))</code>.
+        </p>
+
+        <p>
+            Two strategies mitigate the bubble effect:
+        </p>
+
+        <ul>
+            <li><strong>Place accumulators at the end.</strong> If the pipeline's purpose is to compute a hash or checksum, make the accumulator the final stage. This way, no downstream stage is blocked — the accumulator's output is the pipeline's output, and the consumer simply waits for the single summary chunk. The pipeline <code>[Uppercase → Compress → SHA-256]</code> has full streaming overlap between Uppercase and Compress, and the SHA-256 stage adds only its per-chunk update cost (~2 µs per 64 KB chunk) to the total latency.</li>
+            <li><strong>Use tee-style functions for parallel metadata.</strong> <code>StreamingTeeCount</code> demonstrates the pattern: it passes all data chunks through unchanged while maintaining a rolling byte counter, then appends the count as an extra chunk after the last data chunk. This avoids the bubble entirely — downstream stages receive data immediately, and the metadata arrives at the end as a bonus. The same pattern can be extended to <code>StreamingTeeChecksum</code> or <code>StreamingTeeSha256</code> (not yet implemented) for computing integrity metadata without blocking the data flow.</li>
+        </ul>
+
+        <p>
+            The accumulator tradeoff is fundamental and cannot be eliminated by engineering — it is an information-theoretic constraint. A hash function that could emit partial output before seeing all input would not be a cryptographic hash. The streaming system's contribution is making the <em>input</em> side efficient (bounded memory, backpressure) while accepting that the <em>output</em> side is necessarily delayed. This is strictly better than the batch alternative, which buffers both input and output.
         </p>
 
     </section>

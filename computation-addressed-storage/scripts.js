@@ -94,6 +94,8 @@ document.addEventListener('DOMContentLoaded', function() {
                             });
                         }
                     });
+                    // Initialize SVG interactive handlers
+                    initSvgHandlers(document.getElementById(section.id + '-container'));
                 }
             })
             .catch(error => {
@@ -102,3 +104,72 @@ document.addEventListener('DOMContentLoaded', function() {
             });
     });
 });
+
+function initSvgHandlers(container) {
+    if (!container) return;
+
+    // Materialization flow — 6-step walkthrough
+    var mf = container.querySelector('#mat-flow-svg');
+    if (mf) {
+        var mfStep = 0; var mfMax = 5;
+        mf.addEventListener('click', function() {
+            mfStep = (mfStep + 1) % (mfMax + 1);
+            for (var i = 0; i <= mfMax; i++) {
+                var g = mf.querySelector('#mf-s' + i);
+                if (g) { g.style.transition = 'opacity 0.35s'; g.style.opacity = i === mfStep ? '1' : '0'; }
+            }
+            var h = mf.querySelector('#mf-hint');
+            if (h) h.textContent = mfStep === 0
+                ? 'Click to step through materialization flow (Step 1 of 6)'
+                : 'Step ' + (mfStep + 1) + ' of 6' + (mfStep === mfMax ? ' — click to restart' : '');
+        });
+    }
+
+    // Architecture layers — 4-step highlight
+    var al = container.querySelector('#arch-layers-svg');
+    if (al) {
+        var alStep = 0; var alMax = 4;
+        var alGroups = ['al-client', 'al-service', 'al-middle', 'al-core'];
+        al.addEventListener('click', function() {
+            alStep = (alStep + 1) % (alMax + 1);
+            // Dim/brighten layer groups
+            alGroups.forEach(function(gid, idx) {
+                var g = al.querySelector('#' + gid);
+                if (g) g.style.opacity = (alStep === 0 || idx === alStep - 1) ? '1' : '0.3';
+            });
+            // Toggle info panels
+            for (var i = 0; i <= alMax; i++) {
+                var s = al.querySelector('#al-s' + i);
+                if (s) { s.style.transition = 'opacity 0.35s'; s.style.opacity = i === alStep ? '1' : '0'; }
+            }
+            var h = al.querySelector('#al-hint');
+            if (h) h.textContent = alStep === 0
+                ? 'Click to highlight layers (0 of 4)'
+                : 'Layer ' + alStep + ' of 4' + (alStep === alMax ? ' — click to reset' : '');
+        });
+    }
+
+    // Crate dependency graph — 6-step highlight
+    var cd = container.querySelector('#crate-dep-svg');
+    if (cd) {
+        var cdStep = 0; var cdMax = 6;
+        var cdBoxes = ['cd-cli', 'cd-server', 'cd-compute', 'cd-storage', 'cd-core', 'cd-network'];
+        cd.addEventListener('click', function() {
+            cdStep = (cdStep + 1) % (cdMax + 1);
+            // Dim/brighten crate boxes
+            cdBoxes.forEach(function(bid, idx) {
+                var b = cd.querySelector('#' + bid);
+                if (b) b.style.opacity = (cdStep === 0 || idx === cdStep - 1) ? '1' : '0.3';
+            });
+            // Toggle info panels
+            for (var i = 0; i <= cdMax; i++) {
+                var s = cd.querySelector('#cd-s' + i);
+                if (s) { s.style.transition = 'opacity 0.35s'; s.style.opacity = i === cdStep ? '1' : '0'; }
+            }
+            var h = cd.querySelector('#cd-hint');
+            if (h) h.textContent = cdStep === 0
+                ? 'Click to cycle through crates (0 of 6)'
+                : 'Crate ' + cdStep + ' of 6' + (cdStep === cdMax ? ' — click to reset' : '');
+        });
+    }
+}

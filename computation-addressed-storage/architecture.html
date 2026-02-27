@@ -1,0 +1,382 @@
+<div class="section-content">
+    <h1 id="architecture">5. System Architecture</h1>
+
+    <h2 id="layered-design">5.1 Layered Design</h2>
+
+    <p>
+        Deriva is organized as a layered system where each layer has a well-defined responsibility and communicates with adjacent
+        layers through trait-based interfaces. This layering serves two purposes: it enables independent testing of each component
+        (the core library has zero I/O dependencies and can be tested entirely in memory), and it allows future replacement of
+        individual layers without affecting the rest of the system (e.g., swapping sled for RocksDB, or replacing the gRPC API
+        with a REST interface).
+    </p>
+
+    <div class="svg-container" style="margin: 1.5rem auto; text-align: center;">
+      <svg id="arch-layers-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 750 520" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 85%; border-radius: 8px; cursor: pointer; display: inline-block;">
+        <rect width="750" height="520" rx="12" fill="#1a1e2e"/>
+        <text x="375" y="22" text-anchor="middle" fill="#e0e0e0" font-size="13" font-weight="bold">System Architecture — Layered Design</text>
+
+        <!-- All layers always visible (dimmed), highlighted layer brightens on click -->
+
+        <!-- Layer 4: Client Layer (top) -->
+        <g id="al-client">
+          <rect x="150" y="40" width="450" height="70" rx="8" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="375" y="58" text-anchor="middle" fill="#81d4fa" font-size="11" font-weight="bold">Client Layer</text>
+          <text x="375" y="76" text-anchor="middle" fill="#b0bec5" font-size="9">gRPC API  •  CLI Client</text>
+          <text x="375" y="92" text-anchor="middle" fill="#90a4ae" font-size="8">put_leaf • put_recipe • get • resolve • invalidate • status</text>
+        </g>
+        <!-- Arrow -->
+        <line x1="375" y1="110" x2="375" y2="130" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#al-arrow)"/>
+
+        <!-- Layer 3: Service Layer -->
+        <g id="al-service">
+          <rect x="150" y="130" width="450" height="70" rx="8" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+          <text x="375" y="148" text-anchor="middle" fill="#f39c12" font-size="11" font-weight="bold">Service Layer — DerivaService</text>
+          <text x="375" y="166" text-anchor="middle" fill="#b0bec5" font-size="9">Request Handling • Streaming • Error Mapping</text>
+          <text x="375" y="182" text-anchor="middle" fill="#90a4ae" font-size="8">Owns: StorageBackend + ComputeEngine + DagStore + Cache</text>
+        </g>
+        <!-- Arrows to three boxes -->
+        <line x1="250" y1="200" x2="180" y2="230" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#al-arrow)"/>
+        <line x1="375" y1="200" x2="375" y2="230" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#al-arrow)"/>
+        <line x1="500" y1="200" x2="570" y2="230" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#al-arrow)"/>
+
+        <!-- Layer 2: Three middle boxes -->
+        <g id="al-middle">
+          <!-- Compute Engine -->
+          <rect x="80" y="230" width="190" height="80" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+          <text x="175" y="250" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">Compute Engine</text>
+          <text x="175" y="268" text-anchor="middle" fill="#b0bec5" font-size="8">• Registry</text>
+          <text x="175" y="282" text-anchor="middle" fill="#b0bec5" font-size="8">• Executor</text>
+          <text x="175" y="296" text-anchor="middle" fill="#b0bec5" font-size="8">• Builtins</text>
+          <!-- State Manager -->
+          <rect x="280" y="230" width="190" height="80" rx="6" fill="#232840" stroke="#ce93d8" stroke-width="1.5"/>
+          <text x="375" y="250" text-anchor="middle" fill="#ce93d8" font-size="10" font-weight="bold">State Manager</text>
+          <text x="375" y="268" text-anchor="middle" fill="#b0bec5" font-size="8">• DAG Store</text>
+          <text x="375" y="282" text-anchor="middle" fill="#b0bec5" font-size="8">• Cache</text>
+          <text x="375" y="296" text-anchor="middle" fill="#b0bec5" font-size="8">• Coordination</text>
+          <!-- Storage Backend -->
+          <rect x="480" y="230" width="190" height="80" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+          <text x="575" y="250" text-anchor="middle" fill="#e74c3c" font-size="10" font-weight="bold">Storage Backend</text>
+          <text x="575" y="268" text-anchor="middle" fill="#b0bec5" font-size="8">• SledRecipeStore</text>
+          <text x="575" y="282" text-anchor="middle" fill="#b0bec5" font-size="8">• BlobStore</text>
+          <text x="575" y="296" text-anchor="middle" fill="#b0bec5" font-size="8">• (sharded files)</text>
+        </g>
+        <!-- Arrows down -->
+        <line x1="175" y1="310" x2="300" y2="350" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#al-arrow)"/>
+        <line x1="375" y1="310" x2="375" y2="350" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#al-arrow)"/>
+        <line x1="575" y1="310" x2="450" y2="350" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#al-arrow)"/>
+
+        <!-- Layer 1: Core Layer (bottom) -->
+        <g id="al-core">
+          <rect x="150" y="350" width="450" height="80" rx="8" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+          <text x="375" y="370" text-anchor="middle" fill="#81d4fa" font-size="11" font-weight="bold">Core Layer — deriva-core</text>
+          <!-- Type badges -->
+          <rect x="180" y="380" width="70" height="20" rx="4" fill="#81d4fa" opacity="0.2" stroke="#81d4fa" stroke-width="0.5"/>
+          <text x="215" y="394" text-anchor="middle" fill="#81d4fa" font-size="8" font-weight="bold">CAddr</text>
+          <rect x="260" y="380" width="70" height="20" rx="4" fill="#2ecc71" opacity="0.2" stroke="#2ecc71" stroke-width="0.5"/>
+          <text x="295" y="394" text-anchor="middle" fill="#2ecc71" font-size="8" font-weight="bold">Recipe</text>
+          <rect x="340" y="380" width="70" height="20" rx="4" fill="#f39c12" opacity="0.2" stroke="#f39c12" stroke-width="0.5"/>
+          <text x="375" y="394" text-anchor="middle" fill="#f39c12" font-size="8" font-weight="bold">Value</text>
+          <rect x="420" y="380" width="80" height="20" rx="4" fill="#ce93d8" opacity="0.2" stroke="#ce93d8" stroke-width="0.5"/>
+          <text x="460" y="394" text-anchor="middle" fill="#ce93d8" font-size="8" font-weight="bold">FunctionId</text>
+          <text x="375" y="418" text-anchor="middle" fill="#90a4ae" font-size="8">DagStore • EvictableCache • DerivaError</text>
+          <text x="375" y="428" text-anchor="middle" fill="#546e7a" font-size="7">(zero I/O, pure logic)</text>
+        </g>
+
+        <!-- Highlight overlay — shows description for clicked layer -->
+        <g id="al-s0" style="opacity:1">
+          <text x="375" y="465" text-anchor="middle" fill="#e0e0e0" font-size="10">Click any layer to highlight it. Data flows top → bottom.</text>
+          <!-- Animated dot flowing down -->
+          <circle r="3" fill="#81d4fa" opacity="0.6">
+            <animate attributeName="cy" values="110;200;310;350" dur="2s" repeatCount="indefinite"/>
+            <animate attributeName="cx" values="375;375;375;375" dur="2s" repeatCount="indefinite"/>
+          </circle>
+        </g>
+        <g id="al-s1" style="opacity:0">
+          <rect x="100" y="450" width="550" height="40" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1"/>
+          <text x="375" y="468" text-anchor="middle" fill="#81d4fa" font-size="9" font-weight="bold">Client Layer: gRPC API + CLI client. 6 RPCs cover the full data lifecycle.</text>
+          <text x="375" y="482" text-anchor="middle" fill="#b0bec5" font-size="8">deriva-cli crate. Depends on tonic + clap + tokio.</text>
+        </g>
+        <g id="al-s2" style="opacity:0">
+          <rect x="100" y="450" width="550" height="40" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+          <text x="375" y="468" text-anchor="middle" fill="#f39c12" font-size="9" font-weight="bold">Service Layer: DerivaService ties everything together. Owns all state.</text>
+          <text x="375" y="482" text-anchor="middle" fill="#b0bec5" font-size="8">deriva-server crate. Translates protobuf requests → operations on ServerState.</text>
+        </g>
+        <g id="al-s3" style="opacity:0">
+          <rect x="100" y="450" width="550" height="40" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="375" y="468" text-anchor="middle" fill="#2ecc71" font-size="9" font-weight="bold">Middle Layer: Compute Engine + State Manager + Storage Backend</text>
+          <text x="375" y="482" text-anchor="middle" fill="#b0bec5" font-size="8">deriva-compute, deriva-storage. Each has focused responsibility, trait-based interfaces.</text>
+        </g>
+        <g id="al-s4" style="opacity:0">
+          <rect x="100" y="450" width="550" height="40" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1"/>
+          <text x="375" y="468" text-anchor="middle" fill="#81d4fa" font-size="9" font-weight="bold">Core Layer: All fundamental types. Zero I/O. Can compile to WASM.</text>
+          <text x="375" y="482" text-anchor="middle" fill="#b0bec5" font-size="8">deriva-core crate. Depends only on sha2 + serde + bincode.</text>
+        </g>
+
+        <defs>
+          <marker id="al-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+            <path d="M0,0 L8,3 L0,6" fill="#3a3f5c"/>
+          </marker>
+        </defs>
+        <text id="al-hint" x="375" y="508" text-anchor="middle" fill="#546e7a" font-size="9">Click to highlight layers (0 of 4)</text>
+      </svg>
+    </div>
+
+    <p>
+        The <strong>Core Layer</strong> (<code>deriva-core</code>) contains all fundamental types and data structures with no
+        I/O dependencies. The <code>CAddr</code>, <code>Recipe</code>, <code>Value</code>, and <code>FunctionId</code> types
+        live here, along with the in-memory <code>DagStore</code> and <code>EvictableCache</code>. This crate depends only on
+        <code>sha2</code>, <code>serde</code>, and <code>bincode</code> — it can be compiled to WASM and tested without any
+        filesystem or network access.
+    </p>
+
+    <p>
+        The <strong>Compute Engine</strong> (<code>deriva-compute</code>) defines the <code>ComputeFunction</code> trait, the
+        <code>FunctionRegistry</code> for looking up functions by ID, the <code>Executor</code> that walks the DAG and orchestrates
+        materialization, and the built-in functions shipped with Deriva. The compute layer depends on the core layer but not on
+        storage or networking.
+    </p>
+
+    <p>
+        The <strong>Storage Backend</strong> (<code>deriva-storage</code>) provides persistent storage through two complementary
+        stores: <code>SledRecipeStore</code> for recipes (small, structured, frequently queried) and <code>BlobStore</code> for
+        binary data (potentially large, write-once, read-many). The <code>StorageBackend</code> facade unifies both behind a
+        single interface.
+    </p>
+
+    <p>
+        The <strong>Service Layer</strong> (<code>deriva-server</code>) ties everything together. The <code>ServerState</code>
+        struct owns the storage backend, compute engine, DAG store, and cache. The <code>DerivaService</code> implements the
+        gRPC service trait, translating protocol buffer requests into operations on the server state.
+    </p>
+
+    <h2 id="crate-structure">5.2 Crate Structure</h2>
+
+    <p>
+        The Rust workspace contains six crates, reflecting the layered architecture. The dependency graph flows strictly
+        downward — no circular dependencies, no upward references.
+    </p>
+
+    <div class="svg-container" style="margin: 1.5rem auto; text-align: center;">
+      <svg id="crate-dep-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 520" font-family="'Segoe UI', system-ui, sans-serif" style="max-width: 70%; border-radius: 8px; cursor: pointer; display: inline-block;">
+        <rect width="600" height="520" rx="12" fill="#1a1e2e"/>
+        <text x="300" y="22" text-anchor="middle" fill="#e0e0e0" font-size="13" font-weight="bold">Crate Dependency Graph</text>
+
+        <!-- Static graph — always visible -->
+        <!-- Level 0: deriva-cli -->
+        <rect id="cd-cli" x="200" y="40" width="200" height="44" rx="8" fill="#232840" stroke="#81d4fa" stroke-width="1.5"/>
+        <text x="300" y="58" text-anchor="middle" fill="#81d4fa" font-size="10" font-weight="bold">deriva-cli</text>
+        <text x="300" y="73" text-anchor="middle" fill="#90a4ae" font-size="8">(proto client)</text>
+        <!-- Arrow -->
+        <line x1="300" y1="84" x2="300" y2="110" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#cd-arrow)"/>
+
+        <!-- Level 1: deriva-server -->
+        <rect id="cd-server" x="200" y="110" width="200" height="44" rx="8" fill="#232840" stroke="#f39c12" stroke-width="1.5"/>
+        <text x="300" y="128" text-anchor="middle" fill="#f39c12" font-size="10" font-weight="bold">deriva-server</text>
+        <text x="300" y="143" text-anchor="middle" fill="#90a4ae" font-size="8">(gRPC service)</text>
+        <!-- Arrows to two boxes -->
+        <line x1="240" y1="154" x2="160" y2="190" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#cd-arrow)"/>
+        <line x1="360" y1="154" x2="440" y2="190" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#cd-arrow)"/>
+
+        <!-- Level 2: deriva-compute + deriva-storage -->
+        <rect id="cd-compute" x="60" y="190" width="200" height="60" rx="8" fill="#232840" stroke="#2ecc71" stroke-width="1.5"/>
+        <text x="160" y="210" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="bold">deriva-compute</text>
+        <text x="160" y="225" text-anchor="middle" fill="#b0bec5" font-size="8">• Registry • Executor</text>
+        <text x="160" y="238" text-anchor="middle" fill="#b0bec5" font-size="8">• Builtins</text>
+
+        <rect id="cd-storage" x="340" y="190" width="200" height="60" rx="8" fill="#232840" stroke="#e74c3c" stroke-width="1.5"/>
+        <text x="440" y="210" text-anchor="middle" fill="#e74c3c" font-size="10" font-weight="bold">deriva-storage</text>
+        <text x="440" y="225" text-anchor="middle" fill="#b0bec5" font-size="8">• SledRecipeStore</text>
+        <text x="440" y="238" text-anchor="middle" fill="#b0bec5" font-size="8">• BlobStore</text>
+
+        <!-- Arrows down to core -->
+        <line x1="160" y1="250" x2="250" y2="290" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#cd-arrow)"/>
+        <line x1="440" y1="250" x2="350" y2="290" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#cd-arrow)"/>
+
+        <!-- Level 3: deriva-core -->
+        <rect id="cd-core" x="200" y="290" width="200" height="44" rx="8" fill="#232840" stroke="#ce93d8" stroke-width="1.5"/>
+        <text x="300" y="308" text-anchor="middle" fill="#ce93d8" font-size="10" font-weight="bold">deriva-core</text>
+        <text x="300" y="323" text-anchor="middle" fill="#90a4ae" font-size="8">CAddr • Recipe • DagStore • Cache</text>
+        <!-- Arrow down -->
+        <line x1="300" y1="334" x2="300" y2="360" stroke="#3a3f5c" stroke-width="1.5" marker-end="url(#cd-arrow)"/>
+
+        <!-- Level 4: deriva-network -->
+        <rect id="cd-network" x="200" y="360" width="200" height="44" rx="8" fill="#232840" stroke="#546e7a" stroke-width="1" stroke-dasharray="4,3"/>
+        <text x="300" y="378" text-anchor="middle" fill="#90a4ae" font-size="10">deriva-network</text>
+        <text x="300" y="393" text-anchor="middle" fill="#546e7a" font-size="8">(stub — Phase 3)</text>
+
+        <!-- Animated dot flowing down the dependency chain -->
+        <circle r="3" fill="#81d4fa" opacity="0.5">
+          <animate attributeName="cy" values="84;110;154;190;250;290;334;360" dur="3s" repeatCount="indefinite"/>
+          <animate attributeName="cx" values="300;300;240;160;160;250;300;300" dur="3s" repeatCount="indefinite"/>
+        </circle>
+
+        <!-- Info panels (toggled by click) -->
+        <g id="cd-s0" style="opacity:1">
+          <text x="300" y="430" text-anchor="middle" fill="#e0e0e0" font-size="10">Click to highlight each crate. Dependencies flow strictly downward.</text>
+        </g>
+        <g id="cd-s1" style="opacity:0">
+          <rect x="100" y="415" width="400" height="36" rx="6" fill="#232840" stroke="#81d4fa" stroke-width="1"/>
+          <text x="300" y="432" text-anchor="middle" fill="#81d4fa" font-size="9" font-weight="bold">deriva-cli — CLI client with clap argument parsing</text>
+          <text x="300" y="445" text-anchor="middle" fill="#b0bec5" font-size="8">Depends on: tonic, clap, tokio</text>
+        </g>
+        <g id="cd-s2" style="opacity:0">
+          <rect x="100" y="415" width="400" height="36" rx="6" fill="#232840" stroke="#f39c12" stroke-width="1"/>
+          <text x="300" y="432" text-anchor="middle" fill="#f39c12" font-size="9" font-weight="bold">deriva-server — gRPC service, ServerState, 6 RPCs</text>
+          <text x="300" y="445" text-anchor="middle" fill="#b0bec5" font-size="8">Depends on: all below + tonic + tokio. 24 unit + 23 integration tests.</text>
+        </g>
+        <g id="cd-s3" style="opacity:0">
+          <rect x="100" y="415" width="400" height="36" rx="6" fill="#232840" stroke="#2ecc71" stroke-width="1"/>
+          <text x="300" y="432" text-anchor="middle" fill="#2ecc71" font-size="9" font-weight="bold">deriva-compute — ComputeFunction trait, Registry, Executor</text>
+          <text x="300" y="445" text-anchor="middle" fill="#b0bec5" font-size="8">Depends on: deriva-core + bytes. 44 tests.</text>
+        </g>
+        <g id="cd-s4" style="opacity:0">
+          <rect x="100" y="415" width="400" height="36" rx="6" fill="#232840" stroke="#e74c3c" stroke-width="1"/>
+          <text x="300" y="432" text-anchor="middle" fill="#e74c3c" font-size="9" font-weight="bold">deriva-storage — SledRecipeStore + BlobStore (hex sharding)</text>
+          <text x="300" y="445" text-anchor="middle" fill="#b0bec5" font-size="8">Depends on: deriva-core + sled. 28 tests.</text>
+        </g>
+        <g id="cd-s5" style="opacity:0">
+          <rect x="100" y="415" width="400" height="36" rx="6" fill="#232840" stroke="#ce93d8" stroke-width="1"/>
+          <text x="300" y="432" text-anchor="middle" fill="#ce93d8" font-size="9" font-weight="bold">deriva-core — All types, DAG, Cache. Zero I/O. WASM-compatible.</text>
+          <text x="300" y="445" text-anchor="middle" fill="#b0bec5" font-size="8">Depends on: sha2 + serde + bincode only. 43 tests.</text>
+        </g>
+        <g id="cd-s6" style="opacity:0">
+          <rect x="100" y="415" width="400" height="36" rx="6" fill="#232840" stroke="#546e7a" stroke-width="1"/>
+          <text x="300" y="432" text-anchor="middle" fill="#90a4ae" font-size="9">deriva-network — Stub for Phase 3 distribution layer</text>
+          <text x="300" y="445" text-anchor="middle" fill="#546e7a" font-size="8">Depends on: deriva-core. Not yet implemented.</text>
+        </g>
+
+        <defs>
+          <marker id="cd-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+            <path d="M0,0 L8,3 L0,6" fill="#3a3f5c"/>
+          </marker>
+        </defs>
+        <text id="cd-hint" x="300" y="500" text-anchor="middle" fill="#546e7a" font-size="9">Click to cycle through crates (0 of 6)</text>
+      </svg>
+    </div>
+
+    <div class="comparison-table">
+        <table>
+            <tr>
+                <th>Crate</th>
+                <th>Role</th>
+                <th>Key Types</th>
+                <th>Dependencies</th>
+            </tr>
+            <tr>
+                <td><code>deriva-core</code></td>
+                <td>Types, DAG, Cache</td>
+                <td>CAddr, Recipe, DagStore, EvictableCache</td>
+                <td>sha2, serde, bincode</td>
+            </tr>
+            <tr>
+                <td><code>deriva-compute</code></td>
+                <td>Function execution</td>
+                <td>ComputeFunction, Registry, Executor</td>
+                <td>deriva-core, bytes</td>
+            </tr>
+            <tr>
+                <td><code>deriva-storage</code></td>
+                <td>Persistence</td>
+                <td>SledRecipeStore, BlobStore, StorageBackend</td>
+                <td>deriva-core, sled</td>
+            </tr>
+            <tr>
+                <td><code>deriva-server</code></td>
+                <td>gRPC service</td>
+                <td>DerivaService, ServerState</td>
+                <td>all above, tonic, tokio</td>
+            </tr>
+            <tr>
+                <td><code>deriva-cli</code></td>
+                <td>CLI client</td>
+                <td>Args, Client</td>
+                <td>tonic, clap, tokio</td>
+            </tr>
+            <tr>
+                <td><code>deriva-network</code></td>
+                <td>Distribution (stub)</td>
+                <td>—</td>
+                <td>deriva-core</td>
+            </tr>
+        </table>
+    </div>
+
+    <h2 id="data-flow">5.3 Data Flow</h2>
+
+    <p>
+        Understanding how data flows through the system for the three primary operations — storing a leaf, storing a recipe,
+        and retrieving data — clarifies how the layers interact.
+    </p>
+
+    <h3>Storing a Leaf</h3>
+
+    <p>
+        When a client calls <code>put_leaf(bytes)</code>, the server computes the SHA-256 hash of the bytes to produce a CAddr,
+        writes the bytes to the blob store (a sharded filesystem directory), and returns the CAddr to the client. No recipe is
+        created, no DAG edges are added, and no computation occurs. The leaf path is the fast path — it bypasses the compute
+        engine entirely and performs identically to a traditional content-addressed blob store.
+    </p>
+
+    <h3>Storing a Recipe</h3>
+
+    <p>
+        When a client calls <code>put_recipe(function_id, inputs, params)</code>, the server constructs a <code>Recipe</code>
+        struct, computes its CAddr from the canonical serialization, verifies that adding the recipe's edges to the DAG would
+        not create a cycle, persists the recipe to the sled store, adds the edges to the in-memory DAG, and returns the CAddr.
+        At this point, the derived data <em>exists</em> in the system (it has an address and a recipe) but is not yet
+        <em>materialized</em> (no output bytes have been computed or stored).
+    </p>
+
+    <h3>Retrieving Data (Get)</h3>
+
+    <p>
+        When a client calls <code>get(addr)</code>, the server first checks the cache. On a cache hit, the cached bytes are
+        streamed to the client via server-side streaming gRPC. On a cache miss, the server looks up the recipe for the address,
+        recursively resolves all inputs (materializing any that are also cache misses), executes the function, caches the result,
+        and streams the output bytes. For large results, the streaming response sends data in chunks, allowing the client to
+        begin processing before the entire result is available.
+    </p>
+
+    <h2 id="grpc-api">5.4 gRPC API</h2>
+
+    <p>
+        The gRPC service definition exposes six RPCs that cover the complete lifecycle of data in Deriva:
+    </p>
+
+    <div class="code-block">
+        <pre><span class="rust-keyword">service</span> <span class="rust-type">Deriva</span> {
+    <span class="rust-comment">// Store raw bytes, return content address</span>
+    <span class="rust-keyword">rpc</span> <span class="rust-function">PutLeaf</span>(<span class="rust-type">PutLeafRequest</span>) <span class="rust-keyword">returns</span> (<span class="rust-type">PutLeafResponse</span>);
+
+    <span class="rust-comment">// Store a computation recipe, return recipe address</span>
+    <span class="rust-keyword">rpc</span> <span class="rust-function">PutRecipe</span>(<span class="rust-type">PutRecipeRequest</span>) <span class="rust-keyword">returns</span> (<span class="rust-type">PutRecipeResponse</span>);
+
+    <span class="rust-comment">// Retrieve data (materializes on cache miss), server-streaming</span>
+    <span class="rust-keyword">rpc</span> <span class="rust-function">Get</span>(<span class="rust-type">GetRequest</span>) <span class="rust-keyword">returns</span> (<span class="rust-keyword">stream</span> <span class="rust-type">GetResponse</span>);
+
+    <span class="rust-comment">// Return the recipe behind a derived address</span>
+    <span class="rust-keyword">rpc</span> <span class="rust-function">Resolve</span>(<span class="rust-type">ResolveRequest</span>) <span class="rust-keyword">returns</span> (<span class="rust-type">ResolveResponse</span>);
+
+    <span class="rust-comment">// Evict cached result + all dependents</span>
+    <span class="rust-keyword">rpc</span> <span class="rust-function">Invalidate</span>(<span class="rust-type">InvalidateRequest</span>) <span class="rust-keyword">returns</span> (<span class="rust-type">InvalidateResponse</span>);
+
+    <span class="rust-comment">// Cache stats, recipe/blob counts</span>
+    <span class="rust-keyword">rpc</span> <span class="rust-function">Status</span>(<span class="rust-type">StatusRequest</span>) <span class="rust-keyword">returns</span> (<span class="rust-type">StatusResponse</span>);
+}</pre>
+    </div>
+
+    <p>
+        The <code>Get</code> RPC uses server-side streaming to handle arbitrarily large results. The server sends the data in
+        chunks (currently 64KB per message), allowing the client to begin writing to disk or processing data before the entire
+        result has been transmitted. This is essential for derived results that may be hundreds of megabytes or larger — the
+        client should not need to buffer the entire result in memory.
+    </p>
+
+    <p>
+        The <code>Invalidate</code> RPC evicts a cached materialization and, via the DAG's dependents query, cascades the
+        eviction to all downstream cached results. This is the mechanism for handling input changes: when a leaf is updated
+        (by storing new bytes at a new CAddr and rebinding a mutable reference), the old CAddr's dependents are invalidated,
+        ensuring that subsequent reads trigger recomputation with the updated input.
+    </p>
+</div>

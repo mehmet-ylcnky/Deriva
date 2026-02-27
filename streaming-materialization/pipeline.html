@@ -8,6 +8,10 @@
 
         <h3>6.1 Pipeline Configuration</h3>
 
+        <p>
+            The <code>PipelineConfig</code> struct controls the four knobs that shape pipeline behavior. All four have sensible defaults; most pipelines run with zero configuration.
+        </p>
+
         <div class="code-block">
             <pre>
 <span class="rust-keyword">pub struct</span> <span class="rust-type">PipelineConfig</span> {
@@ -19,23 +23,27 @@
         </div>
 
         <p>
-            <code>chunk_size</code> controls the granularity of data flow. <code>channel_capacity</code> sets the backpressure threshold per edge. <code>cache_intermediates</code> enables tee-to-cache for intermediate results. <code>memory_budget</code> is reserved for future use — currently all pipelines run with bounded-channel backpressure as the only memory control.
+            <code>chunk_size</code> controls the granularity of data flow — the number of bytes per <code>StreamChunk::Data</code> payload. The default of 64 KB sits at the knee of the overhead curve (<a href="#evaluation-container">§8</a>): 1 KB chunks incur 5.7× more overhead, while 256 KB chunks save only 8% at 4× the memory footprint per stage. <code>channel_capacity</code> sets the backpressure threshold per inter-stage channel. At the default of 8, each channel buffers up to 512 KB (8 × 64 KB) before the sender blocks — enough to absorb short throughput mismatches without unbounded growth. The capacity sweep (<a href="#evaluation-container">§8</a>) shows that 8 captures 80–90% of available throughput gain. <code>cache_intermediates</code> enables tee-to-cache for intermediate results, allowing partial pipeline reuse on subsequent requests. <code>memory_budget</code> is reserved for future use — currently all pipelines rely on bounded-channel backpressure as the sole memory control mechanism.
         </p>
 
         <h3>6.2 Pipeline Nodes</h3>
 
+        <p>
+            The pipeline is a flat array of nodes, each representing one unit of work. The <code>PipelineNode</code> enum has four variants that cover every case the executor encounters:
+        </p>
+
         <div class="code-block">
             <pre>
 <span class="rust-keyword">enum</span> <span class="rust-type">PipelineNode</span> {
-    Source   { addr: <span class="rust-type">CAddr</span>, data: <span class="rust-type">Bytes</span> },                  <span class="rust-comment">// leaf data</span>
-    Cached   { addr: <span class="rust-type">CAddr</span>, data: <span class="rust-type">Bytes</span> },                  <span class="rust-comment">// cache hit</span>
+    Source   { addr: <span class="rust-type">CAddr</span>, data: <span class="rust-type">Bytes</span> },                  <span class="rust-comment">// leaf data from store</span>
+    Cached   { addr: <span class="rust-type">CAddr</span>, data: <span class="rust-type">Bytes</span> },                  <span class="rust-comment">// previously materialized</span>
     StreamingStage { addr: <span class="rust-type">CAddr</span>, function: ..., input_indices: ... },
     BatchStage     { addr: <span class="rust-type">CAddr</span>, function: ..., input_indices: ... },
 }</pre>
         </div>
 
         <p>
-            Four node types. <code>Source</code> and <code>Cached</code> both emit their <code>Bytes</code> through <code>value_to_stream</code> — the distinction exists only for metrics and debugging. <code>StreamingStage</code> wires inputs directly. <code>BatchStage</code> collects inputs, runs batch, and re-chunks (<a href="#auto-wrapping-container">§5</a>). Each node references its inputs by index into the pipeline's node array — indices are assigned during topological construction.
+            <code>Source</code> and <code>Cached</code> both hold a <code>Bytes</code> value and emit it through <code>value_to_stream()</code>, which slices the value into <code>chunk_size</code> pieces and sends them down a bounded channel. The two variants are functionally identical — the distinction exists for metrics and tracing, so operators can see how many pipeline nodes were served from cache vs fetched from the leaf store. <code>StreamingStage</code> holds an <code>Arc&lt;dyn StreamingComputeFunction&gt;</code> and a list of input indices pointing into the pipeline's node array. At execution time, it takes the input receivers and calls <code>stream_execute()</code>, which spawns a Tokio task internally. <code>BatchStage</code> holds an <code>Arc&lt;dyn ComputeFunction&gt;</code> and follows the auto-wrap path (<a href="#auto-wrapping-container">§5</a>): collect all input streams to <code>Bytes</code>, call <code>execute()</code>, then re-chunk the result via <code>batch_to_stream()</code>. The <code>params</code> field differs between the two: streaming functions take <code>HashMap&lt;String, String&gt;</code> (string-typed for channel-safe passing), while batch functions take <code>BTreeMap&lt;String, Value&gt;</code> (the original recipe parameter format).
         </p>
 
         <h3>6.3 DAG-to-Pipeline Construction</h3>
@@ -184,7 +192,7 @@
         </div>
 
         <p>
-            The executor walks the DAG depth-first from the target <code>CAddr</code>, producing a topological order where every node appears after all its dependencies. This is the same traversal used by the batch materializer — the streaming executor reuses the <code>DagReader</code> trait.
+            The executor walks the DAG depth-first from the target <code>CAddr</code>, producing a topological order where every node appears after all its dependencies. This is the same <code>DagReader</code> trait used by the batch materializer — the streaming executor reuses the existing DAG infrastructure rather than building a parallel graph representation. The <code>visited</code> set ensures each address is processed exactly once, even in diamond DAGs where multiple paths converge on the same node.
         </p>
 
         <div class="code-block">
@@ -197,33 +205,45 @@
 }</pre>
         </div>
 
+        <p>
+            The recursive <code>topo_visit</code> calls <code>dag.get_recipe(addr)</code> for each address. If the address has a recipe (it's a computed node), the function recurses into its inputs before pushing the address onto the order vector — guaranteeing that dependencies appear before dependents. If the address has no recipe, it's a leaf blob and is skipped here; the node creation loop handles leaves separately.
+        </p>
+
         <h4>Node Creation Loop</h4>
 
         <p>
-            For each address in topological order, the executor:
+            The <code>materialize_streaming()</code> method in <code>StreamingExecutor</code> iterates the topological order and builds the pipeline node array. For each address, it follows a four-step decision process:
         </p>
 
         <ol>
-            <li><strong>Checks the cache.</strong> If the value is already materialized, insert a <code>Cached</code> node — no computation needed.</li>
-            <li><strong>Resolves leaf inputs.</strong> Any input not yet in the pipeline is looked up in the cache or leaf store and added as a <code>Source</code> or <code>Cached</code> node.</li>
-            <li><strong>Picks the function variant.</strong> Streaming-native if available, batch fallback otherwise (<a href="#auto-wrapping-container">§5</a>).</li>
-            <li><strong>Records the index.</strong> The node's position in the pipeline array becomes its identifier for downstream references.</li>
+            <li><strong>Check the cache.</strong> If <code>cache.get(addr).await</code> returns <code>Some(data)</code>, insert a <code>Cached</code> node. This short-circuits the entire subtree — no function lookup, no input resolution needed.</li>
+            <li><strong>Resolve leaf inputs.</strong> For each input address in the recipe that isn't already in the pipeline (i.e., it's a raw blob, not a recipe), look it up in the cache first, then the leaf store. If an input is found in neither, the executor returns <code>DerivaError::NotFound</code>.</li>
+            <li><strong>Pick the function variant.</strong> The registry is queried streaming-first: <code>registry.get_streaming(func_id)</code>. If a streaming implementation exists, a <code>StreamingStage</code> is created. Otherwise, <code>registry.get(func_id)</code> falls back to the batch variant, creating a <code>BatchStage</code> that will be auto-wrapped at execution time (<a href="#auto-wrapping-container">§5</a>). If neither exists, the executor returns <code>DerivaError::FunctionNotFound</code>.</li>
+            <li><strong>Record the index.</strong> Each <code>add_*</code> method returns the node's position in the pipeline array. This index is stored in an <code>addr_to_idx: HashMap&lt;CAddr, usize&gt;</code> so that downstream nodes can reference it in their <code>input_indices</code> vector.</li>
         </ol>
 
         <h3>6.4 Execution</h3>
 
         <p>
-            The <code>execute()</code> method walks the node array in order. Each node <code>take()</code>s its input receivers from the outputs array, spawns its processing task, and stores its output receiver. Because nodes are in topological order, every input is guaranteed to be available when needed.
+            The <code>execute()</code> method consumes the <code>StreamPipeline</code> and returns an <code>mpsc::Receiver&lt;StreamChunk&gt;</code> — the output stream of the final node. Internally, it maintains an <code>outputs: Vec&lt;Option&lt;Receiver&gt;&gt;</code> array, one slot per node. As it walks the node array in topological order, each node <code>take()</code>s its input receivers from the outputs array, processes them, and stores its own output receiver.
         </p>
 
         <p>
-            The <code>take()</code> semantics enforce single-consumer: each <code>Receiver</code> can only be consumed once. If a DAG has fan-out — one node's output feeds two downstream stages — the pipeline must use <code>tee_stream</code> (<a href="#stream-chunk-container">§3</a>.6) to clone chunks to both consumers. The current implementation panics on double-take as a safety check; the pipeline builder is responsible for inserting tee nodes where needed.
+            The <code>take()</code> semantics are critical: each <code>Option&lt;Receiver&gt;</code> can only be taken once. This enforces single-consumer — a receiver cannot be read by two stages simultaneously. If a DAG has fan-out (one node's output feeds two downstream stages), the pipeline builder must insert a <code>tee_stream</code> (<a href="#stream-chunk-container">§3</a>) to clone chunks to both consumers. The current implementation panics on double-take as a safety check, making fan-out bugs immediately visible rather than silently producing incorrect results.
+        </p>
+
+        <p>
+            For <code>Source</code> and <code>Cached</code> nodes, execution is trivial: call <code>value_to_stream(data, chunk_size, channel_capacity)</code>, which spawns a task that slices the <code>Bytes</code> value into chunks and sends them down a new channel. For <code>StreamingStage</code> nodes, the function's <code>stream_execute()</code> method receives the input receivers and returns an output receiver — the function is responsible for spawning its own processing task. For <code>BatchStage</code> nodes, each input receiver is collected to <code>Bytes</code> via <code>collect_stream()</code>, the batch function is called synchronously, and the result is re-chunked via <code>batch_to_stream()</code>.
+        </p>
+
+        <p>
+            Because nodes are in topological order, every input receiver is guaranteed to exist in the outputs array when a node needs it. This invariant eliminates the need for runtime dependency tracking or readiness checks — the array index is sufficient.
         </p>
 
         <h3>6.5 Metrics Wrapper</h3>
 
         <p>
-            The final output stream is wrapped in a metrics-collecting proxy that counts chunks, bytes, and pipeline duration:
+            The final output stream is not returned directly. Instead, <code>execute()</code> spawns a forwarding task that intercepts every chunk, updates three Prometheus metrics, and passes the chunk through to a new channel. The wrapper increments <code>STREAM_PIPELINES_TOTAL</code> at pipeline start, then per-chunk:
         </p>
 
         <div class="code-block">
@@ -244,7 +264,7 @@
         </div>
 
         <p>
-            This adds one extra channel hop but zero copying — the chunk is forwarded by move. The overhead is negligible compared to the compute work in each stage.
+            On each <code>Data</code> chunk, the wrapper increments the chunk counter and adds the payload length to the byte counter — both are atomic operations with negligible overhead. On <code>End</code> or <code>Error</code>, it records the total pipeline duration as a histogram observation, capturing the wall-clock time from pipeline start to stream termination. The chunk itself is forwarded by move (no copy), and the extra channel hop adds ~100 ns per chunk — negligible compared to the compute work in each stage. If the downstream consumer drops its receiver (e.g., client disconnects), the <code>tx.send()</code> returns an error and the forwarding task exits, which propagates cancellation upstream through the channel chain.
         </p>
 
     </section>

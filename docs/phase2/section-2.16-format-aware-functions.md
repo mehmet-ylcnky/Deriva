@@ -12,19 +12,71 @@
 
 ### 1.1 Current State
 
-TODO — core libraries (§2.14, §2.15) cover generic byte-level operations; no awareness of file formats (Parquet, CSV, Avro, PDF, images, etc.)
+The core function libraries (§2.14 streaming, §2.15 batch) provide
+100 batch and 100 streaming functions operating on raw bytes. These
+cover generic transforms (encoding, compression, crypto), analytics
+(counts, histograms), combiners, slicing, text processing, and
+validation. However, they have no awareness of file formats — a
+Parquet file is just bytes, a CSV is just bytes, a PNG is just bytes.
+
+This means pipelines cannot:
+- Project specific columns from a Parquet file
+- Filter CSV rows by a predicate
+- Extract text from a PDF
+- Validate an Avro schema
+- Detect the format of an unknown blob
+- Apply erasure coding for fault tolerance
 
 ### 1.2 Real-World Need
 
-TODO — distributed file systems (HDFS, S3, Ceph, IPFS) store structured data in domain-specific formats; a CAS must transform, validate, and convert these formats natively
+Distributed file systems store structured data in domain-specific
+formats. Real-world CAS workloads require format-native operations:
+
+| Domain | Formats | Operations |
+|--------|---------|------------|
+| Data engineering | Parquet, ORC, Avro, CSV, NDJSON | Column projection, predicate pushdown, schema evolution |
+| DevOps | YAML, TOML, INI, HCL, logs | Config merging, log parsing, timestamp normalization |
+| Web/API | JSON, XML, HTML, Protobuf | Path extraction, XSLT transform, schema validation |
+| Media | PNG, JPEG, PDF, MP3, MP4 | Resize, thumbnail, text extraction, metadata strip |
+| Science | HDF5, NetCDF, FITS, NumPy | Dataset slicing, array conversion, metadata extraction |
+| Bioinformatics | FASTA, FASTQ, BAM, VCF | Quality trimming, variant filtering, format conversion |
+| Blockchain/CAS | CID, DAG-CBOR, CAR, UnixFS | Content addressing, Merkle proofs, archive creation |
+| Storage infra | Erasure coding, replication | Reed-Solomon encode/decode, parity, striping |
+
+Without format-aware functions, users must extract data outside the
+CAS, transform it, and re-ingest — losing provenance, deduplication,
+and computation-addressing benefits.
 
 ### 1.3 Inspiration from Existing DFS Implementations
 
-TODO — HDFS (SequenceFile, Avro, Parquet, ORC, codec registry), S3 (multipart, SSE-C, content-type), Ceph (erasure coding, object classes), IPFS (UnixFS, DAG-CBOR, CID), Spark/Flink (format readers, schema evolution, predicate pushdown)
+| System | Format Support | What We Learn |
+|--------|---------------|---------------|
+| HDFS | SequenceFile, Avro, Parquet, ORC, codec registry | Format-specific InputFormat/OutputFormat abstraction; codec pluggability |
+| S3 | Multipart, SSE-C, content-type routing, S3 Select | Server-side filtering (predicate pushdown); content-type metadata |
+| Ceph | Erasure coding, object classes, RADOS plugins | Erasure coding as first-class storage primitive; compute-at-storage |
+| IPFS | UnixFS, DAG-PB, DAG-CBOR, CID, CAR archives | Content-addressing native to format; Merkle DAG as universal structure |
+| Spark/Flink | Format readers, schema evolution, predicate pushdown | Columnar projection eliminates I/O; schema evolution for backward compat |
+
+Key insight: every mature DFS eventually builds format-aware
+operations. We build them as composable `ComputeFunction` /
+`StreamingComputeFunction` implementations from the start.
 
 ### 1.4 Design Principles
 
-TODO — every function implements `ComputeFunction` and/or `StreamingComputeFunction`; batch for random-access formats, streaming for sequential/line-oriented; all params via `BTreeMap<String, Value>`
+1. **Same trait, same registry** — every format-aware function
+   implements `ComputeFunction` and/or `StreamingComputeFunction`
+   from §2.14/§2.15. No new traits or abstractions.
+2. **Batch for random-access, streaming for sequential** — Parquet
+   (footer-based) is batch; NDJSON (line-oriented) is streaming;
+   many formats support both modes.
+3. **All params via `BTreeMap<String, Value>`** — column names,
+   filter expressions, quality levels, schema paths — all passed as
+   string params, consistent with core library conventions.
+4. **Feature flags for optional categories** — heavy dependencies
+   (Parquet, image processing, WASM) are behind Cargo feature flags.
+   Default build includes only Phase 1 (lightweight formats).
+5. **IDs 201–483** — non-overlapping with core library (1–100),
+   leaving 101–200 reserved for future core extensions.
 
 ---
 
@@ -32,23 +84,135 @@ TODO — every function implements `ComputeFunction` and/or `StreamingComputeFun
 
 ### 2.1 Mode Distribution
 
-TODO — table: Batch only 148 (52%), Both 107 (38%), Streaming only 28 (10%); batch dominance reflects random-access needs of structured formats
+| Mode | Count | % | Rationale |
+|------|-------|---|-----------|
+| Batch only | 148 | 52% | Random-access formats (Parquet footer, ZIP central directory, PDF page tree, SQLite B-tree) |
+| Both (batch + streaming) | 107 | 38% | Sequential formats with optional random access (CSV, NDJSON, Avro blocks, tar, PCAP, FASTA) |
+| Streaming only | 28 | 10% | Pure stream codecs (gzip, bzip2, xz, zstd-frame) and line-oriented filters |
+
+Batch dominance reflects the reality that most structured formats
+require random access for correct parsing. Streaming-capable functions
+use the accumulator or per-record pattern from §2.14.
 
 ### 2.2 Implementation Roadmap
 
-TODO — 4 phases:
-- Phase 1 (50 functions): Categories B, D, H, K, L, S — high-value, low-complexity
-- Phase 2 (60 functions): Categories A, C, R — analytics backbone
-- Phase 3 (80 functions): Categories E, F, G — rich media & documents
-- Phase 4 (93 functions): Categories I, J, M, N, O, P, Q — domain-specific
+| Phase | Categories | Functions | Effort | Dependencies |
+|-------|-----------|-----------|--------|-------------|
+| 1 | B (CSV/JSON), D (archive), H (config), K (logs), L (CAS/IPFS), S (detection) | 98 | 5–7 days | Lightweight: `csv`, `quick-xml`, `tar`, `zip`, `flate2`, `serde_yaml`, `cid` |
+| 2 | A (columnar), C (serialization), R (erasure coding) | 46 | 7–10 days | Heavy: `parquet`, `arrow`, `apache-avro`, `prost`, `reed-solomon-erasure` |
+| 3 | E (image), F (audio/video), G (documents) | 57 | 5–8 days | Media: `image`, `lopdf`, `calamine`, `symphonia` |
+| 4 | I (geo), J (scientific), M (database), N (ML), O (network), P (bio), Q (binary) | 82 | 5–8 days | Domain: `geojson`, `hdf5`, `rusqlite`, `safetensors`, `noodles`, `wasmparser` |
+| | **Total** | **283** | **22–33 days** | |
+
+Phase 1 delivers immediate value with minimal dependency weight.
+Each subsequent phase adds heavier dependencies behind feature flags.
 
 ### 2.3 Dependency Strategy
 
-TODO — heavy external dependencies; each category brings its own crates; workspace feature flags to make categories optional
+Unlike §2.14/§2.15 where all dependencies are unconditional, §2.16
+uses Cargo feature flags to keep the default build lean:
+
+```toml
+[features]
+default = ["format-phase1"]
+format-phase1 = ["format-csv", "format-archive", "format-config", "format-log", "format-cas", "format-detect"]
+format-phase2 = ["format-columnar", "format-serialization", "format-erasure"]
+format-phase3 = ["format-image", "format-media", "format-document"]
+format-phase4 = ["format-geo", "format-scientific", "format-database", "format-ml", "format-network", "format-bio", "format-binary"]
+format-all = ["format-phase1", "format-phase2", "format-phase3", "format-phase4"]
+
+# Per-category flags
+format-csv = ["dep:csv", "dep:quick-xml", "dep:jsonpath-rust"]
+format-archive = ["dep:tar", "dep:zip", "dep:bzip2", "dep:xz2"]
+format-columnar = ["dep:parquet", "dep:arrow", "dep:orc-rust"]
+format-serialization = ["dep:apache-avro", "dep:prost", "dep:rmp-serde", "dep:ciborium", "dep:bson"]
+format-erasure = ["dep:reed-solomon-erasure"]
+format-image = ["dep:image", "dep:resvg", "dep:img-hash"]
+format-media = ["dep:symphonia"]
+format-document = ["dep:lopdf", "dep:calamine", "dep:scraper", "dep:pulldown-cmark"]
+format-config = ["dep:configparser", "dep:hcl-rs"]
+format-log = []  # uses regex + serde_json already in workspace
+format-cas = ["dep:cid", "dep:multihash", "dep:iroh-car"]
+format-detect = ["dep:infer", "dep:mime_guess"]
+format-geo = ["dep:geojson", "dep:flatgeobuf"]
+format-scientific = ["dep:hdf5"]
+format-database = ["dep:rusqlite"]
+format-ml = ["dep:safetensors", "dep:wasmparser"]
+format-network = ["dep:pcap-parser", "dep:mailparse"]
+format-bio = ["dep:noodles"]
+format-binary = ["dep:gltf", "dep:dicom-object"]
+```
 
 ### 2.4 Function Numbering
 
-TODO — IDs 201–483 to avoid collision with core library (1–100); each function has unique numeric ID + `FunctionId` string
+| Range | Assignment |
+|-------|-----------|
+| 1–100 | Core batch library (§2.15) |
+| 101–200 | Reserved for future core extensions |
+| 201–218 | Category A: Columnar (Parquet, ORC, Arrow) |
+| 219–243 | Category B: Row-oriented (CSV, JSON, XML) |
+| 244–262 | Category C: Serialization (Avro, Protobuf, CBOR) |
+| 263–282 | Category D: Archive (tar, zip, gzip) |
+| 283–300 | Category E: Image (PNG, JPEG, SVG) |
+| 301–316 | Category F: Audio/Video (MP3, WAV, MP4) |
+| 317–339 | Category G: Document (PDF, DOCX, HTML) |
+| 340–355 | Category H: Config (YAML, TOML, INI, HCL) |
+| 356–369 | Category I: Geospatial (GeoJSON, Shapefile) |
+| 370–382 | Category J: Scientific (HDF5, NetCDF, NumPy) |
+| 383–395 | Category K: Log/Observability (syslog, CEF) |
+| 396–410 | Category L: Blockchain/CAS (CID, CAR, UnixFS) |
+| 411–420 | Category M: Database (SQLite, SST, WAL) |
+| 421–432 | Category N: ML/Tensor (TFRecord, SafeTensors) |
+| 433–440 | Category O: Network (PCAP, DNS, email) |
+| 441–452 | Category P: Bioinformatics (FASTA, BAM, VCF) |
+| 453–465 | Category Q: Specialized binary (WOFF, glTF, WASM) |
+| 466–474 | Category R: Erasure coding |
+| 475–483 | Category S: Universal detection/conversion |
+
+FunctionId strings follow the pattern `category_operation@1.0.0`,
+e.g., `parquet_read@1.0.0`, `csv_filter@1.0.0`, `cid_compute@1.0.0`.
+
+### 2.5 File Organization
+
+Each category gets its own source file to keep compilation units
+manageable:
+
+```
+crates/deriva-compute/src/
+├── builtins.rs                    # Core batch (#1–#100)
+├── builtins_streaming.rs          # Core streaming (#1–#100)
+├── builtins_format_columnar.rs    # Category A
+├── builtins_format_csv.rs         # Category B
+├── builtins_format_serial.rs      # Category C
+├── builtins_format_archive.rs     # Category D
+├── builtins_format_image.rs       # Category E
+├── builtins_format_media.rs       # Category F
+├── builtins_format_document.rs    # Category G
+├── builtins_format_config.rs      # Category H
+├── builtins_format_geo.rs         # Category I
+├── builtins_format_scientific.rs  # Category J
+├── builtins_format_log.rs         # Category K
+├── builtins_format_cas.rs         # Category L
+├── builtins_format_database.rs    # Category M
+├── builtins_format_ml.rs          # Category N
+├── builtins_format_network.rs     # Category O
+├── builtins_format_bio.rs         # Category P
+├── builtins_format_binary.rs      # Category Q
+├── builtins_format_erasure.rs     # Category R
+└── builtins_format_detect.rs      # Category S
+```
+
+Each file exports a `register_category_X(registry: &mut FunctionRegistry)`
+function, conditionally compiled behind its feature flag:
+
+```rust
+#[cfg(feature = "format-columnar")]
+pub fn register_columnar_functions(registry: &mut FunctionRegistry) {
+    registry.register(Arc::new(ParquetReadFn));
+    registry.register(Arc::new(ParquetWriteFn));
+    // ...
+}
+```
 
 ---
 

@@ -1115,15 +1115,150 @@ fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Resul
 
 #### 3.8.1 Function List
 
-TODO — table of 16 functions: YamlParse, YamlWrite, YamlValidate, YamlMerge, TomlParse, TomlWrite, IniParse, IniWrite, EnvParse, EnvWrite, HclParse, PropertiesParse, PropertiesWrite, PlistParse, PlistWrite, ConfigFormatConvert
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 340 | YamlParseFn | `yaml_parse@1.0.0` | Batch | — | JSON |
+| 341 | YamlWriteFn | `yaml_write@1.0.0` | Batch | — | YAML bytes |
+| 342 | YamlValidateFn | `yaml_validate@1.0.0` | Batch | — | Pass-through or error |
+| 343 | YamlMergeFn | `yaml_merge@1.0.0` | Batch | `strategy` (`shallow`/`deep`) | YAML bytes (merged) |
+| 344 | TomlParseFn | `toml_parse@1.0.0` | Batch | — | JSON |
+| 345 | TomlWriteFn | `toml_write@1.0.0` | Batch | — | TOML bytes |
+| 346 | IniParseFn | `ini_parse@1.0.0` | Batch | — | JSON (sections as nested objects) |
+| 347 | IniWriteFn | `ini_write@1.0.0` | Batch | — | INI bytes |
+| 348 | EnvParseFn | `env_parse@1.0.0` | Batch | — | JSON (key-value pairs) |
+| 349 | EnvWriteFn | `env_write@1.0.0` | Batch | — | `.env` bytes |
+| 350 | HclParseFn | `hcl_parse@1.0.0` | Batch | — | JSON |
+| 351 | PropertiesParseFn | `properties_parse@1.0.0` | Batch | — | JSON (key-value pairs) |
+| 352 | PropertiesWriteFn | `properties_write@1.0.0` | Batch | — | Java `.properties` bytes |
+| 353 | PlistParseFn | `plist_parse@1.0.0` | Batch | — | JSON |
+| 354 | PlistWriteFn | `plist_write@1.0.0` | Batch | — | XML plist bytes |
+| 355 | ConfigFormatConvertFn | `config_format_convert@1.0.0` | Batch | `from`, `to` (format names) | Target format bytes |
 
 #### 3.8.2 Design Notes
 
-TODO — all batch because config files are small; `ConfigFormatConvert` is universal converter routing through JSON as intermediate
+All config formats are batch-only because:
+1. Files are small (typically <1 MB)
+2. Full parse is required for correct interpretation
+3. No benefit from streaming at these sizes
 
-#### 3.8.3 Test Strategy
+**JSON as hub**: all parse functions emit JSON, all write functions
+consume JSON. This enables the universal converter
+`ConfigFormatConvertFn` which routes through JSON:
+`source → JSON → target`.
 
-TODO — roundtrip for each format, multi-document YAML, deep merge correctness, HCL Terraform config parsing
+Supported format names for `ConfigFormatConvertFn`: `yaml`, `toml`,
+`ini`, `env`, `hcl`, `properties`, `plist`, `json`.
+
+**YamlMergeFn** (#343) takes N inputs and merges them. Strategy:
+- `shallow`: top-level keys from later inputs override earlier
+- `deep`: recursively merge nested objects; arrays concatenated;
+  scalars from later inputs override
+
+This is the standard config overlay pattern (base.yaml + env.yaml +
+local.yaml).
+
+**Multi-document YAML**: `YamlParseFn` parses only the first document.
+Multi-document YAML (`---` separated) is uncommon in config files.
+If needed, a future `YamlParseAllFn` can handle it.
+
+**INI sections** map to nested JSON objects:
+```ini
+[database]
+host = localhost
+port = 5432
+```
+→
+```json
+{"database": {"host": "localhost", "port": "5432"}}
+```
+
+**HCL** (HashiCorp Configuration Language) is used by Terraform,
+Vault, Consul. `hcl-rs` parses HCL2 syntax into a JSON-compatible
+structure. HCL blocks become nested objects.
+
+**.env files** follow the `KEY=VALUE` format with optional quoting
+and `#` comments. `EnvParseFn` handles quoted values, multiline
+values, and variable expansion (`${VAR}`).
+
+**Java .properties** uses `key=value` or `key:value` with `\` line
+continuation. `configparser` handles the parsing.
+
+```rust
+// IniParseFn
+fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let text = std::str::from_utf8(&inputs[0])
+        .map_err(|_| ComputeError::ExecutionFailed("requires UTF-8".into()))?;
+    let mut config = configparser::ini::Ini::new();
+    config.read(text.to_string())
+        .map_err(|e| ComputeError::ExecutionFailed(format!("ini parse: {}", e)))?;
+    let mut root = serde_json::Map::new();
+    for section in config.sections() {
+        let mut obj = serde_json::Map::new();
+        if let Some(map) = config.get_map_ref().get(&section) {
+            for (key, val) in map {
+                obj.insert(key.clone(), match val {
+                    Some(v) => serde_json::Value::String(v.clone()),
+                    None => serde_json::Value::Null,
+                });
+            }
+        }
+        root.insert(section, serde_json::Value::Object(obj));
+    }
+    Ok(Bytes::from(serde_json::to_string_pretty(&root).unwrap()))
+}
+```
+
+```rust
+// ConfigFormatConvertFn — universal converter via JSON hub
+fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let from = get_string_param(params, "from")?;
+    let to = get_string_param(params, "to")?;
+    // Step 1: parse source → serde_json::Value
+    let value = match from {
+        "yaml" => serde_yaml::from_slice(&inputs[0]).map_err(|e| ComputeError::ExecutionFailed(format!("yaml: {}", e)))?,
+        "toml" => toml::from_str(std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("UTF-8".into()))?)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("toml: {}", e)))?,
+        "json" => serde_json::from_slice(&inputs[0]).map_err(|e| ComputeError::ExecutionFailed(format!("json: {}", e)))?,
+        _ => return Err(ComputeError::InvalidParam(format!("unsupported source format: {}", from))),
+    };
+    // Step 2: serialize → target format
+    let output = match to {
+        "yaml" => serde_yaml::to_string(&value).map_err(|e| ComputeError::ExecutionFailed(format!("yaml: {}", e)))?,
+        "toml" => toml::to_string_pretty(&value).map_err(|e| ComputeError::ExecutionFailed(format!("toml: {}", e)))?,
+        "json" => serde_json::to_string_pretty(&value).map_err(|e| ComputeError::ExecutionFailed(format!("json: {}", e)))?,
+        _ => return Err(ComputeError::InvalidParam(format!("unsupported target format: {}", to))),
+    };
+    Ok(Bytes::from(output))
+}
+```
+
+#### 3.8.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| YAML with anchors/aliases | Resolved during parse |
+| YAML with tags (`!!int`) | Interpreted by serde_yaml |
+| TOML datetime types | Serialized as strings in JSON |
+| TOML inline tables vs standard tables | Both parsed identically |
+| INI with duplicate keys | Last value wins |
+| INI with no section (global keys) | Placed under `"default"` section |
+| .env with `export` prefix | `export KEY=VALUE` → strips `export` |
+| .env with empty value | `KEY=` → `{"KEY": ""}` |
+| HCL with Terraform-specific syntax | Parsed as generic HCL blocks |
+| Properties with Unicode escapes (`\uXXXX`) | Decoded to UTF-8 |
+| Plist binary format | `ExecutionFailed("only XML plist supported")` |
+| Convert between incompatible formats (e.g., INI → TOML with nested) | Best-effort; flat structure preserved |
+
+#### 3.8.4 Test Strategy
+
+- Parse/write roundtrip for each format: YAML, TOML, INI, .env, properties, plist
+- YAML merge: shallow override, deep recursive merge, array concatenation
+- YAML validate: valid YAML → pass-through, invalid → error
+- INI section parsing: verify nested JSON structure
+- HCL parse: Terraform-style config with blocks, attributes, expressions
+- ConfigFormatConvert: YAML→TOML→JSON→YAML roundtrip (semantic preservation)
+- .env with quoting: single quotes, double quotes, unquoted
+- Properties with line continuation and Unicode escapes
 
 ### 3.9 Category I: Geospatial Formats — GeoJSON, Shapefile, KML, GeoTIFF (14 functions, #356–#369)
 
@@ -1133,15 +1268,102 @@ TODO — roundtrip for each format, multi-document YAML, deep merge correctness,
 
 #### 3.9.1 Function List
 
-TODO — table of 14 functions: GeoJsonValidate, GeoJsonFilter, GeoJsonBbox, GeoJsonSimplify, GeoJsonToWkt, WktToGeoJson, ShapefileToGeoJson, KmlToGeoJson, GpxToGeoJson, GeoTiffMetadata, GeoTiffCrop, GeoTiffResample, FlatGeobufRead (Both), FlatGeobufWrite (Both)
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 356 | GeoJsonValidateFn | `geojson_validate@1.0.0` | Batch | — | Pass-through or error |
+| 357 | GeoJsonFilterFn | `geojson_filter@1.0.0` | Batch | `property`, `op`, `value` | GeoJSON (filtered features) |
+| 358 | GeoJsonBboxFn | `geojson_bbox@1.0.0` | Batch | — | JSON (`[min_lon, min_lat, max_lon, max_lat]`) |
+| 359 | GeoJsonSimplifyFn | `geojson_simplify@1.0.0` | Batch | `tolerance` (default `"0.001"`) | GeoJSON (simplified geometries) |
+| 360 | GeoJsonToWktFn | `geojson_to_wkt@1.0.0` | Batch | — | WKT text (one geometry per line) |
+| 361 | WktToGeoJsonFn | `wkt_to_geojson@1.0.0` | Batch | — | GeoJSON |
+| 362 | ShapefileToGeoJsonFn | `shapefile_to_geojson@1.0.0` | Batch | — | GeoJSON |
+| 363 | KmlToGeoJsonFn | `kml_to_geojson@1.0.0` | Batch | — | GeoJSON |
+| 364 | GpxToGeoJsonFn | `gpx_to_geojson@1.0.0` | Batch | — | GeoJSON |
+| 365 | GeoTiffMetadataFn | `geotiff_metadata@1.0.0` | Batch | — | JSON (CRS, bounds, resolution, bands) |
+| 366 | GeoTiffCropFn | `geotiff_crop@1.0.0` | Batch | `bbox` (`"min_lon,min_lat,max_lon,max_lat"`) | GeoTIFF bytes (cropped) |
+| 367 | GeoTiffResampleFn | `geotiff_resample@1.0.0` | Batch | `width`, `height`, `method` (`nearest`/`bilinear`) | GeoTIFF bytes (resampled) |
+| 368 | FlatGeobufReadFn | `flatgeobuf_read@1.0.0` | Both | `bbox` (optional spatial filter) | GeoJSON |
+| 369 | FlatGeobufWriteFn | `flatgeobuf_write@1.0.0` | Both | — | FlatGeobuf bytes |
 
 #### 3.9.2 Design Notes
 
-TODO — GeoJSON is JSON → full parse; FlatGeobuf designed for streaming (one feature per chunk); GeoTIFF requires random access for spatial crop
+**GeoJSON** is JSON → full parse required for structural operations.
+The `geojson` crate provides typed parsing. The `geo` crate provides
+computational geometry algorithms (simplification, bounding box,
+area).
 
-#### 3.9.3 Test Strategy
+**Simplification** (`GeoJsonSimplifyFn`) uses the Ramer-Douglas-Peucker
+algorithm via `geo::algorithm::simplify`. The `tolerance` param
+controls the maximum distance a simplified point can deviate from the
+original geometry (in coordinate units, typically degrees).
 
-TODO — bbox computation, simplification tolerance, format conversion roundtrip, FlatGeobuf streaming feature count
+**FlatGeobuf** is designed for streaming — features are stored
+sequentially with an optional spatial index. The streaming variant
+reads one feature per chunk. With `bbox` param, the spatial index
+enables efficient spatial filtering without reading all features.
+
+**GeoTIFF** operations require `gdal` (optional, behind
+`format-geo-gdal` feature flag). Without GDAL, only metadata
+extraction is available via TIFF tag parsing. Crop and resample
+require raster data access.
+
+**Shapefile** is a multi-file format (.shp, .shx, .dbf). Input is
+expected as a ZIP archive containing all component files. The function
+unzips, parses, and converts to GeoJSON.
+
+**KML/GPX** are XML-based formats. Parsing uses `quick-xml` (already
+in workspace from Category B) with format-specific element mapping.
+
+All conversion functions normalize to GeoJSON as the hub format,
+consistent with the JSON-hub pattern used throughout §2.16.
+
+```rust
+// GeoJsonBboxFn
+fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let text = std::str::from_utf8(&inputs[0])
+        .map_err(|_| ComputeError::ExecutionFailed("requires UTF-8".into()))?;
+    let gj: geojson::GeoJson = text.parse()
+        .map_err(|e| ComputeError::ExecutionFailed(format!("geojson: {}", e)))?;
+    let collection = geojson::FeatureCollection::try_from(gj)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("expected FeatureCollection: {}", e)))?;
+    let mut bbox = [f64::MAX, f64::MAX, f64::MIN, f64::MIN]; // [min_lon, min_lat, max_lon, max_lat]
+    for feature in &collection.features {
+        if let Some(ref geom) = feature.geometry {
+            update_bbox_from_geometry(geom, &mut bbox);
+        }
+    }
+    Ok(Bytes::from(serde_json::to_string(&bbox).unwrap()))
+}
+```
+
+#### 3.9.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| GeoJSON with no features | Validate → pass-through; Bbox → `ExecutionFailed("no features")` |
+| GeoJSON with null geometry | Feature preserved, skipped in bbox/simplify |
+| Simplify with tolerance 0 | No simplification (pass-through) |
+| Simplify collapses polygon to line | Polygon removed from output |
+| WKT with unsupported geometry type | `ExecutionFailed("unsupported: ...")` |
+| Shapefile ZIP missing .dbf | `ExecutionFailed("missing .dbf component")` |
+| GeoTIFF without CRS | Metadata reports `"crs": null` |
+| GeoTIFF crop bbox outside raster extent | `ExecutionFailed("bbox outside raster bounds")` |
+| FlatGeobuf with spatial index + bbox filter | Uses index for O(log n) lookup |
+| FlatGeobuf without spatial index + bbox filter | Falls back to sequential scan |
+| KML with nested folders | Flattened to single FeatureCollection |
+
+#### 3.9.4 Test Strategy
+
+- GeoJSON validate: valid → pass-through, invalid → error
+- GeoJSON filter: property-based feature selection
+- GeoJSON bbox: verify against manually computed bounds
+- GeoJSON simplify: output vertex count < input; topology preserved
+- GeoJSON↔WKT roundtrip: geometry types preserved
+- Shapefile→GeoJSON: verify feature count and property names
+- KML/GPX→GeoJSON: verify coordinate extraction
+- FlatGeobuf read/write roundtrip: feature count and properties preserved
+- FlatGeobuf streaming: batch and streaming produce identical GeoJSON
+- GeoTIFF metadata: verify CRS, bounds, band count for known file
 
 ### 3.10 Category J: Scientific & Numerical Data — HDF5, NetCDF, FITS, NumPy, Zarr (13 functions, #370–#382)
 
@@ -1151,15 +1373,104 @@ TODO — bbox computation, simplification tolerance, format conversion roundtrip
 
 #### 3.10.1 Function List
 
-TODO — table of 13 functions: Hdf5Metadata, Hdf5Read, Hdf5Write, NetcdfMetadata, NetcdfRead, FitsMetadata, FitsRead, NumpyRead, NumpyWrite, ZarrRead, ZarrMetadata, NumpyToArrow, ArrowToNumpy
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 370 | Hdf5MetadataFn | `hdf5_metadata@1.0.0` | Batch | — | JSON (groups, datasets, attributes, shapes, dtypes) |
+| 371 | Hdf5ReadFn | `hdf5_read@1.0.0` | Batch | `dataset` (path, e.g. `"/group/data"`) | Arrow IPC bytes |
+| 372 | Hdf5WriteFn | `hdf5_write@1.0.0` | Batch | `dataset`, `shape`, `dtype` | HDF5 bytes |
+| 373 | NetcdfMetadataFn | `netcdf_metadata@1.0.0` | Batch | — | JSON (dimensions, variables, global attributes) |
+| 374 | NetcdfReadFn | `netcdf_read@1.0.0` | Batch | `variable` | Arrow IPC bytes |
+| 375 | FitsMetadataFn | `fits_metadata@1.0.0` | Batch | — | JSON (HDU list, headers, dimensions) |
+| 376 | FitsReadFn | `fits_read@1.0.0` | Batch | `hdu` (index, default `"0"`) | Arrow IPC bytes |
+| 377 | NumpyReadFn | `numpy_read@1.0.0` | Batch | — | Arrow IPC bytes |
+| 378 | NumpyWriteFn | `numpy_write@1.0.0` | Batch | `dtype` (`f32`/`f64`/`i32`/`i64`), `shape` | `.npy` bytes |
+| 379 | ZarrReadFn | `zarr_read@1.0.0` | Batch | `array` (path within store) | Arrow IPC bytes |
+| 380 | ZarrMetadataFn | `zarr_metadata@1.0.0` | Batch | — | JSON (arrays, shapes, chunks, dtypes, compressor) |
+| 381 | NumpyToArrowFn | `numpy_to_arrow@1.0.0` | Batch | — | Arrow IPC bytes |
+| 382 | ArrowToNumpyFn | `arrow_to_numpy@1.0.0` | Batch | `dtype` | `.npy` bytes |
 
 #### 3.10.2 Design Notes
 
-TODO — Zarr stores arrays as individually addressable chunks → natural CAS fit; HDF5/NetCDF require random access for dataset slicing
+All scientific formats store multi-dimensional arrays with metadata.
+They require random access for dataset/variable slicing → all batch.
 
-#### 3.10.3 Test Strategy
+**Arrow IPC as interchange**: all read functions emit Arrow IPC,
+enabling downstream processing with Category A columnar functions.
+Multi-dimensional arrays are flattened to Arrow record batches
+(one column per array dimension or variable).
 
-TODO — dataset read/write roundtrip, slice correctness, metadata extraction, Zarr chunk addressing, NumPy↔Arrow conversion
+**HDF5** is a hierarchical container with groups (directories) and
+datasets (arrays). The `hdf5` crate wraps the C library. Datasets
+can be sliced by hyperslab (start, stride, count) — a future
+`Hdf5SliceFn` could expose this.
+
+**NetCDF** is built on HDF5 (NetCDF-4) or has its own format
+(NetCDF-3/classic). Variables are named arrays with dimensions and
+attributes. Climate/weather data is the primary use case.
+
+**FITS** (Flexible Image Transport System) is the standard in
+astronomy. Files contain Header Data Units (HDUs), each with a
+header (key-value pairs) and data (image or table). `fitsio` wraps
+the CFITSIO C library.
+
+**NumPy `.npy`** is a simple format: magic bytes + header (shape,
+dtype, order) + raw array data. Parsing is straightforward without
+external C dependencies.
+
+**Zarr** stores arrays as individually addressable chunks in a
+directory-like structure. Each chunk is a separate blob — a natural
+fit for CAS (each chunk gets its own CAddr). `ZarrReadFn` takes a
+ZIP or directory-in-tar representation of the Zarr store.
+`ZarrMetadataFn` reads `.zarray` and `.zattrs` JSON files.
+
+```rust
+// NumpyReadFn — parse .npy, emit Arrow IPC
+fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let input = &inputs[0];
+    // Verify magic: \x93NUMPY
+    if input.len() < 10 || &input[..6] != b"\x93NUMPY" {
+        return Err(ComputeError::ExecutionFailed("not a valid .npy file".into()));
+    }
+    let header_len = u16::from_le_bytes([input[8], input[9]]) as usize;
+    let header_str = std::str::from_utf8(&input[10..10 + header_len])
+        .map_err(|_| ComputeError::ExecutionFailed("invalid npy header".into()))?;
+    // Parse dtype, shape, fortran_order from header dict
+    let (dtype, shape) = parse_npy_header(header_str)?;
+    let data = &input[10 + header_len..];
+    // Convert raw bytes to Arrow array based on dtype and shape
+    let arrow_batch = raw_to_arrow(data, &dtype, &shape)?;
+    serialize_arrow_ipc(&arrow_batch)
+}
+```
+
+#### 3.10.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| HDF5 dataset path not found | `InvalidParam("dataset '/x' not found")` |
+| HDF5 with external links | `ExecutionFailed("external links not supported")` |
+| NetCDF unlimited dimension | Read all available records |
+| NetCDF variable not found | `InvalidParam("variable 'x' not found")` |
+| FITS with multiple HDUs | `hdu` param selects which; default 0 (primary) |
+| FITS image HDU vs table HDU | Both converted to Arrow; image flattened to 1D |
+| NumPy Fortran order | Transposed to C order during read |
+| NumPy structured dtype | Each field becomes an Arrow column |
+| NumPy object dtype | `ExecutionFailed("object dtype not supported")` |
+| Zarr with missing chunks | Filled with fill_value from `.zarray` metadata |
+| Zarr with unsupported compressor | `ExecutionFailed("unsupported compressor: ...")` |
+| Arrow→NumPy with mixed column types | `InvalidParam("all columns must be same dtype")` |
+
+#### 3.10.4 Test Strategy
+
+- HDF5 metadata: verify group/dataset hierarchy for known file
+- HDF5 read/write roundtrip: dataset values preserved
+- NetCDF metadata: verify dimensions, variables, attributes
+- NetCDF read: verify variable values against known data
+- FITS metadata: verify HDU list and header keywords
+- NumPy read/write roundtrip: array values and shape preserved
+- NumPy↔Arrow roundtrip: dtype mapping correctness (f32, f64, i32, i64)
+- Zarr metadata: verify chunk shape, dtype, compressor
+- Zarr read: verify array values with known chunked data
 
 ### 3.11 Category K: Log & Observability Formats — Syslog, CEF, Apache/Nginx, CloudTrail, OTLP (13 functions, #383–#395)
 
@@ -1169,15 +1480,123 @@ TODO — dataset read/write roundtrip, slice correctness, metadata extraction, Z
 
 #### 3.11.1 Function List
 
-TODO — table of 13 functions: SyslogParse (Both), SyslogWrite (Both), CefParse (Both), ElfParse (Both), ApacheLogParse (Both), NginxLogParse (Both), CloudTrailParse, VpcFlowLogParse (Both), PrometheusExpositionParse (Both), OtlpDecode, LogTimestampNormalize (Both), LogLevelFilter (Both), LogAnonymize (Both)
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 383 | SyslogParseFn | `syslog_parse@1.0.0` | Both | `format` (`rfc3164`/`rfc5424`, default `"rfc5424"`) | NDJSON |
+| 384 | SyslogWriteFn | `syslog_write@1.0.0` | Both | `format` | Syslog text |
+| 385 | CefParseFn | `cef_parse@1.0.0` | Both | — | NDJSON |
+| 386 | ElfParseFn | `elf_parse@1.0.0` | Both | — | NDJSON (Extended Log Format) |
+| 387 | ApacheLogParseFn | `apache_log_parse@1.0.0` | Both | `format` (`combined`/`common`, default `"combined"`) | NDJSON |
+| 388 | NginxLogParseFn | `nginx_log_parse@1.0.0` | Both | `format` (`combined`/`json`, default `"combined"`) | NDJSON |
+| 389 | CloudTrailParseFn | `cloudtrail_parse@1.0.0` | Batch | — | NDJSON (one event per line) |
+| 390 | VpcFlowLogParseFn | `vpc_flow_log_parse@1.0.0` | Both | — | NDJSON |
+| 391 | PrometheusExpositionParseFn | `prometheus_exposition_parse@1.0.0` | Both | — | JSON (metrics with labels) |
+| 392 | OtlpDecodeFn | `otlp_decode@1.0.0` | Batch | `signal` (`traces`/`metrics`/`logs`) | JSON |
+| 393 | LogTimestampNormalizeFn | `log_timestamp_normalize@1.0.0` | Both | `output_format` (default `"iso8601"`) | NDJSON (timestamps normalized) |
+| 394 | LogLevelFilterFn | `log_level_filter@1.0.0` | Both | `min_level` (`debug`/`info`/`warn`/`error`/`fatal`) | NDJSON (filtered) |
+| 395 | LogAnonymizeFn | `log_anonymize@1.0.0` | Both | `fields` (comma-separated: `ip`, `email`, `user`) | NDJSON (PII redacted) |
 
 #### 3.11.2 Design Notes
 
-TODO — log formats are line-oriented → natural streaming; CloudTrail is JSON array → batch; timestamp normalization auto-detects input format
+Log formats are line-oriented → natural streaming. Each line is
+parsed independently, emitted as one NDJSON record. The streaming
+variants process one line per chunk boundary (splitting on `\n`).
 
-#### 3.11.3 Test Strategy
+**Syslog RFC 5424** format:
+`<priority>version timestamp hostname app-name procid msgid structured-data msg`
+Parsed into JSON fields: `priority`, `facility`, `severity`,
+`timestamp`, `hostname`, `app_name`, `procid`, `msgid`, `message`.
 
-TODO — parse accuracy for each format, timestamp normalization across formats, level filtering, PII anonymization verification
+**CEF** (Common Event Format) is used by SIEM systems:
+`CEF:version|vendor|product|version|id|name|severity|extensions`
+Extensions are key-value pairs.
+
+**Apache/Nginx combined** log format:
+`ip - user [timestamp] "method path protocol" status size "referer" "user-agent"`
+Parsed via regex into structured fields.
+
+**CloudTrail** is a JSON array of events → batch-only (full parse
+needed to extract the `Records` array). Each event becomes one
+NDJSON line.
+
+**OTLP** (OpenTelemetry Protocol) uses Protobuf encoding. The
+`signal` param selects traces, metrics, or logs. Decoded to JSON
+using embedded proto descriptors.
+
+**LogTimestampNormalizeFn** (#393) auto-detects common timestamp
+formats and normalizes to a consistent output:
+- ISO 8601: `2024-01-15T10:30:00Z`
+- Syslog: `Jan 15 10:30:00`
+- Apache: `[15/Jan/2024:10:30:00 +0000]`
+- Unix epoch: `1705312200`
+- Custom: `2024/01/15 10:30:00`
+
+**LogAnonymizeFn** (#395) replaces PII with deterministic hashes:
+- `ip`: IPv4/IPv6 addresses → `REDACTED_IP_<hash8>`
+- `email`: email addresses → `REDACTED_EMAIL_<hash8>`
+- `user`: username fields → `REDACTED_USER_<hash8>`
+
+Hashes are deterministic (same input → same redacted value) to
+preserve correlation analysis while removing PII.
+
+```rust
+// ApacheLogParseFn — parse combined log format
+fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let text = std::str::from_utf8(&inputs[0])
+        .map_err(|_| ComputeError::ExecutionFailed("requires UTF-8".into()))?;
+    let re = regex::Regex::new(
+        r#"^(\S+) \S+ (\S+) \[([^\]]+)\] "(\S+) (\S+) (\S+)" (\d+) (\d+|-) "([^"]*)" "([^"]*)""#
+    ).unwrap();
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        if line.is_empty() { continue; }
+        if let Some(caps) = re.captures(line) {
+            let record = serde_json::json!({
+                "remote_addr": caps.get(1).map(|m| m.as_str()),
+                "remote_user": caps.get(2).map(|m| m.as_str()),
+                "timestamp": caps.get(3).map(|m| m.as_str()),
+                "method": caps.get(4).map(|m| m.as_str()),
+                "path": caps.get(5).map(|m| m.as_str()),
+                "protocol": caps.get(6).map(|m| m.as_str()),
+                "status": caps.get(7).map(|m| m.as_str()),
+                "body_bytes": caps.get(8).map(|m| m.as_str()),
+                "referer": caps.get(9).map(|m| m.as_str()),
+                "user_agent": caps.get(10).map(|m| m.as_str()),
+            });
+            lines.push(serde_json::to_string(&record).unwrap());
+        }
+    }
+    Ok(Bytes::from(lines.join("\n")))
+}
+```
+
+#### 3.11.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| Malformed syslog line | Skipped; emitted as `{"raw": "...","parse_error": true}` |
+| Syslog without structured data | `structured_data` field is `null` |
+| Apache log with `-` for missing fields | Mapped to `null` in JSON |
+| CloudTrail with empty Records array | Empty NDJSON output |
+| OTLP with unknown signal type | `InvalidParam("signal must be traces, metrics, or logs")` |
+| Timestamp in unknown format | Preserved as-is with `"normalized": false` flag |
+| Log level not detected | Line passes through LogLevelFilter unchanged |
+| Anonymize with no matching PII | Line unchanged |
+| VPC flow log v2 vs v5 fields | Auto-detected from header line |
+| Prometheus exposition with histograms | Bucket/sum/count expanded to separate metrics |
+
+#### 3.11.4 Test Strategy
+
+- Syslog parse: RFC 3164 and RFC 5424 format correctness
+- Syslog write/parse roundtrip: semantic preservation
+- CEF parse: verify vendor, product, severity, extension key-values
+- Apache/Nginx parse: verify all fields extracted from combined format
+- CloudTrail parse: verify event count matches Records array length
+- VPC flow log: verify field extraction for v2 and v5 formats
+- Timestamp normalize: verify all 5 input formats → ISO 8601
+- Level filter: verify `min_level=warn` drops debug/info lines
+- Anonymize: verify PII replaced, deterministic hashes, non-PII unchanged
+- Streaming parity for all Both-mode functions
 
 ### 3.12 Category L: Blockchain & Content-Addressing — CID, DAG-PB, DAG-CBOR, CAR, UnixFS (15 functions, #396–#410)
 
@@ -1187,15 +1606,141 @@ TODO — parse accuracy for each format, timestamp normalization across formats,
 
 #### 3.12.1 Function List
 
-TODO — table of 15 functions: CidCompute (Both), CidVerify (Both), CidParse, DagPbEncode, DagPbDecode, DagCborEncode, DagCborDecode, CarCreate (Both), CarExtract (Both), CarList (Both), CarVerify (Both), UnixFsChunk (Both), UnixFsAssemble, MerkleProofGenerate, MerkleProofVerify
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 396 | CidComputeFn | `cid_compute@1.0.0` | Both | `version` (`0`/`1`, default `"1"`), `codec` (`dag-pb`/`dag-cbor`/`raw`, default `"raw"`), `hash` (`sha2-256`/`blake3`, default `"sha2-256"`) | CID string (multibase-encoded) |
+| 397 | CidVerifyFn | `cid_verify@1.0.0` | Both | `expected_cid` | Pass-through or error |
+| 398 | CidParseFn | `cid_parse@1.0.0` | Batch | — | JSON (`{"version":1,"codec":"raw","hash":"sha2-256","digest":"..."}`) |
+| 399 | DagPbEncodeFn | `dag_pb_encode@1.0.0` | Batch | — | DAG-PB bytes |
+| 400 | DagPbDecodeFn | `dag_pb_decode@1.0.0` | Batch | — | JSON (links + data) |
+| 401 | DagCborEncodeFn | `dag_cbor_encode@1.0.0` | Batch | — | DAG-CBOR bytes (canonical) |
+| 402 | DagCborDecodeFn | `dag_cbor_decode@1.0.0` | Batch | — | JSON |
+| 403 | CarCreateFn | `car_create@1.0.0` | Both | `roots` (comma-separated CIDs) | CARv1 bytes |
+| 404 | CarExtractFn | `car_extract@1.0.0` | Both | `cid` (optional — single block) | JSON manifest or raw block |
+| 405 | CarListFn | `car_list@1.0.0` | Both | — | JSON array of `{"cid":"...","size":N}` |
+| 406 | CarVerifyFn | `car_verify@1.0.0` | Both | — | Pass-through or error (verifies all block CIDs) |
+| 407 | UnixFsChunkFn | `unixfs_chunk@1.0.0` | Both | `chunk_size` (default `"262144"`), `strategy` (`fixed`/`rabin`) | DAG-PB root block + child blocks as CAR |
+| 408 | UnixFsAssembleFn | `unixfs_assemble@1.0.0` | Batch | — | Raw file bytes (reassembled from UnixFS DAG) |
+| 409 | MerkleProofGenerateFn | `merkle_proof_generate@1.0.0` | Batch | `target_cid` | JSON proof (path from root to target) |
+| 410 | MerkleProofVerifyFn | `merkle_proof_verify@1.0.0` | Batch | `root_cid` | JSON (`{"valid":true}`) or error |
 
 #### 3.12.2 Design Notes
 
-TODO — directly relevant to Computation-Addressed Store; CID computation is accumulator pattern; CAR is sequential archive → streaming; UnixFS chunking is content-defined → streaming
+This category is directly relevant to the Computation-Addressed Store.
+IPFS/IPLD primitives provide interoperability with the broader
+content-addressing ecosystem.
 
-#### 3.12.3 Test Strategy
+**CID** (Content Identifier) is a self-describing content address:
+`<multibase><version><multicodec><multihash>`. `CidComputeFn` hashes
+the input and wraps it in a CID. The streaming variant accumulates
+the hash across chunks and emits the CID on flush.
 
-TODO — CID computation against known vectors, CAR create/extract roundtrip, UnixFS chunking determinism, Merkle proof generation and verification
+**DAG-PB** (Protobuf-based DAG) is the original IPFS block format.
+A node has `Data` (bytes) and `Links` (array of `{Name, Hash, Tsize}`).
+Used by UnixFS for file chunking.
+
+**DAG-CBOR** is the canonical IPLD encoding — deterministic CBOR with
+CID links. Critical for structured data in content-addressed systems.
+Encoding must follow canonical rules: sorted map keys, no duplicate
+keys, minimal integer encoding.
+
+**CAR** (Content Addressable aRchive) is a sequential archive of
+IPLD blocks. Header contains root CIDs, followed by
+`<varint-length><cid><block-data>` entries. Sequential format →
+streaming natural. The streaming variant reads/writes one block per
+chunk.
+
+**UnixFS** is IPFS's file representation. Large files are split into
+chunks, each chunk becomes a DAG-PB leaf, and a balanced tree of
+intermediate nodes links them. `UnixFsChunkFn` implements this:
+- `fixed`: fixed-size chunks (default 256 KB)
+- `rabin`: content-defined chunking via Rabin fingerprinting
+
+Output is a CAR archive containing all blocks (root + intermediates +
+leaves). The root CID is the file's content address.
+
+**Merkle proofs** enable verifying that a specific block belongs to a
+DAG without having the entire DAG. `MerkleProofGenerateFn` takes a
+CAR archive and a target CID, producing the path from root to target.
+`MerkleProofVerifyFn` takes a proof and verifies the hash chain.
+
+```rust
+// CidComputeFn
+fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    use cid::Cid;
+    use multihash::{Code, MultihashDigest};
+    let version = match params.get("version") {
+        Some(Value::String(s)) => s.parse::<u64>().map_err(|_| ComputeError::InvalidParam("version: 0 or 1".into()))?,
+        None => 1,
+        _ => return Err(ComputeError::InvalidParam("version must be string".into())),
+    };
+    let codec = match params.get("codec") {
+        Some(Value::String(s)) => match s.as_str() {
+            "raw" => 0x55,
+            "dag-pb" => 0x70,
+            "dag-cbor" => 0x71,
+            _ => return Err(ComputeError::InvalidParam("codec: raw|dag-pb|dag-cbor".into())),
+        },
+        None => 0x55,
+        _ => return Err(ComputeError::InvalidParam("codec must be string".into())),
+    };
+    let hash = Code::Sha2_256.digest(&inputs[0]);
+    let cid = if version == 0 {
+        Cid::new_v0(hash).map_err(|e| ComputeError::ExecutionFailed(format!("cidv0: {}", e)))?
+    } else {
+        Cid::new_v1(codec, hash)
+    };
+    Ok(Bytes::from(cid.to_string()))
+}
+```
+
+```rust
+// CarListFn (streaming — reads blocks sequentially)
+fn process_chunk(&mut self, chunk: Bytes) -> Result<Option<Bytes>, ComputeError> {
+    self.buffer.extend_from_slice(&chunk);
+    let mut entries = Vec::new();
+    while let Some((cid, block, rest)) = try_read_car_block(&self.buffer)? {
+        entries.push(serde_json::json!({"cid": cid.to_string(), "size": block.len()}));
+        self.buffer = rest;
+    }
+    if entries.is_empty() { return Ok(None); }
+    let lines: Vec<String> = entries.iter().map(|e| serde_json::to_string(e).unwrap()).collect();
+    Ok(Some(Bytes::from(lines.join("\n"))))
+}
+```
+
+#### 3.12.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| CIDv0 with non-dag-pb codec | `ExecutionFailed("CIDv0 requires dag-pb codec")` |
+| CIDv0 with non-sha2-256 hash | `ExecutionFailed("CIDv0 requires sha2-256")` |
+| CID verify mismatch | `ExecutionFailed("CID mismatch: expected ..., got ...")` |
+| CID parse of invalid multibase | `ExecutionFailed("invalid CID: ...")` |
+| DAG-CBOR with non-canonical encoding | `ExecutionFailed("non-canonical CBOR")` |
+| DAG-CBOR with CID links | Links decoded as `{"/": "bafy..."}` JSON |
+| CAR with no blocks | Valid CAR with header only |
+| CAR block CID mismatch | `CarVerifyFn` reports which block failed |
+| UnixFS chunk with rabin on small input | Single chunk (no splitting) |
+| UnixFS assemble with missing blocks | `ExecutionFailed("missing block: bafy...")` |
+| Merkle proof for non-existent CID | `ExecutionFailed("target CID not in DAG")` |
+| Empty input → CID | Valid CID of empty bytes |
+
+#### 3.12.4 Test Strategy
+
+- CID compute: verify against known IPFS CID test vectors
+- CID compute/verify roundtrip: compute then verify succeeds
+- CID parse: verify version, codec, hash algorithm extraction
+- DAG-PB encode/decode roundtrip: links and data preserved
+- DAG-CBOR encode/decode roundtrip: canonical ordering verified
+- DAG-CBOR with CID links: links survive encode/decode
+- CAR create/extract roundtrip: all blocks recoverable
+- CAR list: verify block count and CIDs
+- CAR verify: valid archive passes; tampered block fails
+- UnixFS chunk/assemble roundtrip: original file recovered
+- UnixFS fixed vs rabin: both produce valid DAGs
+- Merkle proof generate/verify roundtrip: proof validates
+- Streaming parity for CID, CAR, and UnixFS functions
 
 ### 3.13 Category M: Database & Storage Formats — SQLite, RocksDB SST, WAL, Postgres COPY (10 functions, #411–#420)
 
@@ -1205,15 +1750,115 @@ TODO — CID computation against known vectors, CAR create/extract roundtrip, Un
 
 #### 3.13.1 Function List
 
-TODO — table of 10 functions: SqliteQuery, SqliteTableList, SqliteToCsv, CsvToSqlite, PostgresCopyParse (Both), PostgresCopyWrite (Both), SstMetadata, SstScan, WalParse (Both), SqlDumpParse (Both)
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 411 | SqliteQueryFn | `sqlite_query@1.0.0` | Batch | `sql` (SELECT statement) | CSV bytes |
+| 412 | SqliteTableListFn | `sqlite_table_list@1.0.0` | Batch | — | JSON array of table names |
+| 413 | SqliteToCsvFn | `sqlite_to_csv@1.0.0` | Batch | `table` | CSV bytes |
+| 414 | CsvToSqliteFn | `csv_to_sqlite@1.0.0` | Batch | `table` | SQLite database bytes |
+| 415 | PostgresCopyParseFn | `postgres_copy_parse@1.0.0` | Both | `format` (`text`/`binary`, default `"text"`) | CSV bytes |
+| 416 | PostgresCopyWriteFn | `postgres_copy_write@1.0.0` | Both | `format` | Postgres COPY bytes |
+| 417 | SstMetadataFn | `sst_metadata@1.0.0` | Batch | — | JSON (key range, entry count, compression, level) |
+| 418 | SstScanFn | `sst_scan@1.0.0` | Batch | `start_key` (optional), `end_key` (optional) | NDJSON (`{"key":"...","value":"..."}` per entry) |
+| 419 | WalParseFn | `wal_parse@1.0.0` | Both | `format` (`postgres`/`mysql`, default `"postgres"`) | NDJSON (one operation per line) |
+| 420 | SqlDumpParseFn | `sql_dump_parse@1.0.0` | Both | — | NDJSON (one statement per line) |
 
 #### 3.13.2 Design Notes
 
-TODO — SQLite requires random access (B-tree); SST files have sorted structure with index blocks; WAL and SQL dump are sequential → streaming
+**SQLite** is a single-file embedded database with B-tree pages →
+random access required → batch-only. `rusqlite` wraps the C library.
+The input is a complete SQLite database file; output is query results
+as CSV or table metadata as JSON.
 
-#### 3.13.3 Test Strategy
+`SqliteQueryFn` executes read-only SELECT statements only. The `sql`
+param is validated to reject writes (INSERT/UPDATE/DELETE/DROP/ALTER).
+This is enforced by opening the database in read-only mode.
 
-TODO — SQLite query correctness, CSV↔SQLite roundtrip, SST key range scan, WAL record parsing
+`CsvToSqliteFn` creates a new SQLite database with a single table,
+inferring column types from CSV data (integer, real, text).
+
+**Postgres COPY** is the bulk data format used by `COPY TO/FROM`.
+Text format is tab-delimited with `\N` for NULL. Binary format has
+a fixed header, then tuples with field count + length-prefixed values.
+Text format is line-oriented → streaming natural. Binary format
+has self-delimiting tuples → also streaming.
+
+**RocksDB SST** (Sorted String Table) files are the on-disk format
+for LSM-tree storage engines (RocksDB, LevelDB, CockroachDB, TiKV).
+They have a sorted key-value structure with index blocks and metadata
+blocks at the end → batch for metadata, sequential scan for data.
+
+**WAL** (Write-Ahead Log) is sequential by nature → streaming.
+Postgres WAL contains logical replication messages; MySQL binlog
+contains row events. Each record becomes one NDJSON line with
+operation type (`insert`/`update`/`delete`), table, and row data.
+
+**SQL dump** files (from `pg_dump`, `mysqldump`) are sequential SQL
+statements → streaming. Each statement becomes one NDJSON record
+with `type` (`create_table`/`insert`/`copy`), `table`, and `data`.
+
+```rust
+// SqliteQueryFn
+fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let sql = get_string_param(params, "sql")?;
+    // Reject non-SELECT statements
+    let normalized = sql.trim().to_uppercase();
+    if !normalized.starts_with("SELECT") {
+        return Err(ComputeError::InvalidParam("only SELECT statements allowed".into()));
+    }
+    let tmp = tempfile::NamedTempFile::new()
+        .map_err(|e| ComputeError::ExecutionFailed(format!("tmpfile: {}", e)))?;
+    std::fs::write(tmp.path(), &inputs[0])
+        .map_err(|e| ComputeError::ExecutionFailed(format!("write db: {}", e)))?;
+    let conn = rusqlite::Connection::open_with_flags(
+        tmp.path(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ).map_err(|e| ComputeError::ExecutionFailed(format!("sqlite: {}", e)))?;
+    let mut stmt = conn.prepare(sql)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("sql: {}", e)))?;
+    let col_count = stmt.column_count();
+    let col_names: Vec<String> = (0..col_count).map(|i| stmt.column_name(i).unwrap().to_string()).collect();
+    let mut wtr = csv::Writer::from_writer(Vec::new());
+    wtr.write_record(&col_names).map_err(|e| ComputeError::ExecutionFailed(format!("csv: {}", e)))?;
+    let mut rows = stmt.query([])
+        .map_err(|e| ComputeError::ExecutionFailed(format!("query: {}", e)))?;
+    while let Some(row) = rows.next().map_err(|e| ComputeError::ExecutionFailed(format!("row: {}", e)))? {
+        let record: Vec<String> = (0..col_count)
+            .map(|i| row.get::<_, String>(i).unwrap_or_default())
+            .collect();
+        wtr.write_record(&record).map_err(|e| ComputeError::ExecutionFailed(format!("csv: {}", e)))?;
+    }
+    Ok(Bytes::from(wtr.into_inner().map_err(|e| ComputeError::ExecutionFailed(format!("csv: {}", e)))?))
+}
+```
+
+#### 3.13.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| SQLite query with write statement | `InvalidParam("only SELECT statements allowed")` |
+| SQLite corrupt database | `ExecutionFailed("sqlite: database disk image is malformed")` |
+| SQLite empty table | CSV with header only |
+| CSV→SQLite with mixed types in column | Inferred as TEXT |
+| Postgres COPY binary with NULL fields | Represented as empty in CSV |
+| SST with compression (snappy/zstd/lz4) | Decompressed transparently |
+| SST key range scan with no matches | Empty NDJSON output |
+| WAL with unsupported format | `InvalidParam("format: postgres or mysql")` |
+| WAL truncated mid-record | Last incomplete record skipped with warning |
+| SQL dump with multi-line INSERT | Concatenated into single statement record |
+| SQLite with attached databases | Not supported; single database only |
+
+#### 3.13.4 Test Strategy
+
+- SQLite query: verify SELECT results match expected CSV
+- SQLite table list: verify all tables returned
+- SQLite↔CSV roundtrip: `CsvToSqlite → SqliteToCsv` preserves data
+- Postgres COPY text parse/write roundtrip
+- Postgres COPY binary parse: verify field extraction
+- SST metadata: verify key range, entry count for known SST file
+- SST scan: verify key-value pairs, range scan correctness
+- WAL parse: verify operation types and row data
+- SQL dump parse: verify statement extraction and classification
+- Streaming parity for Postgres COPY, WAL, and SQL dump functions
 
 ### 3.14 Category N: Machine Learning & Tensor Formats — TFRecord, SafeTensors, ONNX, GGUF (12 functions, #421–#432)
 

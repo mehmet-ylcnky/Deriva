@@ -226,15 +226,127 @@ pub fn register_columnar_functions(registry: &mut FunctionRegistry) {
 
 #### 3.1.1 Function List
 
-TODO — table of 18 functions: ParquetRead, ParquetWrite, ParquetMetadata, ParquetProjection, ParquetFilter, ParquetMerge, ParquetToArrow, ArrowToParquet, OrcRead, OrcWrite, OrcMetadata, OrcFilter, ArrowIpcRead (Both), ArrowIpcWrite (Both), ArrowSchemaExtract, ParquetPartitionWrite, ParquetStatistics, ColumnarToRow
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 201 | ParquetReadFn | `parquet_read@1.0.0` | Batch | — | Arrow IPC bytes |
+| 202 | ParquetWriteFn | `parquet_write@1.0.0` | Batch | `compression` | Parquet bytes |
+| 203 | ParquetMetadataFn | `parquet_metadata@1.0.0` | Batch | — | JSON metadata |
+| 204 | ParquetProjectionFn | `parquet_projection@1.0.0` | Batch | `columns` (comma-separated) | Parquet bytes (subset) |
+| 205 | ParquetFilterFn | `parquet_filter@1.0.0` | Batch | `column`, `op`, `value` | Parquet bytes (filtered) |
+| 206 | ParquetMergeFn | `parquet_merge@1.0.0` | Batch | — | Parquet bytes (merged) |
+| 207 | ParquetToArrowFn | `parquet_to_arrow@1.0.0` | Batch | — | Arrow IPC bytes |
+| 208 | ArrowToParquetFn | `arrow_to_parquet@1.0.0` | Batch | `compression` | Parquet bytes |
+| 209 | OrcReadFn | `orc_read@1.0.0` | Batch | — | Arrow IPC bytes |
+| 210 | OrcWriteFn | `orc_write@1.0.0` | Batch | `compression` | ORC bytes |
+| 211 | OrcMetadataFn | `orc_metadata@1.0.0` | Batch | — | JSON metadata |
+| 212 | OrcFilterFn | `orc_filter@1.0.0` | Batch | `column`, `op`, `value` | ORC bytes (filtered) |
+| 213 | ArrowIpcReadFn | `arrow_ipc_read@1.0.0` | Both | — | Arrow IPC bytes (normalized) |
+| 214 | ArrowIpcWriteFn | `arrow_ipc_write@1.0.0` | Both | — | Arrow IPC bytes |
+| 215 | ArrowSchemaExtractFn | `arrow_schema_extract@1.0.0` | Batch | — | JSON schema |
+| 216 | ParquetPartitionWriteFn | `parquet_partition_write@1.0.0` | Batch | `partition_column` | JSON manifest + Parquet shards |
+| 217 | ParquetStatisticsFn | `parquet_statistics@1.0.0` | Batch | — | JSON column statistics |
+| 218 | ColumnarToRowFn | `columnar_to_row@1.0.0` | Batch | — | NDJSON (one JSON object per row) |
 
 #### 3.1.2 Design Notes
 
-TODO — Parquet/ORC require footer parsing (random access); Arrow IPC is streaming-capable (record batch per chunk); predicate pushdown uses row-group/stripe statistics to skip data
+**Parquet** files have a footer containing schema, row group offsets,
+and column chunk metadata. All operations require reading the footer
+first (random access) → batch-only. The `parquet` crate provides
+`SerializedFileReader` for reading and `ArrowWriter` for writing.
 
-#### 3.1.3 Test Strategy
+**Predicate pushdown** (`ParquetFilterFn`): reads row group statistics
+from the footer. If a row group's min/max for the filter column
+doesn't overlap the predicate, the entire row group is skipped. This
+can eliminate 90%+ of I/O for selective queries.
 
-TODO — roundtrip tests (write → read), projection correctness, predicate pushdown skipping, schema evolution in merge, Arrow IPC streaming equivalence
+**Projection** (`ParquetProjectionFn`): reads only the requested
+column chunks, skipping all others. For wide tables (100+ columns),
+this reduces I/O proportionally.
+
+**Arrow IPC** is the in-memory interchange format. `ArrowIpcReadFn`
+and `ArrowIpcWriteFn` support streaming mode because Arrow IPC uses
+a record-batch-per-message framing — each chunk is one record batch.
+
+**ORC** is similar to Parquet (footer + stripes) but uses a different
+encoding. We normalize to Arrow IPC as the internal representation,
+enabling cross-format operations.
+
+Filter operators (`op` param): `eq`, `ne`, `lt`, `le`, `gt`, `ge`,
+`in`, `not_in`, `is_null`, `is_not_null`.
+
+Compression param values: `none`, `snappy`, `gzip`, `lz4`, `zstd`.
+
+**ParquetPartitionWriteFn** (#216) splits input into multiple Parquet
+files by partition column value (Hive-style partitioning). Output is
+a JSON manifest mapping partition values to CAddrs of the individual
+Parquet shards. This is a multi-output function — the manifest
+references CAS-stored shards.
+
+```rust
+// ParquetReadFn — reads Parquet, emits Arrow IPC
+fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let reader = SerializedFileReader::new(SliceableCursor::new(inputs[0].clone()))
+        .map_err(|e| ComputeError::ExecutionFailed(format!("parquet read: {}", e)))?;
+    let arrow_reader = ParquetFileArrowReader::new(Arc::new(reader));
+    let batch_reader = arrow_reader.get_record_reader(8192)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("arrow reader: {}", e)))?;
+    let mut buf = Vec::new();
+    let mut writer = StreamWriter::try_new(&mut buf, &batch_reader.schema())
+        .map_err(|e| ComputeError::ExecutionFailed(format!("ipc writer: {}", e)))?;
+    for batch in batch_reader {
+        let batch = batch.map_err(|e| ComputeError::ExecutionFailed(format!("read batch: {}", e)))?;
+        writer.write(&batch).map_err(|e| ComputeError::ExecutionFailed(format!("write ipc: {}", e)))?;
+    }
+    writer.finish().map_err(|e| ComputeError::ExecutionFailed(format!("finish ipc: {}", e)))?;
+    Ok(Bytes::from(buf))
+}
+```
+
+```rust
+// ParquetProjectionFn — read only selected columns
+fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let columns_str = get_string_param(params, "columns")?;
+    let columns: Vec<&str> = columns_str.split(',').map(|s| s.trim()).collect();
+    let reader = SerializedFileReader::new(SliceableCursor::new(inputs[0].clone()))
+        .map_err(|e| ComputeError::ExecutionFailed(format!("parquet: {}", e)))?;
+    let metadata = reader.metadata();
+    let schema = metadata.file_metadata().schema();
+    // Build projection mask from column names
+    let indices: Vec<usize> = columns.iter()
+        .filter_map(|name| schema.get_fields().iter().position(|f| f.name() == *name))
+        .collect();
+    if indices.is_empty() {
+        return Err(ComputeError::InvalidParam("no matching columns found".into()));
+    }
+    // Read only projected columns, write new Parquet
+    // ... (uses ProjectionMask and ArrowWriter)
+    Ok(Bytes::from(output_buf))
+}
+```
+
+#### 3.1.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| Empty Parquet file (0 rows) | Valid output with schema, 0 rows |
+| Projection with non-existent column | `InvalidParam` error |
+| Filter on non-existent column | `InvalidParam` error |
+| Merge files with different schemas | `ExecutionFailed` — schemas must match |
+| Nested/repeated columns | Supported via Arrow nested types |
+| Parquet v1 vs v2 pages | Both supported by `parquet` crate |
+| ORC with no stripes | Valid output with schema, 0 rows |
+| Corrupt footer | `ExecutionFailed("parquet read: ...")` |
+
+#### 3.1.4 Test Strategy
+
+- Roundtrip: `ParquetWrite → ParquetRead` preserves all data types
+- Projection: verify only requested columns present in output
+- Filter: verify row count reduction and correctness
+- Merge: two files with same schema → combined row count
+- Statistics: verify min/max/null_count match actual data
+- Arrow IPC streaming: batch and streaming mode produce identical output
+- Cross-format: `ParquetToArrow → ArrowToParquet` roundtrip
+- ORC: `OrcWrite → OrcRead` roundtrip
 
 ### 3.2 Category B: Row-Oriented & Delimited Formats — CSV, TSV, JSON, NDJSON, XML (25 functions, #219–#243)
 
@@ -244,15 +356,141 @@ TODO — roundtrip tests (write → read), projection correctness, predicate pus
 
 #### 3.2.1 Function List
 
-TODO — table of 25 functions: CsvParse (Both), CsvWrite (Both), CsvSchemaInfer, CsvColumnSelect (Both), CsvColumnRename (Both), CsvFilter (Both), CsvSort, CsvAggregate, CsvJoin, CsvDeduplicate, TsvParse (Both), NdjsonParse (Both), NdjsonWrite (Both), NdjsonFilter (Both), NdjsonProject (Both), JsonPathExtract, JsonMerge, JsonFlatten, JsonUnflatten, XmlParse, XmlWrite, XmlXPathExtract, XmlXsltTransform, XmlValidateDtd, XmlValidateXsd
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 219 | CsvParseFn | `csv_parse@1.0.0` | Both | `delimiter`, `has_header` | JSON array of objects |
+| 220 | CsvWriteFn | `csv_write@1.0.0` | Both | `delimiter` | CSV bytes |
+| 221 | CsvSchemaInferFn | `csv_schema_infer@1.0.0` | Batch | `sample_rows` | JSON schema |
+| 222 | CsvColumnSelectFn | `csv_column_select@1.0.0` | Both | `columns` (comma-separated) | CSV (subset columns) |
+| 223 | CsvColumnRenameFn | `csv_column_rename@1.0.0` | Both | `mapping` (JSON: `{"old":"new"}`) | CSV (renamed headers) |
+| 224 | CsvFilterFn | `csv_filter@1.0.0` | Both | `column`, `op`, `value` | CSV (filtered rows) |
+| 225 | CsvSortFn | `csv_sort@1.0.0` | Batch | `column`, `order` (`asc`/`desc`) | CSV (sorted) |
+| 226 | CsvAggregateFn | `csv_aggregate@1.0.0` | Batch | `column`, `function` (`sum`/`avg`/`count`/`min`/`max`) | JSON result |
+| 227 | CsvJoinFn | `csv_join@1.0.0` | Batch | `join_column`, `join_type` (`inner`/`left`/`right`/`full`) | CSV (joined) |
+| 228 | CsvDeduplicateFn | `csv_deduplicate@1.0.0` | Batch | `columns` (key columns, optional) | CSV (unique rows) |
+| 229 | TsvParseFn | `tsv_parse@1.0.0` | Both | `has_header` | JSON array of objects |
+| 230 | NdjsonParseFn | `ndjson_parse@1.0.0` | Both | — | JSON array |
+| 231 | NdjsonWriteFn | `ndjson_write@1.0.0` | Both | — | NDJSON bytes |
+| 232 | NdjsonFilterFn | `ndjson_filter@1.0.0` | Both | `path`, `op`, `value` | NDJSON (filtered lines) |
+| 233 | NdjsonProjectFn | `ndjson_project@1.0.0` | Both | `paths` (comma-separated JSONPaths) | NDJSON (projected fields) |
+| 234 | JsonPathExtractFn | `jsonpath_extract@1.0.0` | Batch | `path` (JSONPath expression) | JSON (extracted values) |
+| 235 | JsonMergeFn | `json_merge@1.0.0` | Batch | `strategy` (`shallow`/`deep`) | JSON (merged) |
+| 236 | JsonFlattenFn | `json_flatten@1.0.0` | Batch | `separator` (default `"."`) | JSON (flat key-value) |
+| 237 | JsonUnflattenFn | `json_unflatten@1.0.0` | Batch | `separator` (default `"."`) | JSON (nested) |
+| 238 | XmlParseFn | `xml_parse@1.0.0` | Batch | — | JSON representation |
+| 239 | XmlWriteFn | `xml_write@1.0.0` | Batch | `root_element` | XML bytes |
+| 240 | XmlXPathExtractFn | `xml_xpath_extract@1.0.0` | Batch | `xpath` | XML fragment |
+| 241 | XmlXsltTransformFn | `xml_xslt_transform@1.0.0` | Batch | — | Transformed XML/HTML |
+| 242 | XmlValidateDtdFn | `xml_validate_dtd@1.0.0` | Batch | — | Pass-through or error |
+| 243 | XmlValidateXsdFn | `xml_validate_xsd@1.0.0` | Batch | — | Pass-through or error |
 
 #### 3.2.2 Design Notes
 
-TODO — CSV/TSV/NDJSON are line-oriented → natural streaming; JSON/XML require full parse for structural ops; CSV streaming functions maintain header state across chunks
+**CSV/TSV/NDJSON streaming**: these formats are line-oriented, making
+them natural streaming candidates. The streaming variants maintain
+header state across chunks:
 
-#### 3.2.3 Test Strategy
+- `CsvParseFn` (streaming): first chunk extracts headers, subsequent
+  chunks parse rows using cached headers
+- `CsvColumnSelectFn` (streaming): first chunk determines column
+  indices, subsequent chunks select by index
+- `CsvFilterFn` (streaming): evaluates predicate per row, emits
+  matching rows immediately
+- `NdjsonFilterFn` (streaming): parses each line independently,
+  emits matching lines
 
-TODO — CSV roundtrip, schema inference accuracy, filter correctness, join types (inner/left/right/full), NDJSON streaming line-by-line, XML validation against DTD/XSD
+**JSON structural operations** (`JsonMerge`, `JsonFlatten`,
+`JsonUnflatten`, `JsonPathExtract`) require full parse → batch-only.
+
+**XML** requires full DOM parse for XPath/XSLT → batch-only. DTD and
+XSD validation need the complete document.
+
+**CsvJoinFn** (#227) takes 2 inputs — left and right CSV. Join types:
+- `inner`: rows matching on `join_column` in both inputs
+- `left`: all left rows, matching right rows (nulls for non-matches)
+- `right`: all right rows, matching left rows
+- `full`: all rows from both sides
+
+**CsvSchemaInferFn** (#221) samples up to `sample_rows` rows (default
+100) and infers column types: `integer`, `float`, `boolean`, `string`,
+`date`, `datetime`. Output is a JSON schema object.
+
+Filter operators (`op` param): `eq`, `ne`, `lt`, `le`, `gt`, `ge`,
+`contains`, `starts_with`, `ends_with`, `regex`.
+
+```rust
+// CsvFilterFn — filter rows by predicate
+fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let column = get_string_param(params, "column")?;
+    let op = get_string_param(params, "op")?;
+    let value = get_string_param(params, "value")?;
+    let mut reader = csv::Reader::from_reader(&inputs[0][..]);
+    let headers = reader.headers()
+        .map_err(|e| ComputeError::ExecutionFailed(format!("csv: {}", e)))?
+        .clone();
+    let col_idx = headers.iter().position(|h| h == column)
+        .ok_or_else(|| ComputeError::InvalidParam(format!("column '{}' not found", column)))?;
+    let mut wtr = csv::Writer::from_writer(Vec::new());
+    wtr.write_record(&headers)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("csv: {}", e)))?;
+    for record in reader.records() {
+        let record = record.map_err(|e| ComputeError::ExecutionFailed(format!("csv: {}", e)))?;
+        let field = record.get(col_idx).unwrap_or("");
+        if matches_predicate(field, op, value)? {
+            wtr.write_record(&record)
+                .map_err(|e| ComputeError::ExecutionFailed(format!("csv: {}", e)))?;
+        }
+    }
+    Ok(Bytes::from(wtr.into_inner().map_err(|e| ComputeError::ExecutionFailed(format!("csv: {}", e)))?))
+}
+```
+
+```rust
+// JsonFlattenFn — {"a":{"b":1}} → {"a.b":1}
+fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let sep = match params.get("separator") {
+        Some(Value::String(s)) => s.as_str(),
+        None => ".",
+        _ => return Err(ComputeError::InvalidParam("separator must be string".into())),
+    };
+    let text = std::str::from_utf8(&inputs[0])
+        .map_err(|_| ComputeError::ExecutionFailed("requires UTF-8".into()))?;
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("invalid JSON: {}", e)))?;
+    let mut flat = serde_json::Map::new();
+    flatten_recursive(&value, "", sep, &mut flat);
+    Ok(Bytes::from(serde_json::to_string_pretty(&flat)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("json: {}", e)))?))
+}
+```
+
+#### 3.2.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| CSV with no rows (header only) | Filter/select → header only. Aggregate → zero/null. |
+| CSV with inconsistent column counts | Extra fields ignored, missing fields empty |
+| Empty NDJSON lines | Skipped silently |
+| JSONPath matching nothing | Empty array `"[]"` |
+| JSON merge with conflicting keys | `shallow`: last wins. `deep`: recurse into objects, last wins for scalars |
+| XML with namespaces | Preserved in parse, accessible via prefixed XPath |
+| XSD validation input (2 inputs) | Input 0 = XML document, Input 1 = XSD schema |
+| XSLT transform (2 inputs) | Input 0 = XML document, Input 1 = XSLT stylesheet |
+| TSV with embedded tabs in quoted fields | Handled by `csv` crate with `delimiter(b'\t')` |
+| Flatten already-flat JSON | Unchanged (idempotent) |
+| Unflatten with ambiguous paths | `"a.b"` key and `"a"` key → `ExecutionFailed` |
+
+#### 3.2.4 Test Strategy
+
+- CSV roundtrip: `CsvWrite → CsvParse` preserves data
+- CSV filter: verify row count and predicate correctness for each operator
+- CSV join: test all 4 join types with overlapping and non-overlapping keys
+- CSV schema inference: verify type detection for int, float, bool, date, string
+- NDJSON streaming: batch and streaming produce identical output
+- JSONPath: test nested extraction, array indexing, wildcard
+- JSON flatten/unflatten roundtrip: `unflatten(flatten(x)) == x` for non-ambiguous inputs
+- XML parse/write roundtrip: preserves elements, attributes, text content
+- XML XPath: test element selection, attribute selection, predicate filters
 
 ### 3.3 Category C: Serialization Formats — Avro, Protobuf, Thrift, MessagePack, CBOR, BSON (19 functions, #244–#262)
 
@@ -262,15 +500,111 @@ TODO — CSV roundtrip, schema inference accuracy, filter correctness, join type
 
 #### 3.3.1 Function List
 
-TODO — table of 19 functions: AvroRead (Both), AvroWrite (Both), AvroSchemaExtract, AvroSchemaEvolve, AvroToJson (Both), JsonToAvro (Both), ProtobufDecode (Both), ProtobufEncode (Both), ProtobufSchemaExtract, ThriftDecode, ThriftEncode, MsgpackDecode (Both), MsgpackEncode (Both), CborDecode (Both), CborEncode (Both), BsonDecode (Both), BsonEncode (Both), AvroToParquet, ParquetToAvro
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 244 | AvroReadFn | `avro_read@1.0.0` | Both | — | JSON array of records |
+| 245 | AvroWriteFn | `avro_write@1.0.0` | Both | `codec` (`null`/`deflate`/`snappy`) | Avro OCF bytes |
+| 246 | AvroSchemaExtractFn | `avro_schema_extract@1.0.0` | Batch | — | JSON (Avro schema) |
+| 247 | AvroSchemaEvolveFn | `avro_schema_evolve@1.0.0` | Batch | — | Avro OCF (re-encoded with new schema) |
+| 248 | AvroToJsonFn | `avro_to_json@1.0.0` | Both | — | NDJSON (one record per line) |
+| 249 | JsonToAvroFn | `json_to_avro@1.0.0` | Both | — | Avro OCF bytes |
+| 250 | ProtobufDecodeFn | `protobuf_decode@1.0.0` | Both | `descriptor` (base64-encoded FileDescriptorSet) | JSON |
+| 251 | ProtobufEncodeFn | `protobuf_encode@1.0.0` | Both | `descriptor`, `message_type` | Protobuf bytes |
+| 252 | ProtobufSchemaExtractFn | `protobuf_schema_extract@1.0.0` | Batch | `descriptor` | JSON (message definitions) |
+| 253 | ThriftDecodeFn | `thrift_decode@1.0.0` | Batch | `protocol` (`binary`/`compact`) | JSON |
+| 254 | ThriftEncodeFn | `thrift_encode@1.0.0` | Batch | `protocol` | Thrift bytes |
+| 255 | MsgpackDecodeFn | `msgpack_decode@1.0.0` | Both | — | JSON |
+| 256 | MsgpackEncodeFn | `msgpack_encode@1.0.0` | Both | — | MessagePack bytes |
+| 257 | CborDecodeFn | `cbor_decode@1.0.0` | Both | — | JSON |
+| 258 | CborEncodeFn | `cbor_encode@1.0.0` | Both | — | CBOR bytes |
+| 259 | BsonDecodeFn | `bson_decode@1.0.0` | Both | — | JSON |
+| 260 | BsonEncodeFn | `bson_encode@1.0.0` | Both | — | BSON bytes |
+| 261 | AvroToParquetFn | `avro_to_parquet@1.0.0` | Batch | `compression` | Parquet bytes |
+| 262 | ParquetToAvroFn | `parquet_to_avro@1.0.0` | Batch | `codec` | Avro OCF bytes |
 
 #### 3.3.2 Design Notes
 
-TODO — Avro OCF has block structure → streaming one block per chunk; Protobuf length-delimited → streaming one message per chunk; CBOR critical for IPFS/IPLD interop (DAG-CBOR)
+**Avro OCF** (Object Container File) has a block structure: header
+(magic + schema + sync marker), then data blocks each prefixed with
+count + size. This enables streaming — each chunk processes one block.
+The streaming variant caches the schema from the header chunk.
 
-#### 3.3.3 Test Strategy
+**Protobuf** uses length-delimited framing for streaming: each message
+is prefixed with a varint length. The streaming variant reads one
+message per chunk. The `descriptor` param provides the
+`FileDescriptorSet` (compiled `.proto` schema) needed for decoding
+without generated code.
 
-TODO — schema evolution (added/removed fields), Avro codec roundtrip (null/deflate/snappy), Protobuf descriptor validation, cross-format conversion (Avro↔Parquet)
+**CBOR** is critical for IPFS/IPLD interop — DAG-CBOR is the
+canonical encoding for IPLD data structures. Streaming is natural
+because CBOR items are self-delimiting.
+
+**MessagePack** and **BSON** are self-delimiting binary formats →
+streaming reads one value/document per chunk.
+
+**Thrift** is batch-only because the binary/compact protocols require
+knowing the full message structure upfront (no self-delimiting framing
+without IDL).
+
+**Schema evolution** (`AvroSchemaEvolveFn`, #247) takes 2 inputs:
+input 0 = Avro OCF with old schema, input 1 = new schema JSON. It
+re-encodes records using Avro's schema resolution rules (field
+defaults for added fields, field dropping for removed fields).
+
+**Cross-format** (`AvroToParquetFn`, `ParquetToAvroFn`) converts
+between the two dominant analytics formats. Both are batch-only
+because Parquet requires random access.
+
+```rust
+// CborDecodeFn — CBOR → JSON
+fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let value: ciborium::Value = ciborium::from_reader(&inputs[0][..])
+        .map_err(|e| ComputeError::ExecutionFailed(format!("cbor decode: {}", e)))?;
+    let json = serde_json::to_string_pretty(&cbor_to_json(&value))
+        .map_err(|e| ComputeError::ExecutionFailed(format!("json: {}", e)))?;
+    Ok(Bytes::from(json))
+}
+```
+
+```rust
+// MsgpackDecodeFn — MessagePack → JSON
+fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let value: serde_json::Value = rmp_serde::from_slice(&inputs[0])
+        .map_err(|e| ComputeError::ExecutionFailed(format!("msgpack decode: {}", e)))?;
+    let json = serde_json::to_string_pretty(&value)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("json: {}", e)))?;
+    Ok(Bytes::from(json))
+}
+```
+
+#### 3.3.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| Avro with no records | Valid OCF with schema, empty data |
+| Avro schema evolution: incompatible schemas | `ExecutionFailed` (no default for required field) |
+| Protobuf without descriptor | `InvalidParam("missing param: descriptor")` |
+| Protobuf unknown fields | Preserved as raw bytes in decode output |
+| CBOR with tags (e.g., datetime tag 0) | Decoded to JSON string with tag annotation |
+| CBOR byte strings | Base64-encoded in JSON output |
+| BSON ObjectId | Serialized as `{"$oid": "..."}` extended JSON |
+| BSON datetime | Serialized as `{"$date": "..."}` extended JSON |
+| MessagePack binary type | Base64-encoded in JSON output |
+| Thrift with unknown protocol | `InvalidParam("protocol must be binary or compact")` |
+| Cross-format type mismatch (Avro logical types → Parquet) | Best-effort mapping; unsupported types → bytes |
+
+#### 3.3.4 Test Strategy
+
+- Avro roundtrip: `AvroWrite → AvroRead` with all codecs (null, deflate, snappy)
+- Avro schema evolution: add field with default, remove optional field, type promotion (int→long)
+- Avro↔JSON roundtrip: `AvroToJson → JsonToAvro` preserves records
+- Avro↔Parquet: `AvroToParquet → ParquetToAvro` preserves data
+- Protobuf encode/decode roundtrip with known descriptor
+- CBOR encode/decode roundtrip; verify DAG-CBOR canonical ordering
+- MessagePack encode/decode roundtrip for all JSON types
+- BSON encode/decode roundtrip; verify extended JSON for ObjectId/datetime
+- Thrift binary vs compact protocol roundtrip
+- Streaming parity for all Both-mode functions (Avro, Protobuf, Msgpack, CBOR, BSON)
 
 ### 3.4 Category D: Archive & Container Formats — tar, zip, gzip, bzip2, xz, zstd-frame, 7z, rar (20 functions, #263–#282)
 
@@ -280,15 +614,119 @@ TODO — schema evolution (added/removed fields), Avro codec roundtrip (null/def
 
 #### 3.4.1 Function List
 
-TODO — table of 20 functions: TarCreate (Both), TarExtract (Both), TarList (Both), TarAppend, GzipCompress (Streaming), GzipDecompress (Streaming), Bzip2Compress (Streaming), Bzip2Decompress (Streaming), XzCompress (Streaming), XzDecompress (Streaming), ZipCreate, ZipExtract, ZipList, ZipExtractSingle, TarGzCreate (Both), TarGzExtract (Both), ZstdFrameCompress (Streaming), ZstdFrameDecompress (Streaming), SevenZExtract, RarExtract
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 263 | TarCreateFn | `tar_create@1.0.0` | Both | — | tar archive bytes |
+| 264 | TarExtractFn | `tar_extract@1.0.0` | Both | `path` (optional — single entry) | JSON manifest + entries |
+| 265 | TarListFn | `tar_list@1.0.0` | Both | — | JSON array of entry metadata |
+| 266 | TarAppendFn | `tar_append@1.0.0` | Batch | `filename` | tar archive (appended) |
+| 267 | GzipCompressFn | `gzip_compress@1.0.0` | Streaming | `level` (1–9, default `"6"`) | gzip bytes |
+| 268 | GzipDecompressFn | `gzip_decompress@1.0.0` | Streaming | — | raw bytes |
+| 269 | Bzip2CompressFn | `bzip2_compress@1.0.0` | Streaming | `level` (1–9, default `"6"`) | bzip2 bytes |
+| 270 | Bzip2DecompressFn | `bzip2_decompress@1.0.0` | Streaming | — | raw bytes |
+| 271 | XzCompressFn | `xz_compress@1.0.0` | Streaming | `level` (0–9, default `"6"`) | xz bytes |
+| 272 | XzDecompressFn | `xz_decompress@1.0.0` | Streaming | — | raw bytes |
+| 273 | ZipCreateFn | `zip_create@1.0.0` | Batch | `compression` (`stored`/`deflate`/`zstd`) | zip archive bytes |
+| 274 | ZipExtractFn | `zip_extract@1.0.0` | Batch | `path` (optional — single entry) | JSON manifest + entries |
+| 275 | ZipListFn | `zip_list@1.0.0` | Batch | — | JSON array of entry metadata |
+| 276 | ZipExtractSingleFn | `zip_extract_single@1.0.0` | Batch | `path` (required) | raw entry bytes |
+| 277 | TarGzCreateFn | `tar_gz_create@1.0.0` | Both | `level` (1–9, default `"6"`) | tar.gz bytes |
+| 278 | TarGzExtractFn | `tar_gz_extract@1.0.0` | Both | — | JSON manifest + entries |
+| 279 | ZstdFrameCompressFn | `zstd_frame_compress@1.0.0` | Streaming | `level` (1–22, default `"3"`) | zstd frame bytes |
+| 280 | ZstdFrameDecompressFn | `zstd_frame_decompress@1.0.0` | Streaming | — | raw bytes |
+| 281 | SevenZExtractFn | `sevenz_extract@1.0.0` | Batch | — | JSON manifest + entries |
+| 282 | RarExtractFn | `rar_extract@1.0.0` | Batch | — | JSON manifest + entries |
 
 #### 3.4.2 Design Notes
 
-TODO — tar is sequential → streaming natural; zip requires central directory → batch; whole-stream compression (gzip/bzip2/xz/zstd-frame) maintains codec state across chunks unlike per-chunk compression in §2.14
+**Tar** is a sequential format — entries are concatenated with
+512-byte headers. This makes it naturally streaming: each chunk
+processes one or more entries. `TarCreateFn` takes multiple inputs
+(one per file) with filenames encoded in params as JSON:
+`{"files": ["a.txt", "b.txt"]}`.
 
-#### 3.4.3 Test Strategy
+**Zip** requires a central directory at the end of the file for
+random access to individual entries → batch-only. `ZipExtractSingleFn`
+reads only the requested entry using the central directory offset.
 
-TODO — tar create/extract roundtrip, tar.gz pipeline composition, zip random access, whole-stream vs per-chunk compression ratio comparison
+**Whole-stream compression** (gzip, bzip2, xz, zstd-frame) differs
+from the per-chunk compression in §2.14/§2.15. These maintain codec
+state across the entire stream, producing a single valid compressed
+file. The streaming variants use `flate2::write::GzEncoder` (etc.)
+with `write()` per chunk and `finish()` on flush.
+
+Key difference from §2.15 `CompressFn`/`DecompressFn`:
+- §2.15 `compress@1.0.0`: zlib per-chunk (each chunk independently compressed)
+- §2.16 `gzip_compress@1.0.0`: gzip whole-stream (single compressed output)
+
+**tar.gz** is a composition: `TarGzCreateFn` = tar + gzip in a single
+function for convenience. Streaming: tar entries are written into a
+gzip encoder.
+
+**Extract output format**: archive extraction functions return a JSON
+manifest as the primary output. The manifest maps entry paths to
+metadata (size, mtime, permissions). For single-entry extraction,
+raw bytes are returned directly.
+
+```rust
+// GzipCompressFn (streaming variant sketch)
+fn process_chunk(&mut self, chunk: Bytes) -> Result<Option<Bytes>, ComputeError> {
+    self.encoder.write_all(&chunk)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("gzip: {}", e)))?;
+    let output = self.encoder.get_mut().drain(..).collect::<Vec<_>>();
+    if output.is_empty() { Ok(None) } else { Ok(Some(Bytes::from(output))) }
+}
+
+fn finish(&mut self) -> Result<Option<Bytes>, ComputeError> {
+    let inner = self.encoder.finish()
+        .map_err(|e| ComputeError::ExecutionFailed(format!("gzip finish: {}", e)))?;
+    Ok(Some(Bytes::from(inner)))
+}
+```
+
+```rust
+// ZipExtractSingleFn — extract one file by path
+fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let path = get_string_param(params, "path")?;
+    let reader = std::io::Cursor::new(&inputs[0]);
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("zip: {}", e)))?;
+    let mut file = archive.by_name(path)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("entry '{}': {}", path, e)))?;
+    let mut buf = Vec::with_capacity(file.size() as usize);
+    std::io::Read::read_to_end(&mut file, &mut buf)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("read: {}", e)))?;
+    Ok(Bytes::from(buf))
+}
+```
+
+#### 3.4.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| Empty tar (no entries) | Valid tar with only EOF blocks |
+| Tar with long filenames (>100 chars) | GNU/PAX extended headers |
+| Tar with symlinks | Metadata preserved in manifest; symlink target in JSON |
+| Zip with password-protected entries | `ExecutionFailed("encrypted entries not supported")` |
+| Zip64 (>4 GB entries) | Supported by `zip` crate |
+| Gzip with multiple members | All members decompressed sequentially |
+| Corrupt archive header | `ExecutionFailed` with format-specific error |
+| 7z with solid compression | Supported by `sevenz-rust` |
+| Rar v5 vs v4 | Only v5 supported; v4 → `ExecutionFailed` |
+| Tar append to non-tar input | `ExecutionFailed("not a valid tar archive")` |
+| Compression level out of range | `InvalidParam("level must be 1..9")` |
+
+#### 3.4.4 Test Strategy
+
+- Tar create/extract roundtrip: verify file contents and metadata
+- Tar streaming: batch and streaming produce identical archives
+- Tar.gz pipeline: `TarGzCreate → TarGzExtract` roundtrip
+- Zip create/extract roundtrip with all compression methods
+- Zip single-entry extraction: verify correct file, others untouched
+- Gzip/bzip2/xz/zstd-frame: compress → decompress roundtrip
+- Whole-stream vs per-chunk compression ratio comparison
+- 7z and rar extraction of known test archives
+- Tar append: verify original entries preserved + new entry added
 
 ### 3.5 Category E: Image Formats — PNG, JPEG, WebP, TIFF, SVG, GIF (18 functions, #283–#300)
 
@@ -298,15 +736,120 @@ TODO — tar create/extract roundtrip, tar.gz pipeline composition, zip random a
 
 #### 3.5.1 Function List
 
-TODO — table of 18 functions: ImageMetadata (Both), ImageResize, ImageCrop, ImageRotate, ImageConvert, ImageThumbnail, ImageStripMetadata (Both), ImageToGrayscale, ImageWatermark, ImageHash, PngOptimize, JpegOptimize, SvgMinify, SvgToPng, TiffSplit, TiffMerge, GifExtractFrames, ImageDetectFormat (Both)
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 283 | ImageMetadataFn | `image_metadata@1.0.0` | Both | — | JSON (dimensions, format, color type, EXIF) |
+| 284 | ImageResizeFn | `image_resize@1.0.0` | Batch | `width`, `height`, `filter` (`nearest`/`bilinear`/`lanczos3`) | Image bytes (same format) |
+| 285 | ImageCropFn | `image_crop@1.0.0` | Batch | `x`, `y`, `width`, `height` | Image bytes (same format) |
+| 286 | ImageRotateFn | `image_rotate@1.0.0` | Batch | `degrees` (`90`/`180`/`270`) | Image bytes (same format) |
+| 287 | ImageConvertFn | `image_convert@1.0.0` | Batch | `format` (`png`/`jpeg`/`webp`/`tiff`/`gif`/`bmp`) | Image bytes (target format) |
+| 288 | ImageThumbnailFn | `image_thumbnail@1.0.0` | Batch | `max_dimension` (default `"128"`) | PNG bytes |
+| 289 | ImageStripMetadataFn | `image_strip_metadata@1.0.0` | Both | — | Image bytes (EXIF/XMP removed) |
+| 290 | ImageToGrayscaleFn | `image_to_grayscale@1.0.0` | Batch | — | Image bytes (grayscale, same format) |
+| 291 | ImageWatermarkFn | `image_watermark@1.0.0` | Batch | `position` (`center`/`bottom-right`/`tile`) | Image bytes (watermarked) |
+| 292 | ImageHashFn | `image_hash@1.0.0` | Batch | `algorithm` (`phash`/`dhash`/`ahash`) | Hex string (perceptual hash) |
+| 293 | PngOptimizeFn | `png_optimize@1.0.0` | Batch | — | PNG bytes (re-encoded, smaller) |
+| 294 | JpegOptimizeFn | `jpeg_optimize@1.0.0` | Batch | `quality` (1–100, default `"85"`) | JPEG bytes (re-encoded) |
+| 295 | SvgMinifyFn | `svg_minify@1.0.0` | Batch | — | SVG bytes (whitespace/comments removed) |
+| 296 | SvgToPngFn | `svg_to_png@1.0.0` | Batch | `width`, `height` | PNG bytes (rasterized) |
+| 297 | TiffSplitFn | `tiff_split@1.0.0` | Batch | — | JSON manifest (one CAddr per page) |
+| 298 | TiffMergeFn | `tiff_merge@1.0.0` | Batch | — | Multi-page TIFF bytes |
+| 299 | GifExtractFramesFn | `gif_extract_frames@1.0.0` | Batch | — | JSON manifest (one CAddr per frame) |
+| 300 | ImageDetectFormatFn | `image_detect_format@1.0.0` | Both | — | JSON (`{"format":"png","mime":"image/png"}`) |
 
 #### 3.5.2 Design Notes
 
-TODO — most ops require full decode to pixel buffer; metadata extraction reads only header → streaming; perceptual hash (pHash/dHash) for near-duplicate detection
+Most image operations require decoding to a full pixel buffer →
+batch-only. The `image` crate provides `DynamicImage` as the
+universal in-memory representation.
 
-#### 3.5.3 Test Strategy
+**Streaming-capable functions** read only headers:
+- `ImageMetadataFn`: reads dimensions and color type from format
+  header without decoding pixels. EXIF from JPEG APP1 marker.
+- `ImageStripMetadataFn`: for JPEG, strips APP1/APP13 markers
+  without re-encoding pixels. For PNG, removes tEXt/iTXt chunks.
+- `ImageDetectFormatFn`: magic byte detection (first 8 bytes).
 
-TODO — resize correctness (dimensions), format conversion roundtrip, metadata strip verification, thumbnail quality, SVG rasterization
+**ImageWatermarkFn** (#291) takes 2 inputs: input 0 = base image,
+input 1 = watermark image (typically PNG with transparency).
+
+**Perceptual hashing** (`ImageHashFn`, #292) produces a compact
+fingerprint for near-duplicate detection:
+- `phash`: DCT-based, robust to resize/compression
+- `dhash`: gradient-based, fast
+- `ahash`: average-based, simplest
+
+Output is a hex string. Hamming distance between two hashes indicates
+visual similarity (0 = identical, <10 = near-duplicate).
+
+**SVG rasterization** (`SvgToPngFn`) uses `resvg` for high-quality
+rendering with CSS/font support. Width/height params control output
+resolution.
+
+**Multi-output functions** (`TiffSplitFn`, `GifExtractFramesFn`)
+produce a JSON manifest referencing individual CAS-stored frames/pages.
+Each frame is stored as a separate CAS value; the manifest maps
+indices to CAddrs.
+
+```rust
+// ImageResizeFn
+fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let width: u32 = get_string_param(params, "width")?.parse()
+        .map_err(|_| ComputeError::InvalidParam("width must be positive integer".into()))?;
+    let height: u32 = get_string_param(params, "height")?.parse()
+        .map_err(|_| ComputeError::InvalidParam("height must be positive integer".into()))?;
+    let filter_name = match params.get("filter") {
+        Some(Value::String(s)) => s.as_str(),
+        None => "lanczos3",
+        _ => return Err(ComputeError::InvalidParam("filter must be string".into())),
+    };
+    let filter = match filter_name {
+        "nearest" => image::imageops::FilterType::Nearest,
+        "bilinear" => image::imageops::FilterType::Triangle,
+        "lanczos3" => image::imageops::FilterType::Lanczos3,
+        _ => return Err(ComputeError::InvalidParam("filter: nearest|bilinear|lanczos3".into())),
+    };
+    let img = image::load_from_memory(&inputs[0])
+        .map_err(|e| ComputeError::ExecutionFailed(format!("image decode: {}", e)))?;
+    let resized = img.resize_exact(width, height, filter);
+    let fmt = image::guess_format(&inputs[0])
+        .map_err(|e| ComputeError::ExecutionFailed(format!("format detect: {}", e)))?;
+    let mut buf = Vec::new();
+    resized.write_to(&mut std::io::Cursor::new(&mut buf), fmt)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("image encode: {}", e)))?;
+    Ok(Bytes::from(buf))
+}
+```
+
+#### 3.5.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| Resize to 0×0 | `InvalidParam("dimensions must be > 0")` |
+| Crop region outside image bounds | `ExecutionFailed("crop region out of bounds")` |
+| Rotate by non-90° increment | `InvalidParam("degrees must be 90, 180, or 270")` |
+| Convert animated GIF to PNG | First frame only |
+| JPEG quality 0 or >100 | `InvalidParam("quality must be 1..100")` |
+| SVG with external references | Ignored (no network access) |
+| Corrupt image header | `ExecutionFailed("image decode: ...")` |
+| TIFF with single page → split | Manifest with one entry |
+| Watermark larger than base image | Scaled down to fit |
+| 16-bit TIFF | Supported; converted to 8-bit for formats that require it |
+
+#### 3.5.4 Test Strategy
+
+- Resize: verify output dimensions match requested width×height
+- Crop: verify output dimensions and pixel content at boundaries
+- Rotate 90°→180°→270°→360° = identity
+- Format conversion roundtrip: PNG→JPEG→PNG (lossy, verify dimensions)
+- Thumbnail: verify max dimension constraint
+- Strip metadata: verify EXIF absent in output, pixels unchanged
+- Grayscale: verify single-channel output
+- Perceptual hash: identical images → same hash; resized → similar hash
+- PNG/JPEG optimize: output ≤ input size, valid image
+- SVG→PNG: verify rasterized dimensions
+- TIFF split/merge roundtrip: page count preserved
+- GIF frame extraction: frame count matches
 
 ### 3.6 Category F: Audio & Video Formats — MP3, WAV, FLAC, MP4, MKV (16 functions, #301–#316)
 
@@ -316,15 +859,107 @@ TODO — resize correctness (dimensions), format conversion roundtrip, metadata 
 
 #### 3.6.1 Function List
 
-TODO — table of 16 functions: AudioMetadata (Both), AudioConvert, AudioTrim, AudioNormalize, AudioWaveform, AudioSilenceDetect, AudioStripMetadata, VideoMetadata (Both), VideoThumbnail, VideoExtractAudio, VideoStripAudio, VideoResolution, SubtitleExtract, WavToRawPcm (Both), RawPcmToWav (Both), MediaDetectFormat (Both)
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 301 | AudioMetadataFn | `audio_metadata@1.0.0` | Both | — | JSON (duration, sample rate, channels, codec, tags) |
+| 302 | AudioConvertFn | `audio_convert@1.0.0` | Batch | `format` (`wav`/`flac`/`mp3`/`ogg`) | Audio bytes (target format) |
+| 303 | AudioTrimFn | `audio_trim@1.0.0` | Batch | `start_ms`, `end_ms` | Audio bytes (trimmed) |
+| 304 | AudioNormalizeFn | `audio_normalize@1.0.0` | Batch | `target_db` (default `"-3"`) | Audio bytes (peak-normalized) |
+| 305 | AudioWaveformFn | `audio_waveform@1.0.0` | Batch | `width`, `height` | PNG bytes (waveform visualization) |
+| 306 | AudioSilenceDetectFn | `audio_silence_detect@1.0.0` | Batch | `threshold_db` (default `"-40"`), `min_duration_ms` (default `"500"`) | JSON array of `{start_ms, end_ms}` |
+| 307 | AudioStripMetadataFn | `audio_strip_metadata@1.0.0` | Batch | — | Audio bytes (ID3/Vorbis tags removed) |
+| 308 | VideoMetadataFn | `video_metadata@1.0.0` | Both | — | JSON (duration, resolution, fps, codecs, streams) |
+| 309 | VideoThumbnailFn | `video_thumbnail@1.0.0` | Batch | `time_ms` (default `"0"`) | PNG bytes (single frame) |
+| 310 | VideoExtractAudioFn | `video_extract_audio@1.0.0` | Batch | `format` (`wav`/`mp3`/`flac`) | Audio bytes |
+| 311 | VideoStripAudioFn | `video_strip_audio@1.0.0` | Batch | — | Video bytes (audio track removed) |
+| 312 | VideoResolutionFn | `video_resolution@1.0.0` | Batch | `width`, `height` | Video bytes (rescaled) |
+| 313 | SubtitleExtractFn | `subtitle_extract@1.0.0` | Batch | `track` (default `"0"`) | SRT/VTT text |
+| 314 | WavToRawPcmFn | `wav_to_raw_pcm@1.0.0` | Both | — | Raw PCM bytes + JSON header |
+| 315 | RawPcmToWavFn | `raw_pcm_to_wav@1.0.0` | Both | `sample_rate`, `channels`, `bits_per_sample` | WAV bytes |
+| 316 | MediaDetectFormatFn | `media_detect_format@1.0.0` | Both | — | JSON (`{"format":"mp4","mime":"video/mp4","streams":[...]}`) |
 
 #### 3.6.2 Design Notes
 
-TODO — media files are largest objects in storage; metadata extraction is header-only; transcoding requires full decode; WAV↔PCM is streaming (byte stream)
+Media files are among the largest objects in storage. Most operations
+require full decode → batch-only. The `symphonia` crate provides
+pure-Rust demuxing and decoding for MP3, FLAC, WAV, OGG, AAC, and
+MP4/MKV container parsing.
 
-#### 3.6.3 Test Strategy
+**Streaming-capable functions** read only container headers:
+- `AudioMetadataFn`: reads codec info, duration, tags from header
+- `VideoMetadataFn`: reads moov atom (MP4) or segment info (MKV)
+- `MediaDetectFormatFn`: magic byte detection + container probe
+- `WavToRawPcmFn`: strips 44-byte WAV header, streams PCM data
+- `RawPcmToWavFn`: prepends WAV header, streams PCM data
 
-TODO — metadata extraction accuracy, WAV/PCM roundtrip, audio trim boundaries, silence detection thresholds
+**WAV↔PCM** is the only true streaming audio operation. WAV has a
+fixed 44-byte header (for standard PCM), so stripping/prepending it
+is trivial. `WavToRawPcmFn` output is 2 parts: first chunk = JSON
+header (`{"sample_rate":44100,"channels":2,"bits_per_sample":16}`),
+remaining chunks = raw PCM bytes.
+
+**Video operations** (#309–#313) require `ffmpeg-sys-next` behind an
+optional feature flag `format-media-ffmpeg`. Without it, only
+container-level metadata extraction is available via `symphonia`.
+
+**AudioWaveformFn** (#305) decodes audio to PCM, downsamples to
+`width` samples, computes min/max per sample, and renders a PNG
+waveform using the `image` crate (cross-dependency with Category E).
+
+**AudioNormalizeFn** (#304) performs peak normalization: finds the
+maximum absolute sample value, then scales all samples so the peak
+reaches `target_db` relative to 0 dBFS.
+
+```rust
+// AudioMetadataFn (streaming — header only)
+fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let cursor = std::io::Cursor::new(&inputs[0]);
+    let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
+    let probed = symphonia::default::get_probe()
+        .format(&Default::default(), mss, &Default::default(), &Default::default())
+        .map_err(|e| ComputeError::ExecutionFailed(format!("probe: {}", e)))?;
+    let format = probed.format;
+    let track = format.default_track()
+        .ok_or_else(|| ComputeError::ExecutionFailed("no audio track".into()))?;
+    let codec = track.codec_params.codec.to_string();
+    let sample_rate = track.codec_params.sample_rate.unwrap_or(0);
+    let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(0);
+    let duration_ms = track.codec_params.n_frames
+        .map(|n| n * 1000 / sample_rate.max(1) as u64);
+    let meta = serde_json::json!({
+        "codec": codec, "sample_rate": sample_rate,
+        "channels": channels, "duration_ms": duration_ms,
+    });
+    Ok(Bytes::from(serde_json::to_string_pretty(&meta).unwrap()))
+}
+```
+
+#### 3.6.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| Trim start > end | `InvalidParam("start_ms must be < end_ms")` |
+| Trim beyond duration | Clamp to actual duration |
+| Normalize silent audio (all zeros) | Return unchanged (avoid division by zero) |
+| Silence detect on empty audio | Empty JSON array `"[]"` |
+| Video without audio track → extract audio | `ExecutionFailed("no audio track")` |
+| Video without subtitle track | `ExecutionFailed("no subtitle track at index N")` |
+| Corrupt container header | `ExecutionFailed("probe: ...")` |
+| WAV with non-PCM encoding (e.g., ADPCM) | `ExecutionFailed("only PCM WAV supported")` |
+| Raw PCM with wrong params | Produces valid but incorrect WAV (garbage audio) |
+| MP4 with fragmented moov (fMP4) | Supported by symphonia |
+
+#### 3.6.4 Test Strategy
+
+- Audio metadata: verify duration, sample rate, channels for known files
+- WAV↔PCM roundtrip: `WavToRawPcm → RawPcmToWav` preserves audio data
+- Audio trim: verify output duration matches `end_ms - start_ms`
+- Silence detection: known file with silence gaps → correct intervals
+- Normalize: verify peak sample reaches target dB
+- Video metadata: verify resolution, fps, codec for known MP4
+- Video thumbnail: verify output is valid PNG with correct dimensions
+- Media format detection: MP3, WAV, FLAC, MP4, MKV all correctly identified
+- Streaming parity for metadata and WAV/PCM functions
 
 ### 3.7 Category G: Document Formats — PDF, DOCX, XLSX, HTML, Markdown (23 functions, #317–#339)
 
@@ -334,15 +969,143 @@ TODO — metadata extraction accuracy, WAV/PCM roundtrip, audio trim boundaries,
 
 #### 3.7.1 Function List
 
-TODO — table of 23 functions: PdfMetadata, PdfExtractText, PdfExtractImages, PdfMerge, PdfSplit, PdfPageCount, PdfToText, DocxExtractText, DocxMetadata, XlsxRead, XlsxSheetList, XlsxToCsv, PptxExtractText, PptxSlideCount, HtmlToText (Both), HtmlExtractLinks, HtmlExtractImages, HtmlMinify (Both), MarkdownToHtml, HtmlToMarkdown, LatexToText, EpubExtractText, EpubMetadata
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 317 | PdfMetadataFn | `pdf_metadata@1.0.0` | Batch | — | JSON (title, author, pages, producer, creation date) |
+| 318 | PdfExtractTextFn | `pdf_extract_text@1.0.0` | Batch | `pages` (optional, e.g. `"1-5,8"`) | UTF-8 text |
+| 319 | PdfExtractImagesFn | `pdf_extract_images@1.0.0` | Batch | — | JSON manifest (CAddr per image) |
+| 320 | PdfMergeFn | `pdf_merge@1.0.0` | Batch | — | PDF bytes (merged) |
+| 321 | PdfSplitFn | `pdf_split@1.0.0` | Batch | `pages` (e.g. `"1-3"`, `"5"`) | PDF bytes (subset pages) |
+| 322 | PdfPageCountFn | `pdf_page_count@1.0.0` | Batch | — | JSON (`{"pages": N}`) |
+| 323 | PdfToTextFn | `pdf_to_text@1.0.0` | Batch | — | UTF-8 text (all pages) |
+| 324 | DocxExtractTextFn | `docx_extract_text@1.0.0` | Batch | — | UTF-8 text |
+| 325 | DocxMetadataFn | `docx_metadata@1.0.0` | Batch | — | JSON (title, author, word count, revision) |
+| 326 | XlsxReadFn | `xlsx_read@1.0.0` | Batch | `sheet` (name or index, default `"0"`) | CSV bytes |
+| 327 | XlsxSheetListFn | `xlsx_sheet_list@1.0.0` | Batch | — | JSON array of sheet names |
+| 328 | XlsxToCsvFn | `xlsx_to_csv@1.0.0` | Batch | `sheet` | CSV bytes |
+| 329 | PptxExtractTextFn | `pptx_extract_text@1.0.0` | Batch | — | UTF-8 text |
+| 330 | PptxSlideCountFn | `pptx_slide_count@1.0.0` | Batch | — | JSON (`{"slides": N}`) |
+| 331 | HtmlToTextFn | `html_to_text@1.0.0` | Both | — | UTF-8 text (tags stripped) |
+| 332 | HtmlExtractLinksFn | `html_extract_links@1.0.0` | Batch | — | JSON array of URLs |
+| 333 | HtmlExtractImagesFn | `html_extract_images@1.0.0` | Batch | — | JSON array of image URLs |
+| 334 | HtmlMinifyFn | `html_minify@1.0.0` | Both | — | HTML bytes (whitespace collapsed) |
+| 335 | MarkdownToHtmlFn | `markdown_to_html@1.0.0` | Batch | `extensions` (`tables`/`strikethrough`/`all`, default `"all"`) | HTML bytes |
+| 336 | HtmlToMarkdownFn | `html_to_markdown@1.0.0` | Batch | — | Markdown bytes |
+| 337 | LatexToTextFn | `latex_to_text@1.0.0` | Batch | — | UTF-8 text (commands stripped) |
+| 338 | EpubExtractTextFn | `epub_extract_text@1.0.0` | Batch | — | UTF-8 text |
+| 339 | EpubMetadataFn | `epub_metadata@1.0.0` | Batch | — | JSON (title, author, language, chapters) |
 
 #### 3.7.2 Design Notes
 
-TODO — PDF has page tree (random access); DOCX/XLSX/PPTX are ZIP-based (batch); HTML tag-aware chunking enables streaming
+**PDF** has a page tree with cross-reference table → random access
+required. `lopdf` provides low-level PDF object manipulation.
+Text extraction iterates content streams per page, decoding font
+encodings. Image extraction identifies XObject streams of type Image.
 
-#### 3.7.3 Test Strategy
+**DOCX/PPTX/XLSX** are ZIP archives containing XML files. Processing
+requires: unzip → parse XML → extract content. All batch-only because
+ZIP requires central directory.
 
-TODO — PDF text extraction accuracy, XLSX cell value roundtrip, HTML→text vs Markdown→HTML, multi-page TIFF/PDF split/merge
+- DOCX: `word/document.xml` contains paragraphs and runs
+- PPTX: `ppt/slides/slideN.xml` contains text frames
+- XLSX: `xl/worksheets/sheetN.xml` contains cell data; `xl/sharedStrings.xml` for string table
+
+`calamine` handles XLSX/XLS/ODS reading with a unified API.
+
+**HTML** operations split into streaming and batch:
+- `HtmlToTextFn` (streaming): tag-aware stripping can process
+  chunks incrementally, maintaining a simple state machine for
+  open/close tags
+- `HtmlMinifyFn` (streaming): whitespace collapsing is local
+- `HtmlExtractLinksFn` (batch): needs full DOM for `<a href>` collection
+- `HtmlExtractImagesFn` (batch): needs full DOM for `<img src>`
+
+**Markdown** uses `comrak` (GFM-compatible) for Markdown→HTML with
+extensions (tables, strikethrough, autolinks, task lists).
+`pulldown-cmark` is an alternative for simpler cases.
+
+**PdfMergeFn** (#320) takes N inputs (one PDF per input) and produces
+a single merged PDF. Page trees are concatenated.
+
+**PdfSplitFn** (#321) extracts a page range from a single PDF. The
+`pages` param supports ranges (`"1-5"`), individual pages (`"3"`),
+and comma-separated combinations (`"1-3,7,10-12"`).
+
+```rust
+// HtmlToTextFn — strip tags, extract text
+fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let html = std::str::from_utf8(&inputs[0])
+        .map_err(|_| ComputeError::ExecutionFailed("requires UTF-8".into()))?;
+    let document = scraper::Html::parse_document(html);
+    let text: String = document.root_element()
+        .text()
+        .collect::<Vec<_>>()
+        .join(" ");
+    Ok(Bytes::from(text.trim().to_string()))
+}
+```
+
+```rust
+// XlsxToCsvFn — read sheet, emit CSV
+fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let sheet_param = match params.get("sheet") {
+        Some(Value::String(s)) => s.as_str(),
+        None => "0",
+        _ => return Err(ComputeError::InvalidParam("sheet must be string".into())),
+    };
+    let cursor = std::io::Cursor::new(&inputs[0]);
+    let mut workbook = calamine::open_workbook_auto_from_rs(cursor)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("xlsx: {}", e)))?;
+    let sheet_name = if let Ok(idx) = sheet_param.parse::<usize>() {
+        workbook.sheet_names().get(idx)
+            .ok_or_else(|| ComputeError::InvalidParam(format!("sheet index {} out of range", idx)))?
+            .clone()
+    } else {
+        sheet_param.to_string()
+    };
+    let range = workbook.worksheet_range(&sheet_name)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("sheet '{}': {}", sheet_name, e)))?;
+    let mut wtr = csv::Writer::from_writer(Vec::new());
+    for row in range.rows() {
+        let record: Vec<String> = row.iter().map(|c| c.to_string()).collect();
+        wtr.write_record(&record)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("csv: {}", e)))?;
+    }
+    Ok(Bytes::from(wtr.into_inner().map_err(|e| ComputeError::ExecutionFailed(format!("csv: {}", e)))?))
+}
+```
+
+#### 3.7.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| PDF with no text (scanned image) | Empty text output (no OCR) |
+| PDF with encrypted content | `ExecutionFailed("encrypted PDF not supported")` |
+| PDF page range out of bounds | Clamp to actual page count |
+| PDF merge with different page sizes | Preserved (no normalization) |
+| DOCX with tracked changes | Extracts accepted text only |
+| XLSX with formulas | Returns computed values (not formulas) |
+| XLSX with merged cells | Value in top-left cell, others empty |
+| XLSX sheet not found | `InvalidParam("sheet 'X' not found")` |
+| HTML with `<script>`/`<style>` | Content excluded from text extraction |
+| HTML with entities (`&amp;`) | Decoded to characters |
+| Markdown with raw HTML blocks | Passed through to HTML output |
+| EPUB with DRM | `ExecutionFailed("DRM-protected EPUB not supported")` |
+| LaTeX with custom macros | Unknown macros stripped, arguments preserved |
+
+#### 3.7.4 Test Strategy
+
+- PDF text extraction: known PDF → expected text content
+- PDF merge: 2 PDFs → combined page count
+- PDF split: extract pages 2–3 from 5-page PDF → 2 pages
+- DOCX text extraction: known DOCX → expected paragraphs
+- XLSX→CSV: verify cell values, sheet selection by name and index
+- XLSX sheet list: verify all sheet names returned
+- HTML→text: verify tags stripped, entities decoded, script/style excluded
+- HTML minify: verify whitespace reduced, structure preserved
+- Markdown→HTML→Markdown: approximate roundtrip (formatting may differ)
+- HTML link/image extraction: verify all URLs collected
+- Streaming parity for HtmlToText and HtmlMinify
 
 ### 3.8 Category H: Configuration & Schema Formats — YAML, TOML, INI, HCL (16 functions, #340–#355)
 

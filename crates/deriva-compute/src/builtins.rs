@@ -187,6 +187,60 @@ impl ComputeFunction for Base64DecodeFn {
     }
 }
 
+pub struct HexEncodeFn;
+
+impl ComputeFunction for HexEncodeFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("hex_encode", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let hex: String = inputs[0].iter().map(|b| format!("{:02x}", b)).collect();
+        Ok(Bytes::from(hex))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: 1, memory_bytes: size * 2 }
+    }
+}
+
+pub struct HexDecodeFn;
+
+impl ComputeFunction for HexDecodeFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("hex_decode", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let input = &inputs[0];
+        if input.len() % 2 != 0 {
+            return Err(ComputeError::ExecutionFailed("hex input must have even length".into()));
+        }
+        let bytes: Result<Vec<u8>, _> = (0..input.len())
+            .step_by(2)
+            .map(|i| {
+                let s = std::str::from_utf8(&input[i..i + 2])
+                    .map_err(|_| ComputeError::ExecutionFailed("invalid hex".into()))?;
+                u8::from_str_radix(s, 16)
+                    .map_err(|_| ComputeError::ExecutionFailed(format!("invalid hex byte: {}", s)))
+            })
+            .collect();
+        Ok(Bytes::from(bytes?))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: 1, memory_bytes: size / 2 + 1 }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -197,4 +251,6 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(ReverseFn));
     registry.register(Arc::new(Base64EncodeFn));
     registry.register(Arc::new(Base64DecodeFn));
+    registry.register(Arc::new(HexEncodeFn));
+    registry.register(Arc::new(HexDecodeFn));
 }

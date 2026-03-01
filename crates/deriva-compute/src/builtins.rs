@@ -164,6 +164,29 @@ impl ComputeFunction for Base64EncodeFn {
     }
 }
 
+pub struct Base64DecodeFn;
+
+impl ComputeFunction for Base64DecodeFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("base64_decode", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.decode(&inputs[0])
+            .map(Bytes::from)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("invalid base64: {}", e)))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: 1, memory_bytes: size * 3 / 4 + 4 }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -173,4 +196,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(LowercaseFn));
     registry.register(Arc::new(ReverseFn));
     registry.register(Arc::new(Base64EncodeFn));
+    registry.register(Arc::new(Base64DecodeFn));
 }

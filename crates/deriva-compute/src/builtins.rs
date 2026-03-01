@@ -284,6 +284,30 @@ impl ComputeFunction for Base32DecodeFn {
     }
 }
 
+pub struct XorFn;
+
+impl ComputeFunction for XorFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("xor", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let key: u8 = match params.get("key") {
+            Some(Value::String(s)) => s.parse().map_err(|_| ComputeError::InvalidParam("key must be 0-255".into()))?,
+            _ => return Err(ComputeError::InvalidParam("missing param: key".into())),
+        };
+        Ok(Bytes::from(inputs[0].iter().map(|b| b ^ key).collect::<Vec<_>>()))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: 1, memory_bytes: size }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -298,4 +322,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(HexDecodeFn));
     registry.register(Arc::new(Base32EncodeFn));
     registry.register(Arc::new(Base32DecodeFn));
+    registry.register(Arc::new(XorFn));
 }

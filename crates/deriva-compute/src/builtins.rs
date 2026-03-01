@@ -740,4 +740,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(ZstdCompressFn));
     registry.register(Arc::new(ZstdDecompressFn));
     registry.register(Arc::new(Lz4CompressFn));
+    registry.register(Arc::new(Lz4DecompressFn));
 }

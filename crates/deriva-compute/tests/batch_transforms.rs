@@ -896,3 +896,41 @@ fn lz4_compress_large_roundtrip() {
     let decompressed = exec1(&Lz4DecompressFn, &compressed).unwrap();
     assert_eq!(decompressed.as_ref(), input.as_slice());
 }
+
+// ── #26 Lz4DecompressFn ──
+
+#[test]
+fn lz4_decompress_roundtrip() {
+    let input = b"decompress this lz4 data correctly";
+    let compressed = exec1(&Lz4CompressFn, input).unwrap();
+    let decompressed = exec1(&Lz4DecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input);
+}
+
+#[test]
+fn lz4_decompress_corrupt_data() {
+    let r = exec1(&Lz4DecompressFn, b"not lz4 data at all");
+    assert!(matches!(r, Err(ComputeError::ExecutionFailed(_))));
+}
+
+#[test]
+fn lz4_decompress_too_short() {
+    // Less than 4 bytes — can't even read size header
+    let r = exec1(&Lz4DecompressFn, &[0x01, 0x02]);
+    assert!(matches!(r, Err(ComputeError::ExecutionFailed(_))));
+}
+
+#[test]
+fn lz4_decompress_empty_payload() {
+    let compressed = exec1(&Lz4CompressFn, b"").unwrap();
+    let decompressed = exec1(&Lz4DecompressFn, &compressed).unwrap();
+    assert!(decompressed.is_empty());
+}
+
+#[test]
+fn lz4_decompress_binary_roundtrip() {
+    let input: Vec<u8> = (0..=255).cycle().take(8192).collect();
+    let compressed = exec1(&Lz4CompressFn, &input).unwrap();
+    let decompressed = exec1(&Lz4DecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input.as_slice());
+}

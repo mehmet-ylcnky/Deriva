@@ -582,6 +582,34 @@ impl ComputeFunction for CompressFn {
     }
 }
 
+// ── #22 DecompressFn (zlib) ──
+
+pub struct DecompressFn;
+
+impl ComputeFunction for DecompressFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("decompress", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        use flate2::read::ZlibDecoder;
+        use std::io::Read;
+        let mut decoder = ZlibDecoder::new(&inputs[0][..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("decompress: {}", e)))?;
+        Ok(Bytes::from(decompressed))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: size / 50_000 + 1, memory_bytes: size * 4 }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -605,4 +633,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(PadFn));
     registry.register(Arc::new(LineEndingFn));
     registry.register(Arc::new(CompressFn));
+    registry.register(Arc::new(DecompressFn));
 }

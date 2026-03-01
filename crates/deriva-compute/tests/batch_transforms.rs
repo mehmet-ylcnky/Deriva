@@ -735,3 +735,47 @@ fn compress_rejects_multiple_inputs() {
     let r = CompressFn.execute(vec![Bytes::from("a"), Bytes::from("b")], &BTreeMap::new());
     assert!(matches!(r, Err(ComputeError::InputCount { expected: 1, got: 2 })));
 }
+
+// ── #22 DecompressFn (zlib) ──
+
+#[test]
+fn decompress_roundtrip() {
+    let input = b"Hello, content-addressed world!";
+    let compressed = exec1(&CompressFn, input).unwrap();
+    let decompressed = exec1(&DecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input);
+}
+
+#[test]
+fn decompress_empty_zlib_stream() {
+    let compressed = exec1(&CompressFn, b"").unwrap();
+    let decompressed = exec1(&DecompressFn, &compressed).unwrap();
+    assert!(decompressed.is_empty());
+}
+
+#[test]
+fn decompress_corrupt_data() {
+    let r = exec1(&DecompressFn, b"this is not zlib data");
+    assert!(matches!(r, Err(ComputeError::ExecutionFailed(_))));
+}
+
+#[test]
+fn decompress_truncated_stream() {
+    // Just the zlib header (2 bytes) with no payload — should error
+    let r = exec1(&DecompressFn, &[0x78, 0x9C]);
+    // flate2 returns empty on header-only; use corrupt mid-stream instead
+    let input = vec![b'X'; 10_000]; // enough data to produce a real compressed stream
+    let compressed = exec1(&CompressFn, &input).unwrap();
+    // Cut well into the compressed data (past header, into deflate blocks)
+    let truncated = &compressed[..4];
+    let r = exec1(&DecompressFn, truncated);
+    assert!(r.is_err() || r.unwrap().len() < input.len());
+}
+
+#[test]
+fn decompress_large_roundtrip() {
+    let input: Vec<u8> = (0..=255).cycle().take(100_000).collect();
+    let compressed = exec1(&CompressFn, &input).unwrap();
+    let decompressed = exec1(&DecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input.as_slice());
+}

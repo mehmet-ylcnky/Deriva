@@ -552,6 +552,36 @@ impl ComputeFunction for LineEndingFn {
     }
 }
 
+// ── #21 CompressFn (zlib) ──
+
+pub struct CompressFn;
+
+impl ComputeFunction for CompressFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("compress", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&inputs[0])
+            .map_err(|e| ComputeError::ExecutionFailed(format!("compress: {}", e)))?;
+        let compressed = encoder.finish()
+            .map_err(|e| ComputeError::ExecutionFailed(format!("compress finish: {}", e)))?;
+        Ok(Bytes::from(compressed))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: size / 50_000 + 1, memory_bytes: size * 2 }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -574,4 +604,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(TrimFn));
     registry.register(Arc::new(PadFn));
     registry.register(Arc::new(LineEndingFn));
+    registry.register(Arc::new(CompressFn));
 }

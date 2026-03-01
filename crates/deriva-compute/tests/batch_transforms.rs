@@ -684,3 +684,54 @@ fn line_ending_invalid_target() {
     let r = exec1_params(&LineEndingFn, b"data", params(&[("target", "mac")]));
     assert!(matches!(r, Err(ComputeError::InvalidParam(_))));
 }
+
+// ── #21 CompressFn (zlib) ──
+
+#[test]
+fn compress_produces_valid_zlib() {
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+    let input = b"The quick brown fox jumps over the lazy dog";
+    let compressed = exec1(&CompressFn, input).unwrap();
+    let mut decoder = ZlibDecoder::new(&compressed[..]);
+    let mut out = Vec::new();
+    decoder.read_to_end(&mut out).unwrap();
+    assert_eq!(out, input);
+}
+
+#[test]
+fn compress_empty_input() {
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+    let compressed = exec1(&CompressFn, b"").unwrap();
+    assert!(!compressed.is_empty()); // valid zlib header
+    let mut decoder = ZlibDecoder::new(&compressed[..]);
+    let mut out = Vec::new();
+    decoder.read_to_end(&mut out).unwrap();
+    assert!(out.is_empty());
+}
+
+#[test]
+fn compress_reduces_repetitive_data() {
+    let input = vec![b'A'; 10_000];
+    let compressed = exec1(&CompressFn, &input).unwrap();
+    assert!(compressed.len() < input.len() / 10);
+}
+
+#[test]
+fn compress_binary_data() {
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+    let input: Vec<u8> = (0..=255).cycle().take(4096).collect();
+    let compressed = exec1(&CompressFn, &input).unwrap();
+    let mut decoder = ZlibDecoder::new(&compressed[..]);
+    let mut out = Vec::new();
+    decoder.read_to_end(&mut out).unwrap();
+    assert_eq!(out, input);
+}
+
+#[test]
+fn compress_rejects_multiple_inputs() {
+    let r = CompressFn.execute(vec![Bytes::from("a"), Bytes::from("b")], &BTreeMap::new());
+    assert!(matches!(r, Err(ComputeError::InputCount { expected: 1, got: 2 })));
+}

@@ -792,4 +792,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(Lz4CompressFn));
     registry.register(Arc::new(Lz4DecompressFn));
     registry.register(Arc::new(SnappyCompressFn));
+    registry.register(Arc::new(SnappyDecompressFn));
 }

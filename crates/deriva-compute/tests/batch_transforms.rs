@@ -973,3 +973,41 @@ fn snappy_compress_rejects_multiple_inputs() {
     let r = SnappyCompressFn.execute(vec![Bytes::from("a"), Bytes::from("b")], &BTreeMap::new());
     assert!(matches!(r, Err(ComputeError::InputCount { expected: 1, got: 2 })));
 }
+
+// ── #28 SnappyDecompressFn ──
+
+#[test]
+fn snappy_decompress_roundtrip() {
+    let input = b"verify snappy decompression works";
+    let compressed = exec1(&SnappyCompressFn, input).unwrap();
+    let decompressed = exec1(&SnappyDecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input);
+}
+
+#[test]
+fn snappy_decompress_corrupt_data() {
+    let r = exec1(&SnappyDecompressFn, b"definitely not snappy");
+    assert!(matches!(r, Err(ComputeError::ExecutionFailed(_))));
+}
+
+#[test]
+fn snappy_decompress_empty_payload() {
+    let compressed = exec1(&SnappyCompressFn, b"").unwrap();
+    let decompressed = exec1(&SnappyDecompressFn, &compressed).unwrap();
+    assert!(decompressed.is_empty());
+}
+
+#[test]
+fn snappy_decompress_truncated() {
+    let compressed = exec1(&SnappyCompressFn, &vec![b'A'; 1000]).unwrap();
+    let r = exec1(&SnappyDecompressFn, &compressed[..3]);
+    assert!(matches!(r, Err(ComputeError::ExecutionFailed(_))));
+}
+
+#[test]
+fn snappy_decompress_large_roundtrip() {
+    let input: Vec<u8> = (0..=255).cycle().take(100_000).collect();
+    let compressed = exec1(&SnappyCompressFn, &input).unwrap();
+    let decompressed = exec1(&SnappyDecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input.as_slice());
+}

@@ -1868,15 +1868,125 @@ fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Resul
 
 #### 3.14.1 Function List
 
-TODO — table of 12 functions: TfRecordRead (Both), TfRecordWrite (Both), SafeTensorsRead, SafeTensorsMetadata, SafeTensorsWrite, OnnxMetadata, OnnxValidate, GgufMetadata, PickleToJson, NumpyToSafeTensors, TfRecordToParquet, ImageToTensor
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 421 | TfRecordReadFn | `tfrecord_read@1.0.0` | Both | `max_records` (optional) | NDJSON (one `tf.train.Example` per line) |
+| 422 | TfRecordWriteFn | `tfrecord_write@1.0.0` | Both | — | TFRecord bytes |
+| 423 | SafeTensorsReadFn | `safetensors_read@1.0.0` | Batch | `tensor` (name, optional — all if omitted) | Raw tensor bytes (flat, little-endian) |
+| 424 | SafeTensorsMetadataFn | `safetensors_metadata@1.0.0` | Batch | — | JSON (`{"tensors":{"name":{"dtype":"F32","shape":[3,4],"offset":[0,48]},...},"metadata":{...}}`) |
+| 425 | SafeTensorsWriteFn | `safetensors_write@1.0.0` | Batch | `name`, `dtype` (`F16`/`BF16`/`F32`/`F64`/`I8`/`I32`/`I64`/`U8`), `shape` (comma-separated dims) | SafeTensors bytes |
+| 426 | OnnxMetadataFn | `onnx_metadata@1.0.0` | Batch | — | JSON (opset, inputs, outputs, nodes count, producer) |
+| 427 | OnnxValidateFn | `onnx_validate@1.0.0` | Batch | — | Pass-through or error (shape/type consistency) |
+| 428 | GgufMetadataFn | `gguf_metadata@1.0.0` | Batch | — | JSON (architecture, quant type, context length, tensor count, file size) |
+| 429 | PickleToJsonFn | `pickle_to_json@1.0.0` | Batch | `max_depth` (default `"10"`) | JSON |
+| 430 | NumpyToSafeTensorsFn | `numpy_to_safetensors@1.0.0` | Batch | `name` (tensor name, default `"tensor"`) | SafeTensors bytes |
+| 431 | TfRecordToParquetFn | `tfrecord_to_parquet@1.0.0` | Batch | — | Parquet bytes (features as columns) |
+| 432 | ImageToTensorFn | `image_to_tensor@1.0.0` | Batch | `width`, `height`, `channels` (`"1"`/`"3"`/`"4"`, default `"3"`), `dtype` (default `"F32"`), `normalize` (`"true"`/`"false"`, default `"true"`) | Raw tensor bytes (CHW layout, little-endian) |
 
 #### 3.14.2 Design Notes
 
-TODO — TFRecord has length-delimited records with CRC → streaming one Example per chunk; SafeTensors has header-based offset lookup → random access; GGUF metadata extraction for LLM model inspection
+**TFRecord** is TensorFlow's standard data format. Each record is:
+`<uint64 length><uint32 masked_crc_of_length><byte[length] data><uint32 masked_crc_of_data>`.
+Length-delimited with CRC → streaming natural (one `Example` per
+chunk). The `data` is a serialized `tf.train.Example` protobuf
+containing a `Features` map. `TfRecordReadFn` decodes each Example
+to JSON with feature types (`bytes_list`, `float_list`, `int64_list`).
 
-#### 3.14.3 Test Strategy
+```rust
+// TfRecordReadFn — streaming: emit one NDJSON line per record
+fn process_chunk(&mut self, chunk: Bytes) -> Result<Option<Bytes>, ComputeError> {
+    self.buffer.extend_from_slice(&chunk);
+    let mut lines = Vec::new();
+    while self.buffer.len() >= 12 {
+        let len = u64::from_le_bytes(self.buffer[0..8].try_into().unwrap()) as usize;
+        let total = 8 + 4 + len + 4; // length + crc + data + crc
+        if self.buffer.len() < total { break; }
+        let data = &self.buffer[12..12 + len];
+        verify_masked_crc(&self.buffer[0..8], &self.buffer[8..12])?;
+        verify_masked_crc(data, &self.buffer[12 + len..total])?;
+        let example = decode_tf_example(data)?;
+        lines.push(serde_json::to_string(&example).unwrap());
+        self.buffer.advance(total);
+    }
+    if lines.is_empty() { return Ok(None); }
+    Ok(Some(Bytes::from(lines.join("\n"))))
+}
+```
 
-TODO — TFRecord CRC verification, SafeTensors tensor read by name, ONNX shape inference validation, GGUF architecture detection
+**SafeTensors** is Hugging Face's safe tensor serialization format.
+File layout: `<u64 header_size><JSON header><tensor data>`. The JSON
+header maps tensor names to `{dtype, shape, data_offsets: [start, end]}`.
+Header-based offset lookup → random access → batch-only.
+No arbitrary code execution (unlike Pickle), making it safe to load
+untrusted models.
+
+`SafeTensorsWriteFn` takes raw tensor bytes as input and wraps them
+in the SafeTensors format. Multiple tensors require multiple pipeline
+stages (one per tensor) concatenated.
+
+**ONNX** (Open Neural Network Exchange) uses protobuf encoding.
+`OnnxMetadataFn` extracts the `ModelProto` header: opset version,
+input/output tensor shapes and types, node count, and producer info.
+`OnnxValidateFn` performs shape inference — verifying that all
+intermediate tensor shapes are consistent through the graph.
+
+**GGUF** (GPT-Generated Unified Format) is the standard format for
+quantized LLM models (llama.cpp). File starts with magic `GGUF`,
+followed by metadata key-value pairs and tensor info. Metadata
+includes architecture (`llama`/`mistral`/`phi`), quantization type
+(`Q4_0`/`Q5_K_M`/`Q8_0`), context length, and tensor count.
+`GgufMetadataFn` reads only the header — no need to load tensor data.
+
+**PickleToJsonFn** safely deserializes Python pickle format to JSON.
+Uses a restricted unpickler that rejects `__reduce__`, `__setstate__`,
+and other code-execution opcodes. Only data types are allowed:
+dict, list, tuple, str, int, float, bool, None. `max_depth` prevents
+stack overflow on deeply nested structures.
+
+**NumpyToSafeTensorsFn** converts `.npy` files (NumPy's native format)
+to SafeTensors. The `.npy` header contains dtype and shape; data
+follows in row-major order. Supported dtypes: float16/32/64,
+int8/32/64, uint8.
+
+**ImageToTensorFn** converts image bytes (PNG/JPEG/WebP) to a raw
+float tensor in CHW (Channel × Height × Width) layout — the standard
+input format for vision models. When `normalize` is true, pixel values
+are scaled from `[0, 255]` to `[0.0, 1.0]`.
+
+#### 3.14.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| TFRecord CRC mismatch | `ExecutionFailed("CRC mismatch at record N")` |
+| TFRecord truncated record | Streaming: buffer until complete; batch: error |
+| SafeTensors header > 100 MB | `ExecutionFailed("header too large")` |
+| SafeTensors tensor name not found | `ExecutionFailed("tensor 'X' not found")` |
+| SafeTensors overlapping offsets | `ExecutionFailed("invalid tensor offsets")` |
+| ONNX invalid protobuf | `ExecutionFailed("invalid ONNX model")` |
+| ONNX shape inference failure | `OnnxValidateFn` returns error with node name |
+| GGUF unsupported version | `ExecutionFailed("unsupported GGUF version N")` |
+| Pickle with code execution opcodes | `ExecutionFailed("unsafe pickle opcode: REDUCE")` |
+| NumPy fortran-order array | Transposed to C-order before conversion |
+| NumPy unsupported dtype (complex, object) | `ExecutionFailed("unsupported dtype: complex128")` |
+| ImageToTensor with CMYK image | Converted to RGB first |
+| ImageToTensor with alpha channel, channels=3 | Alpha dropped |
+| Empty TFRecord file | Empty output |
+
+#### 3.14.4 Test Strategy
+
+- TFRecord read/write roundtrip: features preserved through encode/decode
+- TFRecord CRC: valid records pass; corrupted CRC detected
+- TFRecord streaming parity: same output as batch
+- SafeTensors read/write roundtrip: tensor data and metadata preserved
+- SafeTensors metadata: verify dtype, shape, offsets for known file
+- SafeTensors single tensor extraction by name
+- ONNX metadata: verify opset, inputs, outputs for known model
+- ONNX validate: valid model passes; broken shape fails
+- GGUF metadata: verify architecture and quant type for known model
+- Pickle safe deserialization: data-only pickles succeed; code-execution pickles rejected
+- NumPy→SafeTensors: dtype and shape preserved
+- TFRecord→Parquet: features become columns with correct types
+- ImageToTensor: verify CHW layout, normalization, channel count
 
 ### 3.15 Category O: Network & Protocol Formats — PCAP, DNS, HAR, Email (8 functions, #433–#440)
 
@@ -1886,15 +1996,120 @@ TODO — TFRecord CRC verification, SafeTensors tensor read by name, ONNX shape 
 
 #### 3.15.1 Function List
 
-TODO — table of 8 functions: PcapRead (Both), PcapFilter (Both), PcapStatistics, DnsRecordParse (Both), HarParse, EmailParse, EmailExtractAttachments, MboxSplit (Both)
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 433 | PcapReadFn | `pcap_read@1.0.0` | Both | `max_packets` (optional) | NDJSON (one packet per line: timestamp, src/dst IP, protocol, length, payload hex) |
+| 434 | PcapFilterFn | `pcap_filter@1.0.0` | Both | `filter` (BPF expression, e.g. `"tcp port 80"`) | PCAP bytes (filtered subset) |
+| 435 | PcapStatisticsFn | `pcap_statistics@1.0.0` | Batch | — | JSON (packet count, duration, bytes, protocol breakdown, top talkers) |
+| 436 | DnsRecordParseFn | `dns_record_parse@1.0.0` | Both | — | NDJSON (one record per line: name, type, class, TTL, rdata) |
+| 437 | HarParseFn | `har_parse@1.0.0` | Batch | `summary` (`"true"`/`"false"`, default `"false"`) | JSON (entries with timing, status, URL) or summary stats |
+| 438 | EmailParseFn | `email_parse@1.0.0` | Batch | — | JSON (headers, body text, body html, attachment list) |
+| 439 | EmailExtractAttachmentsFn | `email_extract_attachments@1.0.0` | Batch | `index` (0-based, optional — all if omitted) | Raw attachment bytes (single) or tar archive (multiple) |
+| 440 | MboxSplitFn | `mbox_split@1.0.0` | Both | `max_messages` (optional) | NDJSON (one message per line: from, to, subject, date, size) |
 
 #### 3.15.2 Design Notes
 
-TODO — PCAP is sequential packet stream → streaming; BPF filter expression compiled once, applied per packet; email MIME parsing requires full message
+**PCAP** (Packet Capture) is the standard format from `tcpdump`/
+Wireshark. File starts with a global header (magic, version, snaplen,
+link type), followed by sequential packet records each with a
+per-packet header (timestamp, captured length, original length) and
+packet data. Sequential layout → streaming natural.
 
-#### 3.15.3 Test Strategy
+`PcapReadFn` decodes each packet's Ethernet/IP/TCP/UDP headers and
+emits one NDJSON line per packet. The streaming variant processes
+packets as they arrive.
 
-TODO — PCAP packet count, BPF filter correctness, DNS zone file parsing, email attachment extraction, mbox message splitting
+`PcapFilterFn` compiles a BPF (Berkeley Packet Filter) expression
+once, then applies it to each packet. Matching packets are written
+to a new PCAP file preserving the global header. BPF compilation
+uses `pcap-parser`'s filter support.
+
+```rust
+// PcapFilterFn — streaming
+fn init(&mut self, params: &BTreeMap<String, Value>) -> Result<(), ComputeError> {
+    let expr = get_string_param(params, "filter")?;
+    self.bpf = compile_bpf(&expr)
+        .map_err(|e| ComputeError::InvalidParam(format!("BPF: {}", e)))?;
+    self.header_emitted = false;
+    Ok(())
+}
+fn process_chunk(&mut self, chunk: Bytes) -> Result<Option<Bytes>, ComputeError> {
+    self.buffer.extend_from_slice(&chunk);
+    let mut out = Vec::new();
+    if !self.header_emitted {
+        if self.buffer.len() < 24 { return Ok(None); }
+        let global_header = self.buffer[..24].to_vec();
+        self.link_type = parse_link_type(&global_header)?;
+        out.extend_from_slice(&global_header);
+        self.buffer.advance(24);
+        self.header_emitted = true;
+    }
+    while let Some((pkt_header, pkt_data, rest)) = try_read_pcap_packet(&self.buffer)? {
+        if self.bpf.matches(&pkt_data, self.link_type) {
+            out.extend_from_slice(&pkt_header);
+            out.extend_from_slice(&pkt_data);
+        }
+        self.buffer = rest;
+    }
+    if out.is_empty() { return Ok(None); }
+    Ok(Some(Bytes::from(out)))
+}
+```
+
+**DNS zone files** are line-oriented text: each line is a resource
+record (`name TTL class type rdata`). Comments start with `;`.
+`$ORIGIN` and `$TTL` directives set defaults. Line-oriented →
+streaming natural. `DnsRecordParseFn` handles multi-line records
+(parenthesized continuations) and relative names.
+
+**HAR** (HTTP Archive) is a JSON format recording browser network
+activity. Contains `log.entries[]` with request/response details and
+timing. Since it's a single JSON object, it requires full parsing →
+batch. `summary` mode emits aggregate stats (total requests, total
+bytes, average response time, status code distribution).
+
+**Email** uses MIME (RFC 2045–2049) with nested multipart boundaries.
+Full message required for boundary resolution → batch.
+`EmailParseFn` extracts headers, text/html body parts, and lists
+attachments with filename, content-type, and size.
+`EmailExtractAttachmentsFn` returns raw bytes — single attachment
+by index, or all attachments packed as a tar archive.
+
+**Mbox** is a concatenation of email messages separated by `From `
+lines (with space after "From"). Line-oriented separator → streaming.
+`MboxSplitFn` emits metadata per message without parsing full MIME.
+
+#### 3.15.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| PCAP with pcapng format | `ExecutionFailed("pcapng not supported; use pcap format")` |
+| Invalid BPF expression | `InvalidParam("BPF: ...")` at init |
+| PCAP truncated packet (caplen < original) | Decoded with available bytes; payload truncated |
+| PCAP empty file (header only) | Empty NDJSON / empty PCAP output |
+| DNS zone with $INCLUDE | `ExecutionFailed("$INCLUDE not supported")` |
+| DNS multi-line record (parentheses) | Concatenated before parsing |
+| HAR with missing timing fields | Timing fields set to `-1` in output |
+| Email with nested multipart | Recursively parsed; all parts extracted |
+| Email with base64 attachment | Decoded transparently |
+| Email with charset other than UTF-8 | Converted to UTF-8 |
+| Mbox with "From " in message body | Escaped `>From ` handled correctly |
+| Mbox empty file | Empty output |
+
+#### 3.15.4 Test Strategy
+
+- PCAP read: verify packet count, IP addresses, protocol for known capture
+- PCAP filter: BPF `"tcp port 80"` filters correctly; non-matching packets excluded
+- PCAP statistics: verify protocol breakdown and byte counts
+- PCAP streaming parity: same packet output as batch
+- DNS parse: verify A, AAAA, MX, CNAME, TXT records from zone file
+- DNS multi-line records: parenthesized SOA parsed correctly
+- HAR parse: verify entry count, URLs, status codes
+- HAR summary: verify aggregate statistics
+- Email parse: verify headers, body, attachment list
+- Email extract: single attachment by index; all as tar
+- Mbox split: verify message count and metadata extraction
+- Mbox streaming parity: same message boundaries as batch
 
 ### 3.16 Category P: Bioinformatics Formats — FASTA, FASTQ, SAM/BAM, VCF, BED (12 functions, #441–#452)
 
@@ -1904,15 +2119,132 @@ TODO — PCAP packet count, BPF filter correctness, DNS zone file parsing, email
 
 #### 3.16.1 Function List
 
-TODO — table of 12 functions: FastaParse (Both), FastqParse (Both), FastqTrimQuality (Both), FastqFilter (Both), SamParse (Both), BamRead, BamToSam (Both), VcfParse (Both), VcfFilter (Both), BedParse (Both), GffParse (Both), FastaToFastq
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 441 | FastaParseFn | `fasta_parse@1.0.0` | Both | — | NDJSON (`{"id":"...","description":"...","sequence":"...","length":N}`) |
+| 442 | FastqParseFn | `fastq_parse@1.0.0` | Both | — | NDJSON (`{"id":"...","sequence":"...","quality":"...","length":N}`) |
+| 443 | FastqTrimQualityFn | `fastq_trim_quality@1.0.0` | Both | `min_quality` (Phred score, default `"20"`), `window` (default `"5"`) | FASTQ bytes (trimmed) |
+| 444 | FastqFilterFn | `fastq_filter@1.0.0` | Both | `min_length` (optional), `max_n_ratio` (optional, default `"0.1"`), `min_avg_quality` (optional) | FASTQ bytes (filtered subset) |
+| 445 | SamParseFn | `sam_parse@1.0.0` | Both | `header` (`"true"`/`"false"`, default `"false"`) | NDJSON (one alignment per line: qname, flag, rname, pos, mapq, cigar, seq, qual) |
+| 446 | BamReadFn | `bam_read@1.0.0` | Batch | `region` (optional, e.g. `"chr1:1000-2000"`) | NDJSON (same schema as SamParse) |
+| 447 | BamToSamFn | `bam_to_sam@1.0.0` | Both | — | SAM text bytes |
+| 448 | VcfParseFn | `vcf_parse@1.0.0` | Both | `header` (`"true"`/`"false"`, default `"false"`) | NDJSON (`{"chrom":"...","pos":N,"id":"...","ref":"...","alt":["..."],"qual":N,"filter":"...","info":{...}}`) |
+| 449 | VcfFilterFn | `vcf_filter@1.0.0` | Both | `chrom` (optional), `min_qual` (optional), `filter_pass` (`"true"`/`"false"`, default `"false"`) | VCF text bytes (filtered subset, header preserved) |
+| 450 | BedParseFn | `bed_parse@1.0.0` | Both | — | NDJSON (`{"chrom":"...","start":N,"end":N,"name":"...","score":N,"strand":"..."}`) |
+| 451 | GffParseFn | `gff_parse@1.0.0` | Both | `version` (`"2"`/`"3"`, default `"3"`) | NDJSON (`{"seqid":"...","source":"...","type":"...","start":N,"end":N,"score":N,"strand":"...","phase":"...","attributes":{...}}`) |
+| 452 | FastaToFastqFn | `fasta_to_fastq@1.0.0` | Both | `default_quality` (Phred char, default `"I"` = Q40) | FASTQ bytes (synthetic quality scores) |
 
 #### 3.16.2 Design Notes
 
-TODO — FASTA/FASTQ/SAM/VCF/BED are line-oriented → streaming; BAM is binary with index → batch random access; quality trimming uses sliding window
+All bioinformatics text formats are line-oriented or record-oriented
+with simple delimiters → streaming natural.
 
-#### 3.16.3 Test Strategy
+**FASTA** uses `>` as record separator. Each record has a header line
+(`>id description`) followed by one or more sequence lines. The
+streaming variant buffers until the next `>` to emit a complete record.
 
-TODO — sequence parsing accuracy, quality trim correctness, VCF variant filtering, BAM region query, format conversion
+**FASTQ** uses a 4-line record: `@id`, sequence, `+`, quality.
+Quality scores are Phred+33 encoded ASCII characters. Streaming
+processes 4 lines at a time.
+
+`FastqTrimQualityFn` implements sliding-window quality trimming
+(Trimmomatic SLIDINGWINDOW algorithm): scan from 3' end, compute
+average quality in a window of size `window`, trim when average
+drops below `min_quality`. This is the standard preprocessing step
+for NGS data.
+
+`FastqFilterFn` applies multiple criteria per read:
+- `min_length`: discard reads shorter than threshold
+- `max_n_ratio`: discard reads with too many ambiguous bases (N)
+- `min_avg_quality`: discard reads with low average Phred score
+
+```rust
+// FastqTrimQualityFn — streaming: process 4 lines at a time
+fn process_chunk(&mut self, chunk: Bytes) -> Result<Option<Bytes>, ComputeError> {
+    self.buffer.extend_from_slice(&chunk);
+    let mut out = Vec::new();
+    while let Some((record, rest)) = try_read_fastq_record(&self.buffer)? {
+        let trimmed_len = sliding_window_trim(
+            &record.quality, self.min_quality, self.window,
+        );
+        if trimmed_len > 0 {
+            writeln!(out, "@{}", record.id).unwrap();
+            out.extend_from_slice(&record.sequence[..trimmed_len]);
+            out.push(b'\n');
+            out.extend_from_slice(b"+\n");
+            out.extend_from_slice(&record.quality[..trimmed_len]);
+            out.push(b'\n');
+        }
+        self.buffer = rest;
+    }
+    if out.is_empty() { return Ok(None); }
+    Ok(Some(Bytes::from(out)))
+}
+```
+
+**SAM** (Sequence Alignment/Map) is tab-delimited text with an
+optional header (`@HD`, `@SQ`, `@RG` lines). Each alignment line has
+11 mandatory fields. Line-oriented → streaming.
+
+**BAM** is the binary, BGZF-compressed version of SAM. BGZF blocks
+are independent gzip blocks (max 64 KB uncompressed) enabling random
+access via `.bai` index. Region queries require the index → batch.
+`BamToSamFn` decompresses BGZF blocks sequentially → streaming
+possible (without index).
+
+**VCF** (Variant Call Format) is tab-delimited with a header section
+(`##` meta-info, `#CHROM` column header). Each data line is one
+variant. `VcfFilterFn` preserves the header and filters data lines
+by chromosome, quality threshold, or PASS filter status.
+
+**BED** (Browser Extensible Data) is tab-delimited with 3–12 columns.
+No header. Simplest bioinformatics format → trivial streaming.
+
+**GFF** (General Feature Format) version 2 (GTF) and version 3 (GFF3)
+are tab-delimited with 9 columns. Attributes column differs between
+versions: GFF2 uses `key "value";` pairs, GFF3 uses `key=value;`.
+
+`FastaToFastqFn` converts FASTA to FASTQ by assigning a uniform
+quality score to every base. This is useful when downstream tools
+require FASTQ input but quality data is unavailable.
+
+#### 3.16.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| FASTA multi-line sequence | Lines concatenated into single sequence |
+| FASTA empty sequence (header only) | Emitted with `"length":0` |
+| FASTQ quality length ≠ sequence length | `ExecutionFailed("quality/sequence length mismatch at record N")` |
+| FASTQ trim removes entire read | Read omitted from output |
+| SAM with unmapped read (flag 0x4) | Parsed normally; `rname` = `"*"` |
+| BAM without .bai index + region query | `ExecutionFailed("region query requires BAM index")` |
+| BAM truncated BGZF block | `ExecutionFailed("truncated BGZF block")` |
+| VCF with multiple ALT alleles | `alt` field is JSON array |
+| VCF missing QUAL (`.`) | `qual` = `null` in JSON |
+| VCF filter with no matches | Header only in output |
+| BED with fewer than 6 columns | Optional fields set to defaults (name=`.`, score=0, strand=`.`) |
+| GFF comment lines (`#`) | Skipped |
+| GFF3 URL-encoded attributes | Decoded (`%20` → space) |
+| Empty input for any function | Empty output |
+
+#### 3.16.4 Test Strategy
+
+- FASTA parse: single-line and multi-line sequences; verify id, description, length
+- FASTQ parse: verify all 4 fields; quality string preserved
+- FASTQ trim: known quality profile → verify trim position matches expected
+- FASTQ filter: verify min_length, max_n_ratio, min_avg_quality each independently
+- FASTQ trim + filter pipeline: combined preprocessing
+- SAM parse: verify mandatory fields from known alignment
+- SAM header inclusion/exclusion toggle
+- BAM read: verify same alignments as equivalent SAM
+- BAM region query: verify only overlapping alignments returned
+- BAM→SAM: output matches original SAM (excluding sort order)
+- VCF parse: verify chrom, pos, ref, alt, qual, info fields
+- VCF filter by chromosome, quality, PASS status
+- BED parse: 3-column, 6-column, 12-column BED files
+- GFF2 vs GFF3 attribute parsing differences
+- FASTA→FASTQ: verify quality string length matches sequence
+- Streaming parity for all Both-mode functions
 
 ### 3.17 Category Q: Font, 3D & Specialized Binary — WOFF, glTF, STL, DICOM, WASM, ELF (13 functions, #453–#465)
 
@@ -1922,15 +2254,141 @@ TODO — sequence parsing accuracy, quality trim correctness, VCF variant filter
 
 #### 3.17.1 Function List
 
-TODO — table of 13 functions: FontMetadata, WoffToOtf, OtfToWoff2, GltfMetadata, GltfValidate, StlRead, StlConvert, DicomMetadata, DicomToImage, DicomAnonymize, WasmValidate, WasmMetadata, ElfMetadata
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 453 | FontMetadataFn | `font_metadata@1.0.0` | Batch | — | JSON (family, style, weight, version, glyph count, tables, supported scripts) |
+| 454 | WoffToOtfFn | `woff_to_otf@1.0.0` | Batch | — | OTF/TTF bytes (decompressed) |
+| 455 | OtfToWoff2Fn | `otf_to_woff2@1.0.0` | Batch | — | WOFF2 bytes (Brotli-compressed) |
+| 456 | GltfMetadataFn | `gltf_metadata@1.0.0` | Batch | — | JSON (scene count, node count, mesh count, material count, texture count, animation count, total vertices) |
+| 457 | GltfValidateFn | `gltf_validate@1.0.0` | Batch | — | Pass-through or error (spec conformance) |
+| 458 | StlReadFn | `stl_read@1.0.0` | Batch | — | JSON (`{"format":"ascii"|"binary","triangle_count":N,"bounds":{"min":[x,y,z],"max":[x,y,z]}}`) |
+| 459 | StlConvertFn | `stl_convert@1.0.0` | Batch | `target` (`"ascii"`/`"binary"`) | STL bytes in target format |
+| 460 | DicomMetadataFn | `dicom_metadata@1.0.0` | Batch | `tags` (optional, comma-separated tag names to extract) | JSON (patient name, study date, modality, dimensions, pixel spacing, transfer syntax) |
+| 461 | DicomToImageFn | `dicom_to_image@1.0.0` | Batch | `format` (`"png"`/`"jpeg"`, default `"png"`), `window_center` (optional), `window_width` (optional) | Image bytes |
+| 462 | DicomAnonymizeFn | `dicom_anonymize@1.0.0` | Batch | `keep_tags` (optional, comma-separated tags to preserve) | DICOM bytes (PHI removed) |
+| 463 | WasmValidateFn | `wasm_validate@1.0.0` | Batch | — | Pass-through or error (module structure, type consistency) |
+| 464 | WasmMetadataFn | `wasm_metadata@1.0.0` | Batch | — | JSON (version, imports, exports, memory limits, table count, function count, custom sections) |
+| 465 | ElfMetadataFn | `elf_metadata@1.0.0` | Batch | — | JSON (class, endianness, OS/ABI, type, machine, entry point, sections, symbols count) |
 
 #### 3.17.2 Design Notes
 
-TODO — DICOM anonymization is HIPAA-critical (remove patient-identifying tags); WASM validation checks module structure; glTF validation against spec
+All formats in this category have complex binary structures requiring
+random access or full-file parsing → batch-only.
 
-#### 3.17.3 Test Strategy
+**Font formats**: WOFF (Web Open Font Format) wraps OTF/TTF tables
+with per-table compression (zlib for WOFF1, Brotli for WOFF2).
+`FontMetadataFn` reads the `name` table for family/style, `head`
+for version, `maxp` for glyph count, and `OS/2` for weight class.
+`WoffToOtfFn` decompresses each table and reconstructs the OTF
+table directory. `OtfToWoff2Fn` applies Brotli compression with
+WOFF2-specific font preprocessing transforms.
 
-TODO — font metadata extraction, WOFF↔OTF roundtrip, DICOM anonymization completeness, WASM module validation, STL ASCII↔binary conversion
+**glTF** (GL Transmission Format) is the "JPEG of 3D". Two variants:
+`.gltf` (JSON + external `.bin`) and `.glb` (binary container).
+`GltfMetadataFn` parses the JSON descriptor to extract scene graph
+statistics. `GltfValidateFn` checks spec conformance: accessor
+bounds, buffer view alignment, material PBR constraints, animation
+sampler consistency.
+
+**STL** (Stereolithography) has two variants: ASCII (`solid`/
+`endsolid` delimiters with `facet normal`/`vertex` text) and binary
+(80-byte header + triangle count + 50 bytes per triangle).
+`StlReadFn` auto-detects format and computes bounding box.
+`StlConvertFn` converts between ASCII and binary representations.
+
+**DICOM** (Digital Imaging and Communications in Medicine) is the
+standard for medical imaging. Files contain a preamble, `DICM` magic,
+and a sequence of tag-length-value elements. Tags are identified by
+(group, element) pairs.
+
+`DicomAnonymizeFn` is HIPAA-critical. It removes all 18 HIPAA
+identifiers from the DICOM dataset:
+
+```rust
+// HIPAA Safe Harbor: 18 identifier categories mapped to DICOM tags
+const PHI_TAGS: &[(u16, u16)] = &[
+    (0x0010, 0x0010), // PatientName
+    (0x0010, 0x0020), // PatientID
+    (0x0010, 0x0030), // PatientBirthDate
+    (0x0010, 0x0040), // PatientSex
+    (0x0010, 0x1000), // OtherPatientIDs
+    (0x0010, 0x1001), // OtherPatientNames
+    (0x0010, 0x1010), // PatientAge
+    (0x0010, 0x1020), // PatientSize
+    (0x0010, 0x1030), // PatientWeight
+    (0x0010, 0x1040), // PatientAddress
+    (0x0010, 0x2154), // PatientTelephoneNumbers
+    (0x0008, 0x0080), // InstitutionName
+    (0x0008, 0x0081), // InstitutionAddress
+    (0x0008, 0x0090), // ReferringPhysicianName
+    (0x0008, 0x1048), // PhysiciansOfRecord
+    (0x0008, 0x1050), // PerformingPhysicianName
+    (0x0008, 0x1070), // OperatorsName
+    (0x0020, 0x4000), // ImageComments (may contain PHI)
+];
+```
+
+Tags in `keep_tags` are preserved even if they appear in the PHI list
+(explicit opt-in). All other PHI tags are replaced with empty values
+or removed. UIDs are re-mapped to maintain referential integrity
+without leaking the original identifiers.
+
+`DicomToImageFn` extracts pixel data and applies windowing (contrast
+adjustment). If `window_center`/`window_width` are not provided, the
+values from the DICOM header are used. Supports 8-bit, 12-bit, and
+16-bit pixel data with various photometric interpretations
+(MONOCHROME1, MONOCHROME2, RGB).
+
+**WASM** (WebAssembly) modules have a well-defined binary format:
+magic (`\0asm`), version, then typed sections (type, import, function,
+table, memory, global, export, start, element, code, data, custom).
+`wasmparser` provides streaming validation but we use batch mode for
+simplicity since modules are typically small. `WasmValidateFn` checks
+structural validity and type consistency. `WasmMetadataFn` extracts
+the module interface without executing code.
+
+**ELF** (Executable and Linkable Format) is the standard binary
+format on Linux/Unix. `ElfMetadataFn` reads the ELF header (class
+32/64, endianness, OS/ABI, object type, machine architecture),
+section headers (count, names), and symbol table summary. No code
+execution — metadata extraction only.
+
+#### 3.17.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| WOFF1 vs WOFF2 auto-detection | Magic bytes: `wOFF` (WOFF1) vs `wOF2` (WOFF2) |
+| WOFF with unknown table tags | Preserved in OTF output |
+| OTF with CFF outlines (not TrueType) | Supported; CFF table preserved |
+| glTF with external buffers (`.bin`) | `ExecutionFailed("external buffers not supported; use .glb")` |
+| glTF with Draco-compressed meshes | `ExecutionFailed("Draco compression not supported")` |
+| STL ASCII with degenerate triangles | Parsed; zero-area triangles included in count |
+| STL binary with incorrect triangle count | `ExecutionFailed("triangle count mismatch")` |
+| DICOM without pixel data | `DicomMetadataFn` succeeds; `DicomToImageFn` errors |
+| DICOM with compressed pixel data (JPEG2000) | Decompressed transparently |
+| DICOM anonymize with `keep_tags` including PHI | Kept (explicit opt-in) |
+| WASM with unknown custom sections | Listed in metadata; validation passes |
+| WASM with bulk-memory proposal | Validated if `wasmparser` supports it |
+| ELF stripped binary (no symbols) | `symbols_count: 0` in metadata |
+| ELF with multiple symbol tables | All tables counted |
+| Empty input for any function | `ExecutionFailed("empty input")` |
+
+#### 3.17.4 Test Strategy
+
+- Font metadata: verify family, weight, glyph count for known font
+- WOFF→OTF→WOFF2 roundtrip: font renders identically (metadata preserved)
+- WOFF1 and WOFF2 decompression: table checksums match original OTF
+- glTF metadata: verify counts for known model
+- glTF validate: valid model passes; broken accessor fails
+- STL read: verify triangle count and bounding box for known model
+- STL ASCII↔binary roundtrip: triangle data preserved
+- DICOM metadata: verify patient-safe fields for known file
+- DICOM→image: verify dimensions and pixel value range
+- DICOM anonymize: verify all 18 PHI tag categories removed
+- DICOM anonymize with keep_tags: specified tags preserved
+- WASM validate: valid module passes; type mismatch fails
+- WASM metadata: verify imports, exports, memory for known module
+- ELF metadata: verify class, machine, section count for known binary
 
 ### 3.18 Category R: Erasure Coding & Redundancy (9 functions, #466–#474)
 
@@ -1940,15 +2398,146 @@ TODO — font metadata extraction, WOFF↔OTF roundtrip, DICOM anonymization com
 
 #### 3.18.1 Function List
 
-TODO — table of 9 functions: ReedSolomonEncode (Both), ReedSolomonDecode (Both), ReedSolomonVerify (Both), XorParity (Both), XorReconstruct (Both), ReplicationSplit (Both), ReplicationVerify, StripeSplit (Both), StripeAssemble (Both)
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 466 | ReedSolomonEncodeFn | `rs_encode@1.0.0` | Both | `data_shards` (default `"4"`), `parity_shards` (default `"2"`) | Concatenated shard bytes (`data_shards + parity_shards` equal-length blocks) |
+| 467 | ReedSolomonDecodeFn | `rs_decode@1.0.0` | Both | `data_shards`, `parity_shards`, `missing` (comma-separated 0-based shard indices) | Original data bytes (reconstructed) |
+| 468 | ReedSolomonVerifyFn | `rs_verify@1.0.0` | Both | `data_shards`, `parity_shards` | Pass-through or error (parity consistency check) |
+| 469 | XorParityFn | `xor_parity@1.0.0` | Both | `shard_count` (default `"3"`) | Concatenated bytes: original shards + 1 XOR parity shard |
+| 470 | XorReconstructFn | `xor_reconstruct@1.0.0` | Both | `shard_count`, `missing` (single shard index) | Original data bytes (reconstructed) |
+| 471 | ReplicationSplitFn | `replication_split@1.0.0` | Both | `replicas` (default `"3"`) | Concatenated identical copies |
+| 472 | ReplicationVerifyFn | `replication_verify@1.0.0` | Batch | `replicas` | Pass-through or error (all replicas identical) |
+| 473 | StripeSplitFn | `stripe_split@1.0.0` | Both | `stripe_count` (default `"4"`), `stripe_size` (bytes, default `"65536"`) | Concatenated stripe shards (round-robin distribution) |
+| 474 | StripeAssembleFn | `stripe_assemble@1.0.0` | Both | `stripe_count`, `stripe_size` | Original data bytes (interleaved reassembly) |
 
 #### 3.18.2 Design Notes
 
-TODO — erasure coding is fundamental to DFS (HDFS-3 EC, Ceph, MinIO); Reed-Solomon operates on chunk-aligned blocks → streaming natural; XOR parity is simplest (RAID-5 style); replication is trivial fan-out
+Erasure coding is fundamental to distributed file systems. HDFS-3
+uses Reed-Solomon (6+3 default), Ceph uses Reed-Solomon or LRC,
+MinIO uses Reed-Solomon. This category provides the building blocks
+for the DFS storage layer.
 
-#### 3.18.3 Test Strategy
+**Data layout convention**: All multi-shard functions use a simple
+concatenation layout. Input/output is `shard_count` equal-length
+blocks concatenated. The shard size is `ceil(input_len / data_shards)`
+for RS, `ceil(input_len / shard_count)` for XOR/stripe. The last
+data shard is zero-padded to equal length. A 4-byte little-endian
+original length prefix is prepended before encoding so decode can
+strip padding.
 
-TODO — RS encode/decode roundtrip with simulated shard loss, XOR parity reconstruction, replication identity verification, stripe split/assemble roundtrip
+**Reed-Solomon** uses Galois Field GF(2^8) arithmetic. The
+`reed-solomon-erasure` crate provides the core encode/decode.
+Streaming operates on chunk-aligned blocks — each chunk must be a
+complete set of shards. The streaming variant processes one
+"stripe" (data_shards + parity_shards blocks) per chunk.
+
+```rust
+// ReedSolomonEncodeFn
+fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let data_shards = get_usize_param(params, "data_shards", 4)?;
+    let parity_shards = get_usize_param(params, "parity_shards", 2)?;
+    let r = ReedSolomon::new(data_shards, parity_shards)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("rs init: {}", e)))?;
+    let input = &inputs[0];
+    let original_len = input.len();
+    let shard_size = (original_len + data_shards - 1) / data_shards;
+    // Prepend original length, then pad
+    let mut padded = Vec::with_capacity(4 + shard_size * data_shards);
+    padded.extend_from_slice(&(original_len as u32).to_le_bytes());
+    padded.extend_from_slice(input);
+    padded.resize(4 + shard_size * data_shards, 0u8);
+    // Split into shards
+    let mut shards: Vec<Vec<u8>> = padded.chunks(shard_size)
+        .map(|c| c.to_vec())
+        .collect();
+    // Add empty parity shards
+    for _ in 0..parity_shards {
+        shards.push(vec![0u8; shard_size]);
+    }
+    r.encode(&mut shards)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("rs encode: {}", e)))?;
+    Ok(Bytes::from(shards.concat()))
+}
+```
+
+```rust
+// ReedSolomonDecodeFn
+fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    let data_shards = get_usize_param(params, "data_shards", 4)?;
+    let parity_shards = get_usize_param(params, "parity_shards", 2)?;
+    let missing: Vec<usize> = get_string_param(params, "missing")?
+        .split(',').map(|s| s.trim().parse::<usize>()
+            .map_err(|_| ComputeError::InvalidParam("missing: comma-separated indices".into())))
+        .collect::<Result<_, _>>()?;
+    let total = data_shards + parity_shards;
+    let shard_size = inputs[0].len() / total;
+    let r = ReedSolomon::new(data_shards, parity_shards)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("rs init: {}", e)))?;
+    let mut shards: Vec<Option<Vec<u8>>> = inputs[0]
+        .chunks(shard_size)
+        .enumerate()
+        .map(|(i, c)| if missing.contains(&i) { None } else { Some(c.to_vec()) })
+        .collect();
+    r.reconstruct(&mut shards)
+        .map_err(|e| ComputeError::ExecutionFailed(format!("rs decode: {}", e)))?;
+    let data: Vec<u8> = shards[..data_shards].iter()
+        .flat_map(|s| s.as_ref().unwrap().iter().copied())
+        .collect();
+    let original_len = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
+    Ok(Bytes::from(data[4..4 + original_len].to_vec()))
+}
+```
+
+**XOR parity** is the simplest erasure code (RAID-5 style). Given
+`shard_count` data shards, the parity shard is the XOR of all data
+shards. Can reconstruct any single missing shard. Streaming XORs
+each chunk as it arrives, emitting the parity on flush.
+
+**Replication** is trivial fan-out: input is duplicated `replicas`
+times. `ReplicationVerifyFn` checks all replicas are byte-identical.
+Batch-only for verify (needs all replicas simultaneously).
+
+**Striping** distributes data across shards in round-robin fashion
+at `stripe_size` granularity (default 64 KB). This is the RAID-0
+pattern — no redundancy, but enables parallel I/O. Combined with
+RS or XOR parity in a pipeline for RAID-5/6 equivalents.
+
+Streaming for all encode/split functions: process one stripe-width
+of data per chunk. Streaming for decode/assemble: process one
+stripe-width of shards per chunk.
+
+#### 3.18.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| RS data_shards=0 or parity_shards=0 | `InvalidParam("shards must be ≥ 1")` |
+| RS missing more shards than parity_shards | `ExecutionFailed("too many missing shards: N > parity_shards")` |
+| RS missing index out of range | `InvalidParam("shard index N out of range")` |
+| RS input not divisible by data_shards | Zero-padded; original length stored in prefix |
+| RS empty input | `ExecutionFailed("empty input")` |
+| XOR missing > 1 shard | `ExecutionFailed("XOR can reconstruct at most 1 shard")` |
+| XOR shard_count=1 | Parity is copy of data (degenerate case) |
+| Replication replicas=0 | `InvalidParam("replicas must be ≥ 1")` |
+| Replication verify with mismatched replica | `ExecutionFailed("replica N differs at byte offset M")` |
+| Stripe input smaller than stripe_size | Single stripe, last shard short |
+| Stripe assemble with wrong stripe_count | `ExecutionFailed("input size not aligned to stripe_count × stripe_size")` |
+| Streaming chunk not aligned to shard boundary | Buffered until complete stripe available |
+
+#### 3.18.4 Test Strategy
+
+- RS encode/decode roundtrip: original data recovered (4+2, 6+3, 10+4 configs)
+- RS decode with 1, 2, max missing shards: all recover correctly
+- RS decode with too many missing: error
+- RS verify: valid encoding passes; corrupted shard fails
+- RS streaming parity: same output as batch
+- XOR parity/reconstruct roundtrip: each shard recoverable individually
+- XOR with 2 missing: error
+- Replication split: all replicas byte-identical
+- Replication verify: identical passes; tampered fails
+- Stripe split/assemble roundtrip: original data recovered
+- Stripe with non-aligned input: padding handled correctly
+- Pipeline test: stripe_split → rs_encode → (simulate loss) → rs_decode → stripe_assemble
+- Pipeline test: xor_parity → (simulate loss) → xor_reconstruct
 
 ### 3.19 Category S: Universal Format Detection & Conversion (9 functions, #475–#483)
 
@@ -1958,43 +2547,332 @@ TODO — RS encode/decode roundtrip with simulated shard loss, XOR parity recons
 
 #### 3.19.1 Function List
 
-TODO — table of 9 functions: FormatDetect (Both), FormatValidate, UniversalMetadata, UniversalToJson, UniversalToText, FormatConvert, SchemaInfer, SchemaCompare, MimeTypeMap
+| # | Function | FunctionId | Mode | Params | Output |
+|---|----------|-----------|------|--------|--------|
+| 475 | FormatDetectFn | `format_detect@1.0.0` | Both | — | JSON (`{"format":"parquet","mime":"application/vnd.apache.parquet","category":"columnar","confidence":0.99}`) |
+| 476 | FormatValidateFn | `format_validate@1.0.0` | Batch | `format` (expected format name) | Pass-through or error (structural validation) |
+| 477 | UniversalMetadataFn | `universal_metadata@1.0.0` | Batch | — | JSON (auto-detected format + format-specific metadata) |
+| 478 | UniversalToJsonFn | `universal_to_json@1.0.0` | Batch | `max_records` (optional, default `"1000"`) | JSON (format-agnostic structured representation) |
+| 479 | UniversalToTextFn | `universal_to_text@1.0.0` | Batch | — | UTF-8 text (plain-text extraction for indexing) |
+| 480 | FormatConvertFn | `format_convert@1.0.0` | Batch | `from` (optional, auto-detected), `to` (target format name) | Converted bytes |
+| 481 | SchemaInferFn | `schema_infer@1.0.0` | Batch | `sample_rows` (default `"1000"`) | JSON Schema (inferred from tabular data) |
+| 482 | SchemaCompareFn | `schema_compare@1.0.0` | Batch | — | JSON (`{"compatible":bool,"changes":[{"field":"...","type":"added|removed|changed","detail":"..."}]}`) |
+| 483 | MimeTypeMapFn | `mime_type_map@1.0.0` | Batch | `direction` (`"ext_to_mime"`/`"mime_to_ext"`, default `"ext_to_mime"`) | JSON mapping |
 
 #### 3.19.2 Design Notes
 
-TODO — meta-functions that dispatch to category-specific implementations; FormatDetect reads magic bytes from first chunk → streaming; UniversalToText is the full-text search indexing entry point; SchemaInfer works across CSV/Parquet/Avro/JSON
+Category S provides meta-functions that dispatch to category-specific
+implementations. These are the primary entry points for users who
+don't know (or don't want to specify) the input format.
 
-#### 3.19.3 Test Strategy
+**FormatDetectFn** is the cornerstone. It reads magic bytes and
+structural hints to identify the format. Detection strategy:
 
-TODO — format detection accuracy across all supported formats, universal metadata extraction, schema inference for tabular formats, schema compatibility comparison
+1. **Magic bytes** (first 4–16 bytes): covers ~80% of binary formats
+2. **Structural probe**: for text formats without magic bytes (CSV,
+   JSON, XML, YAML), attempt parsing the first few KB
+3. **Extension hint**: if input metadata includes a filename, use
+   extension as tiebreaker
+
+Streaming variant: only needs the first chunk (typically 64 KB) to
+detect. Emits the detection result and passes all data through.
+
+```rust
+// FormatDetectFn — detection dispatch table (abbreviated)
+const MAGIC_TABLE: &[(&[u8], &str, &str, &str)] = &[
+    (b"PAR1",                "parquet",    "application/vnd.apache.parquet", "columnar"),
+    (b"ORC",                 "orc",        "application/x-orc",             "columnar"),
+    (b"ARROW1",              "arrow_ipc",  "application/vnd.apache.arrow.file", "columnar"),
+    (b"Obj\x01",             "avro",       "application/avro",              "serialization"),
+    (b"\x89PNG",             "png",        "image/png",                     "image"),
+    (b"\xff\xd8\xff",        "jpeg",       "image/jpeg",                    "image"),
+    (b"RIFF",                "wav",        "audio/wav",                     "audio"),  // + WAVE check
+    (b"GIF8",                "gif",        "image/gif",                     "image"),
+    (b"PK\x03\x04",         "zip",        "application/zip",               "archive"),
+    (b"\x1f\x8b",           "gzip",       "application/gzip",              "archive"),
+    (b"\xfd7zXZ\x00",       "xz",         "application/x-xz",             "archive"),
+    (b"\x28\xb5\x2f\xfd",   "zstd",       "application/zstd",              "archive"),
+    (b"BZh",                 "bzip2",      "application/x-bzip2",           "archive"),
+    (b"%PDF",                "pdf",        "application/pdf",               "document"),
+    (b"SQLite format 3\x00","sqlite",     "application/x-sqlite3",         "database"),
+    (b"\x00asm",             "wasm",       "application/wasm",              "binary"),
+    (b"\x7fELF",             "elf",        "application/x-elf",             "binary"),
+    (b"DICM",                "dicom",      "application/dicom",             "binary"),  // at offset 128
+    (b"\x93NUMPY",           "numpy",      "application/x-numpy",           "scientific"),
+    (b"GGUF",                "gguf",       "application/x-gguf",            "ml"),
+    (b"fLaC",                "flac",       "audio/flac",                    "audio"),
+    (b"ID3",                 "mp3",        "audio/mpeg",                    "audio"),
+];
+
+fn detect(input: &[u8]) -> FormatResult {
+    // 1. Magic bytes
+    for (magic, format, mime, category) in MAGIC_TABLE {
+        if input.starts_with(magic) {
+            return FormatResult { format, mime, category, confidence: 0.99 };
+        }
+    }
+    // 2. Structural probe for text formats
+    let text = std::str::from_utf8(&input[..input.len().min(4096)]).ok();
+    if let Some(t) = text {
+        let trimmed = t.trim_start();
+        if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            return FormatResult { format: "json", mime: "application/json", category: "row", confidence: 0.90 };
+        }
+        if trimmed.starts_with("<?xml") || trimmed.starts_with("<") {
+            return FormatResult { format: "xml", mime: "application/xml", category: "row", confidence: 0.85 };
+        }
+        if trimmed.starts_with("---") || trimmed.contains(":\n") {
+            return FormatResult { format: "yaml", mime: "application/x-yaml", category: "config", confidence: 0.70 };
+        }
+        if trimmed.contains(',') && trimmed.contains('\n') {
+            return FormatResult { format: "csv", mime: "text/csv", category: "row", confidence: 0.60 };
+        }
+    }
+    FormatResult { format: "unknown", mime: "application/octet-stream", category: "unknown", confidence: 0.0 }
+}
+```
+
+**FormatValidateFn** takes an expected format name and dispatches to
+the corresponding category's validation logic. For example,
+`format="parquet"` delegates to Parquet footer parsing,
+`format="json"` delegates to JSON syntax validation. This is a
+convenience wrapper that avoids requiring users to know which
+category-specific function to call.
+
+**UniversalMetadataFn** chains `FormatDetect` → category-specific
+metadata function. Auto-detects format, then dispatches:
+- Parquet → `parquet_metadata`
+- PNG → `png_metadata`
+- SQLite → `sqlite_table_list`
+- etc.
+
+Returns a unified JSON envelope:
+`{"format":"parquet","metadata":{...format-specific...}}`.
+
+**UniversalToJsonFn** converts any supported format to a JSON
+representation. This is the "hub format" for cross-format conversion.
+Tabular formats become `[{row}, ...]`. Documents become
+`{"text":"...","metadata":{...}}`. Binary formats become
+`{"format":"...","summary":{...}}`. `max_records` limits output
+for large datasets.
+
+**UniversalToTextFn** extracts plain text from any format — the
+entry point for full-text search indexing in the DFS. Dispatches to:
+- CSV/JSON/XML → field values concatenated
+- PDF/DOCX/HTML → text extraction
+- Images → empty (or OCR placeholder)
+- Binary → hex dump summary
+
+**FormatConvertFn** converts between formats using JSON as the
+intermediate hub. Conversion path: `source → JSON → target`.
+Supported conversions are limited to formats within the same
+"convertibility class":
+- Tabular: CSV ↔ JSON ↔ Parquet ↔ Avro ↔ ORC
+- Config: YAML ↔ TOML ↔ JSON
+- Image: PNG ↔ JPEG ↔ WebP
+- Document: HTML ↔ Markdown ↔ text
+
+Unsupported cross-class conversions (e.g., PNG → Parquet) return
+`InvalidParam("no conversion path from png to parquet")`.
+
+**SchemaInferFn** analyzes tabular data (CSV, JSON, Parquet, Avro)
+and produces a JSON Schema describing the structure. For CSV, it
+samples `sample_rows` rows to infer column types (integer, number,
+string, boolean, null). For Parquet/Avro, the schema is extracted
+directly from metadata.
+
+**SchemaCompareFn** takes two JSON Schemas (concatenated, newline-
+separated) and produces a compatibility report: added fields, removed
+fields, type changes. This supports schema evolution workflows —
+checking whether a new data version is backward-compatible.
+
+**MimeTypeMapFn** is a pure lookup function. Given a file extension,
+returns the MIME type (or vice versa). Uses the `mime_guess` crate's
+database. Input is the extension or MIME string as UTF-8 text.
+
+#### 3.19.3 Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| FormatDetect on empty input | `{"format":"unknown","confidence":0.0}` |
+| FormatDetect ambiguous (e.g., XML that looks like HTML) | Higher-confidence match wins; HTML checked before generic XML |
+| FormatDetect DICOM (magic at offset 128) | Special-cased: checks bytes 128–132 for `DICM` |
+| FormatValidate with unknown format name | `InvalidParam("unknown format: ...")` |
+| UniversalMetadata on unknown format | `ExecutionFailed("cannot extract metadata: unknown format")` |
+| UniversalToJson on binary format (ELF, WASM) | Returns summary JSON, not full content |
+| UniversalToText on image/audio | Returns empty string (no text content) |
+| FormatConvert unsupported path | `InvalidParam("no conversion path from X to Y")` |
+| FormatConvert with data loss (e.g., Parquet types → CSV) | Proceeds with best-effort; types flattened to strings |
+| SchemaInfer on non-tabular format | `InvalidParam("schema inference requires tabular format")` |
+| SchemaInfer with all-null column | Inferred as `"type":"string"` (most permissive) |
+| SchemaCompare with identical schemas | `{"compatible":true,"changes":[]}` |
+| MimeTypeMap unknown extension | `{"mime":"application/octet-stream"}` |
+| MimeTypeMap unknown MIME type | `{"extensions":[]}` |
+
+#### 3.19.4 Test Strategy
+
+- FormatDetect: test against every supported binary format (magic bytes)
+- FormatDetect: test text format detection (CSV, JSON, XML, YAML)
+- FormatDetect: ambiguous inputs (JSON that starts with `[{`, XML vs HTML)
+- FormatDetect streaming: first chunk sufficient for detection
+- FormatValidate: valid file passes; corrupted file fails (per format)
+- UniversalMetadata: verify dispatch to correct category function
+- UniversalToJson: CSV, Parquet, JSON, PDF all produce valid JSON
+- UniversalToText: PDF, DOCX, HTML produce text; binary returns empty
+- FormatConvert: CSV→Parquet→CSV roundtrip preserves data
+- FormatConvert: YAML→TOML→JSON roundtrip preserves structure
+- FormatConvert: unsupported path returns error
+- SchemaInfer: CSV with mixed types infers correct JSON Schema
+- SchemaInfer: Parquet schema extracted directly (no sampling)
+- SchemaCompare: added/removed/changed fields detected
+- SchemaCompare: identical schemas report compatible
+- MimeTypeMap: known extensions and MIME types resolve correctly
 
 ---
 
 ## 4. Implementation Strategy
 
-### 4.1 Phase 1 — High-Value, Low-Complexity (50 functions)
+### 4.1 Phase 1 — High-Value, Low-Complexity (98 functions)
 
-TODO — Categories B (CSV/JSON), D (tar/gzip), H (YAML/TOML/INI), K (log parsing), L (CID/CAR), S (format detection); estimated 5–7 days; minimal external dependencies
+**Categories**: B (25), D (20), H (16), K (13), L (15), S (9)
+**Estimated effort**: 5–7 days
+**Dependencies**: lightweight (`csv`, `quick-xml`, `tar`, `flate2`, `serde_yaml`, `toml`, `cid`, `infer`)
 
-### 4.2 Phase 2 — Analytics Backbone (60 functions)
+Implementation order within Phase 1:
+1. **S (Universal detection)** — needed by all other categories for dispatch
+2. **B (CSV/JSON/XML)** — most common formats, foundation for hub conversions
+3. **H (Config — YAML/TOML/INI)** — small, self-contained, high daily use
+4. **D (Archive — tar/gzip/zip)** — streaming pipeline composition
+5. **K (Log/Observability)** — line-oriented parsers, reuse CSV infrastructure
+6. **L (CID/CAR/UnixFS)** — CAS-native, directly used by storage layer
 
-TODO — Categories A (Parquet/ORC/Arrow), C (Avro/Protobuf), R (erasure coding); estimated 7–10 days; heavy dependencies (parquet, arrow, apache-avro)
+Each category is implemented as a single source file, registered behind
+its feature flag, and tested before moving to the next.
 
-### 4.3 Phase 3 — Rich Media & Documents (80 functions)
+### 4.2 Phase 2 — Analytics Backbone (46 functions)
 
-TODO — Categories E (images), F (audio/video), G (documents); estimated 5–8 days; image/media processing dependencies
+**Categories**: A (18), C (19), R (9)
+**Estimated effort**: 7–10 days
+**Dependencies**: heavy (`parquet`, `arrow`, `orc-rust`, `apache-avro`, `prost`, `reed-solomon-erasure`)
 
-### 4.4 Phase 4 — Domain-Specific (93 functions)
+Implementation order:
+1. **R (Erasure coding)** — smallest, DFS-critical, no format parsing
+2. **C (Serialization — Avro/Protobuf)** — needed for Parquet metadata
+3. **A (Columnar — Parquet/ORC/Arrow)** — largest, most complex; Arrow IPC as interchange
 
-TODO — Categories I (geospatial), J (scientific), M (database), N (ML), O (network), P (bioinformatics), Q (specialized binary); estimated 5–8 days; many optional dependencies behind feature flags
+### 4.3 Phase 3 — Rich Media & Documents (57 functions)
+
+**Categories**: E (18), F (16), G (23)
+**Estimated effort**: 5–8 days
+**Dependencies**: media processing (`image`, `symphonia`, `lopdf`, `calamine`)
+
+Implementation order:
+1. **E (Image)** — `image` crate covers PNG/JPEG/WebP/GIF/TIFF
+2. **G (Document)** — PDF/XLSX/HTML text extraction for search indexing
+3. **F (Audio/Video)** — metadata extraction only (no transcoding)
+
+### 4.4 Phase 4 — Domain-Specific (82 functions)
+
+**Categories**: I (14), J (13), M (10), N (12), O (8), P (12), Q (13)
+**Estimated effort**: 5–8 days
+**Dependencies**: many optional (`noodles`, `hdf5`, `rusqlite`, `safetensors`, `wasmparser`, `pcap-parser`, `dicom-object`)
+
+All Phase 4 categories are independent — can be implemented in any
+order or in parallel. Each is behind its own feature flag and has
+zero coupling to other Phase 4 categories.
 
 ### 4.5 Feature Flag Strategy
 
-TODO — each category behind a Cargo feature flag: `format-columnar`, `format-csv`, `format-archive`, `format-image`, etc.; `format-all` enables everything; default features include Phase 1 only
+```toml
+# Cargo.toml — feature flags
+[features]
+default = ["format-phase1"]
+
+# Phase bundles
+format-phase1 = ["format-csv", "format-archive", "format-config", "format-log", "format-cas", "format-detect"]
+format-phase2 = ["format-columnar", "format-serialization", "format-erasure"]
+format-phase3 = ["format-image", "format-audio", "format-document"]
+format-phase4 = ["format-geo", "format-scientific", "format-database", "format-ml", "format-network", "format-bio", "format-binary"]
+format-all = ["format-phase1", "format-phase2", "format-phase3", "format-phase4"]
+
+# Per-category flags
+format-csv = ["dep:csv", "dep:quick-xml", "dep:serde_json"]
+format-archive = ["dep:tar", "dep:zip", "dep:flate2", "dep:bzip2", "dep:xz2", "dep:zstd"]
+format-config = ["dep:serde_yaml", "dep:toml", "dep:configparser", "dep:hcl-rs"]
+format-log = []  # no extra deps — regex + serde_json
+format-cas = ["dep:cid", "dep:multihash", "dep:libipld", "dep:iroh-car"]
+format-detect = ["dep:infer", "dep:mime_guess"]
+format-columnar = ["dep:parquet", "dep:arrow", "dep:orc-rust"]
+format-serialization = ["dep:apache-avro", "dep:prost", "dep:rmp-serde", "dep:ciborium", "dep:bson"]
+format-erasure = ["dep:reed-solomon-erasure"]
+format-image = ["dep:image", "dep:resvg", "dep:img-hash"]
+format-audio = ["dep:symphonia"]
+format-document = ["dep:lopdf", "dep:calamine", "dep:scraper", "dep:pulldown-cmark"]
+format-geo = ["dep:geojson", "dep:flatgeobuf"]
+format-scientific = ["dep:hdf5"]
+format-database = ["dep:rusqlite"]
+format-ml = ["dep:safetensors"]
+format-network = ["dep:pcap-parser", "dep:mailparse"]
+format-bio = ["dep:noodles"]
+format-binary = ["dep:wasmparser", "dep:dicom-object", "dep:gltf"]
+```
 
 ### 4.6 Registration Pattern
 
-TODO — each category provides `register_category_X(registry: &mut FunctionRegistry)` function; called conditionally based on feature flags
+```rust
+// crates/deriva-compute/src/builtins_format.rs
+pub fn register_format_functions(registry: &mut FunctionRegistry) {
+    #[cfg(feature = "format-csv")]
+    builtins_format_csv::register_category_b(registry);
+    #[cfg(feature = "format-archive")]
+    builtins_format_archive::register_category_d(registry);
+    #[cfg(feature = "format-config")]
+    builtins_format_config::register_category_h(registry);
+    #[cfg(feature = "format-log")]
+    builtins_format_log::register_category_k(registry);
+    #[cfg(feature = "format-cas")]
+    builtins_format_cas::register_category_l(registry);
+    #[cfg(feature = "format-detect")]
+    builtins_format_detect::register_category_s(registry);
+    #[cfg(feature = "format-columnar")]
+    builtins_format_columnar::register_category_a(registry);
+    #[cfg(feature = "format-serialization")]
+    builtins_format_serialization::register_category_c(registry);
+    #[cfg(feature = "format-erasure")]
+    builtins_format_erasure::register_category_r(registry);
+    #[cfg(feature = "format-image")]
+    builtins_format_image::register_category_e(registry);
+    #[cfg(feature = "format-audio")]
+    builtins_format_audio::register_category_f(registry);
+    #[cfg(feature = "format-document")]
+    builtins_format_document::register_category_g(registry);
+    #[cfg(feature = "format-geo")]
+    builtins_format_geo::register_category_i(registry);
+    #[cfg(feature = "format-scientific")]
+    builtins_format_scientific::register_category_j(registry);
+    #[cfg(feature = "format-database")]
+    builtins_format_database::register_category_m(registry);
+    #[cfg(feature = "format-ml")]
+    builtins_format_ml::register_category_n(registry);
+    #[cfg(feature = "format-network")]
+    builtins_format_network::register_category_o(registry);
+    #[cfg(feature = "format-bio")]
+    builtins_format_bio::register_category_p(registry);
+    #[cfg(feature = "format-binary")]
+    builtins_format_binary::register_category_q(registry);
+}
+```
+
+Each `register_category_X` function follows the same pattern:
+
+```rust
+// builtins_format_csv.rs (example)
+pub fn register_category_b(registry: &mut FunctionRegistry) {
+    registry.register(Arc::new(CsvParseFn));       // #219
+    registry.register(Arc::new(CsvWriteFn));        // #220
+    // ... remaining 23 functions
+}
+```
 
 ---
 
@@ -2002,29 +2880,140 @@ TODO — each category provides `register_category_X(registry: &mut FunctionRegi
 
 ### 5.1 Per-Category Test Suites
 
-TODO — each category gets its own test file: `tests/format_columnar.rs`, `tests/format_csv.rs`, etc.; ~3 tests per function = ~849 tests total
+Each category gets its own integration test file under
+`crates/deriva-compute/tests/`, gated behind the corresponding
+feature flag (`#[cfg(feature = "format-csv")]`).
+
+| Category | Test File | Functions | Tests (~3/fn) |
+|----------|-----------|-----------|---------------|
+| A Columnar | `format_columnar.rs` | 18 | 54 |
+| B Row-oriented | `format_csv.rs` | 25 | 75 |
+| C Serialization | `format_serialization.rs` | 19 | 57 |
+| D Archive | `format_archive.rs` | 20 | 60 |
+| E Image | `format_image.rs` | 18 | 54 |
+| F Audio/Video | `format_audio.rs` | 16 | 48 |
+| G Document | `format_document.rs` | 23 | 69 |
+| H Config | `format_config.rs` | 16 | 48 |
+| I Geospatial | `format_geo.rs` | 14 | 42 |
+| J Scientific | `format_scientific.rs` | 13 | 39 |
+| K Log | `format_log.rs` | 13 | 39 |
+| L CAS | `format_cas.rs` | 15 | 45 |
+| M Database | `format_database.rs` | 10 | 30 |
+| N ML/Tensor | `format_ml.rs` | 12 | 36 |
+| O Network | `format_network.rs` | 8 | 24 |
+| P Bioinformatics | `format_bio.rs` | 12 | 36 |
+| Q Specialized | `format_binary.rs` | 13 | 39 |
+| R Erasure | `format_erasure.rs` | 9 | 27 |
+| S Universal | `format_detect.rs` | 9 | 27 |
+| **Total** | **19 files** | **283** | **~849** |
 
 ### 5.2 Cross-Category Conversion Tests
 
-TODO — Parquet↔Avro, CSV↔JSON, YAML↔JSON↔TOML, Arrow↔NumPy; ~15 cross-format tests
+File: `tests/format_cross_conversion.rs`
+
+| Test | Path | Assertion |
+|------|------|-----------|
+| CSV → Parquet → CSV | tabular roundtrip | Data preserved (types may widen) |
+| CSV → JSON → CSV | text roundtrip | Field values identical |
+| Parquet → Avro → Parquet | columnar↔serialization | Schema and data preserved |
+| YAML → JSON → TOML → YAML | config roundtrip | Structure preserved |
+| Arrow IPC → NumPy → SafeTensors | tensor interchange | Dtype, shape, values preserved |
+| HTML → Markdown → text | document chain | Text content preserved |
+| PNG → WebP → PNG | lossless image | Pixel data identical |
+| FASTA → FASTQ → FASTA | bio conversion | Sequence preserved |
+| Syslog → JSON → NDJSON | log normalization | Records preserved |
+| GeoJSON → KML → GeoJSON | geo roundtrip | Coordinates preserved |
+| **Total** | | **~15 tests** |
 
 ### 5.3 Format Detection Integration Tests
 
-TODO — FormatDetect correctly identifies all supported formats; ~20 detection tests with sample files
+File: `tests/format_detection.rs`
+
+Test `FormatDetectFn` against minimal valid sample bytes for every
+supported format. Each test verifies format name, MIME type, category,
+and confidence ≥ threshold.
+
+- Binary formats with magic bytes: Parquet, ORC, Arrow, Avro, PNG,
+  JPEG, GIF, WebP, TIFF, WAV, FLAC, MP3, PDF, ZIP, gzip, bzip2, xz,
+  zstd, SQLite, WASM, ELF, DICOM, NumPy, GGUF (~22 tests)
+- Text format structural detection: CSV, JSON, NDJSON, XML, YAML,
+  TOML, INI, HTML, Markdown (~8 tests)
+- Ambiguous inputs: JSON array vs CSV, XML vs HTML, YAML vs INI (~3 tests)
+- **Total: ~33 tests**
 
 ### 5.4 Streaming Equivalence Tests
 
-TODO — for all 107 Both-mode functions, verify batch and streaming produce identical output; ~107 parity tests
+File: `tests/format_streaming_parity.rs`
+
+For all 107 Both-mode functions, verify batch and streaming produce
+identical output. Each function tested at 3 chunk sizes (1 byte,
+64 bytes, 65536 bytes) via macro:
+
+```rust
+macro_rules! streaming_parity_test {
+    ($name:ident, $fn_type:ty, $input:expr, $params:expr) => {
+        #[test]
+        fn $name() {
+            let func = <$fn_type>::default();
+            let batch_out = func.execute(vec![$input.clone()], &$params).unwrap();
+            for chunk_size in [1, 64, 65536] {
+                let stream_out = run_streaming(&func, &$input, chunk_size, &$params).unwrap();
+                assert_eq!(batch_out, stream_out,
+                    "parity failed at chunk_size={}", chunk_size);
+            }
+        }
+    };
+}
+```
+
+**Total: ~107 tests** (one per Both-mode function).
 
 ### 5.5 Benchmark Suite
 
-TODO — per-category throughput benchmarks; Parquet read/write at various sizes; compression codec comparison for archives; image resize at various resolutions
+File: `benches/format_benchmarks.rs` (Criterion)
+
+| Benchmark | Variants |
+|-----------|----------|
+| Parquet read | 1 MB, 100 MB, 1 GB; with/without projection |
+| CSV parse | 1 MB, 100 MB; with/without schema |
+| gzip compress/decompress | 1 MB, 100 MB; levels 1, 6, 9 |
+| RS encode/decode | 4+2, 6+3, 10+4; 1 MB, 64 MB |
+| Image resize | 1024², 4096²; PNG, JPEG |
+| CID compute | 1 KB, 1 MB, 1 GB; SHA-256, BLAKE3 |
+| FormatDetect | 100 files, mixed formats |
+
+**Grand total: ~849 unit + ~15 cross + ~33 detection + ~107 parity = ~1004 tests**
 
 ---
 
 ## 6. Edge Cases & Error Handling
 
-TODO — table: corrupt file headers, truncated files, unsupported format versions, encoding mismatches, empty files, files exceeding memory for batch-only functions, concurrent access to SQLite, DICOM with missing required tags
+All format functions map errors to `ComputeError` variants following
+the same conventions as §2.14/§2.15:
+
+| Error Class | ComputeError Variant | Examples |
+|-------------|---------------------|----------|
+| Invalid/missing parameter | `InvalidParam(String)` | Unknown codec name, negative shard count, unsupported format in `FormatConvert` |
+| Corrupt or invalid input | `ExecutionFailed(String)` | Bad magic bytes, CRC mismatch, truncated header, malformed protobuf |
+| Unsupported variant | `ExecutionFailed(String)` | pcapng instead of pcap, WOFF3, GGUF version 99 |
+| Resource limit exceeded | `ExecutionFailed(String)` | SafeTensors header > 100 MB, Pickle depth > max_depth |
+| Missing dependency data | `ExecutionFailed(String)` | BAM region query without index, UnixFS assemble with missing block |
+| Empty input | Context-dependent | CID → valid CID of empty bytes; most others → empty output or error |
+
+**Cross-cutting edge cases handled uniformly:**
+
+| Edge Case | Behavior |
+|-----------|----------|
+| Empty input (0 bytes) | Functions that produce metadata/CID: valid output. Parse/read functions: empty output. Validate functions: error. |
+| Non-UTF-8 text input | Text parsers (CSV, JSON, XML, YAML, config, log, bio) attempt UTF-8; fall back to Latin-1 for CSV; error for strict formats (JSON, YAML) |
+| Truncated file (valid header, incomplete body) | Batch: error with byte offset. Streaming: emit complete records, buffer remainder, error on flush if incomplete. |
+| Corrupt magic bytes | `FormatDetectFn` returns `"unknown"`. Category-specific functions return `ExecutionFailed("invalid X header")`. |
+| File exceeds available memory (batch-only) | No built-in limit — caller is responsible via §2.9 size-aware mode selection routing large files to streaming variants. |
+| Concurrent access | Not applicable — functions are stateless; each invocation gets its own input copy. SQLite opened read-only on a temp file copy. |
+| Integer overflow in headers | Validated before allocation: reject declared sizes > input length or > 4 GB for 32-bit fields. |
+| Zip bomb / decompression bomb | Archive functions enforce `max_size` param (default 1 GB uncompressed). Image functions enforce max dimensions (default 16384×16384). |
+| DICOM PHI in unexpected tags | `DicomAnonymizeFn` removes the 18 HIPAA categories; private tags (odd group numbers) removed entirely unless in `keep_tags`. |
+| Pickle code execution | `PickleToJsonFn` rejects REDUCE, BUILD, INST, OBJ, NEWOBJ opcodes — only data-construction opcodes allowed. |
 
 ---
 
@@ -2032,35 +3021,288 @@ TODO — table: corrupt file headers, truncated files, unsupported format versio
 
 ### 7.1 Columnar Format Performance
 
-TODO — Parquet read with projection: skip unneeded columns → 10–100× speedup; predicate pushdown: skip row groups → 2–50× speedup depending on selectivity
+Columnar formats offer the largest performance gains through
+selective reading:
+
+| Optimization | Mechanism | Expected Speedup |
+|-------------|-----------|-----------------|
+| Column projection | Skip unneeded column chunks entirely | 10–100× (proportional to columns skipped) |
+| Predicate pushdown | Skip row groups via min/max statistics | 2–50× (depends on selectivity and data distribution) |
+| Dictionary encoding | Decompress only dictionary + indices | 2–5× for low-cardinality string columns |
+| Page-level filtering | Skip pages within a column chunk | 1.5–3× additional on top of row group skip |
+
+**Memory profile**: Parquet read with projection loads only selected
+columns into memory. A 10 GB Parquet file with 100 columns, reading
+2 columns, requires ~200 MB memory (2% of file). Without projection,
+the full row group (~128 MB default) must be buffered.
+
+**ORC vs Parquet**: ORC has built-in bloom filters and lightweight
+indexes per stripe. For point lookups, ORC can be 2–3× faster than
+Parquet without external indexes. For full scans, performance is
+comparable.
+
+**Arrow IPC**: Zero-copy reads when memory-mapped. Read throughput
+limited by memory bandwidth (~10 GB/s on modern hardware). No
+deserialization overhead.
 
 ### 7.2 Archive Performance
 
-TODO — tar streaming vs zip random access; tar.gz pipeline composition overhead
+| Operation | Throughput (single core) | Bottleneck |
+|-----------|------------------------|------------|
+| tar list/extract (uncompressed) | ~2 GB/s | I/O |
+| tar.gz decompress (level 6) | ~400 MB/s | CPU (zlib) |
+| tar.zst decompress | ~1.5 GB/s | CPU (zstd) |
+| zip extract (deflate) | ~400 MB/s | CPU (zlib) |
+| gzip compress (level 1) | ~300 MB/s | CPU |
+| gzip compress (level 9) | ~30 MB/s | CPU |
+| zstd compress (level 3) | ~500 MB/s | CPU |
+| zstd compress (level 19) | ~10 MB/s | CPU |
+
+**Streaming vs batch**: tar is sequential → streaming adds zero
+overhead. zip requires central directory at EOF → batch for listing,
+but individual file extraction can stream if offset is known.
+
+**Pipeline composition**: `tar_extract | gzip_decompress` adds one
+buffer copy per stage. Overhead is ~5% compared to a fused
+tar.gz reader, acceptable for the composability benefit.
 
 ### 7.3 Image Processing Performance
 
-TODO — resize throughput vs resolution; format conversion overhead
+| Operation | 1024×1024 | 4096×4096 | Scaling |
+|-----------|-----------|-----------|---------|
+| PNG decode | ~15 ms | ~200 ms | O(pixels) |
+| JPEG decode | ~5 ms | ~60 ms | O(pixels) |
+| Resize (Lanczos3) | ~20 ms | ~300 ms | O(src × dst pixels) |
+| PNG encode | ~30 ms | ~500 ms | O(pixels) |
+| WebP encode (lossless) | ~50 ms | ~800 ms | O(pixels) |
+| Perceptual hash | ~2 ms | ~5 ms | O(pixels) after 8×8 resize |
+
+**Memory**: Image processing requires full pixel buffer in memory.
+A 4096×4096 RGBA image = 64 MB. The `max_dimension` guard (default
+16384) caps memory at ~1 GB per image.
 
 ### 7.4 Erasure Coding Performance
 
-TODO — Reed-Solomon encode/decode throughput; XOR parity throughput; scaling with shard count
+| Configuration | Encode (MB/s) | Decode (MB/s) | Verify (MB/s) |
+|--------------|---------------|---------------|----------------|
+| RS 4+2 | ~800 | ~600 | ~1200 |
+| RS 6+3 | ~600 | ~450 | ~900 |
+| RS 10+4 | ~400 | ~300 | ~700 |
+| XOR (any count) | ~3000 | ~3000 | ~3000 |
+| Replication | ~memcpy | ~memcpy | ~memcpy |
+
+Reed-Solomon throughput scales inversely with total shard count due
+to GF(2^8) matrix multiplication. XOR parity is SIMD-accelerated
+and approaches memory bandwidth. Replication is a memcpy.
+
+**Streaming overhead**: RS operates on aligned blocks. If the
+streaming chunk size aligns with shard size (the common case in DFS),
+overhead is zero. Misaligned chunks require buffering one stripe
+width (~256 KB for 4+2 with 64 KB shards).
+
+### 7.5 Benchmark Specifications
+
+All benchmarks use Criterion with the following methodology:
+
+**Environment requirements**:
+- Warm-up: 3 seconds per benchmark
+- Measurement: 5 seconds, minimum 100 iterations
+- Statistical: report mean, median, std dev, throughput (MB/s)
+- Baseline: saved for regression detection across commits
+
+**Benchmark groups** (file: `benches/format_benchmarks.rs`):
+
+```rust
+// Group 1: Columnar read throughput
+fn bench_parquet_read(c: &mut Criterion) {
+    let mut group = c.benchmark_group("parquet_read");
+    group.throughput(Throughput::Bytes(data.len() as u64));
+    for cols in [1, 5, "all"] {
+        group.bench_with_input(
+            BenchmarkId::new("projection", cols), &data,
+            |b, data| b.iter(|| parquet_read(data, cols)),
+        );
+    }
+    group.finish();
+}
+```
+
+| Group | Benchmark ID | Input Sizes | Variants |
+|-------|-------------|-------------|----------|
+| `parquet_read` | `projection/{1,5,all}` | 1 MB, 100 MB | With/without predicate |
+| `parquet_write` | `codec/{none,snappy,zstd}` | 1 MB, 100 MB | 3 codecs |
+| `csv_parse` | `rows/{1K,100K,1M}` | 100 KB, 10 MB, 100 MB | With/without schema |
+| `archive_compress` | `algo/{gzip,zstd,bzip2,xz}` | 1 MB, 100 MB | Default level |
+| `archive_decompress` | `algo/{gzip,zstd,bzip2,xz}` | 1 MB, 100 MB | — |
+| `rs_encode` | `config/{4+2,6+3,10+4}` | 1 MB, 64 MB | — |
+| `rs_decode` | `config/{4+2,6+3,10+4}` | 1 MB, 64 MB | 1 missing shard |
+| `image_resize` | `res/{1024,4096}` | PNG, JPEG | Lanczos3 |
+| `cid_compute` | `hash/{sha256,blake3}` | 1 KB, 1 MB, 1 GB | — |
+| `format_detect` | `batch/100` | 100 mixed files | — |
+| `json_parse` | `size/{1K,100K,1M}` | 1 KB, 100 KB, 1 MB | — |
+| `avro_roundtrip` | `records/{1K,100K}` | 100 KB, 10 MB | — |
+
+**Regression thresholds**: CI fails if any benchmark regresses > 10%
+from the saved baseline. Baselines are updated on merge to `main`.
+
+**Throughput targets** (minimum acceptable on a single core):
+
+| Category | Operation | Target |
+|----------|-----------|--------|
+| Columnar | Parquet read (full scan) | ≥ 500 MB/s |
+| Columnar | Parquet read (2/100 cols) | ≥ 5 GB/s effective |
+| Row | CSV parse | ≥ 200 MB/s |
+| Row | JSON parse | ≥ 150 MB/s |
+| Archive | zstd decompress | ≥ 1 GB/s |
+| Archive | gzip decompress | ≥ 300 MB/s |
+| Erasure | RS 4+2 encode | ≥ 500 MB/s |
+| Erasure | XOR parity | ≥ 2 GB/s |
+| CAS | CID compute (SHA-256) | ≥ 500 MB/s |
+| CAS | CID compute (BLAKE3) | ≥ 2 GB/s |
+| Image | PNG decode 1024² | ≤ 20 ms |
+| Detection | FormatDetect | ≤ 10 µs per file |
 
 ---
 
 ## 8. Files Changed
 
-TODO — table: new files per category (`builtins_format_columnar.rs`, `builtins_format_csv.rs`, etc.), `Cargo.toml` feature flags, registry integration, test files
+| File | Action | Description |
+|------|--------|-------------|
+| `crates/deriva-compute/src/builtins_format.rs` | New | Top-level registration dispatcher (`register_format_functions`) |
+| `crates/deriva-compute/src/builtins_format_columnar.rs` | New | Category A: Parquet, ORC, Arrow IPC (18 functions) |
+| `crates/deriva-compute/src/builtins_format_csv.rs` | New | Category B: CSV, TSV, JSON, NDJSON, XML (25 functions) |
+| `crates/deriva-compute/src/builtins_format_serialization.rs` | New | Category C: Avro, Protobuf, Thrift, MsgPack, CBOR, BSON (19 functions) |
+| `crates/deriva-compute/src/builtins_format_archive.rs` | New | Category D: tar, zip, gzip, bzip2, xz, zstd, 7z, rar (20 functions) |
+| `crates/deriva-compute/src/builtins_format_image.rs` | New | Category E: PNG, JPEG, WebP, TIFF, SVG, GIF (18 functions) |
+| `crates/deriva-compute/src/builtins_format_audio.rs` | New | Category F: MP3, WAV, FLAC, MP4, MKV (16 functions) |
+| `crates/deriva-compute/src/builtins_format_document.rs` | New | Category G: PDF, DOCX, XLSX, HTML, Markdown (23 functions) |
+| `crates/deriva-compute/src/builtins_format_config.rs` | New | Category H: YAML, TOML, INI, HCL (16 functions) |
+| `crates/deriva-compute/src/builtins_format_geo.rs` | New | Category I: GeoJSON, Shapefile, KML, GeoTIFF (14 functions) |
+| `crates/deriva-compute/src/builtins_format_scientific.rs` | New | Category J: HDF5, NetCDF, FITS, NumPy, Zarr (13 functions) |
+| `crates/deriva-compute/src/builtins_format_log.rs` | New | Category K: Syslog, CEF, Apache/Nginx, CloudTrail, OTLP (13 functions) |
+| `crates/deriva-compute/src/builtins_format_cas.rs` | New | Category L: CID, DAG-PB, DAG-CBOR, CAR, UnixFS (15 functions) |
+| `crates/deriva-compute/src/builtins_format_database.rs` | New | Category M: SQLite, RocksDB SST, WAL, Postgres COPY (10 functions) |
+| `crates/deriva-compute/src/builtins_format_ml.rs` | New | Category N: TFRecord, SafeTensors, ONNX, GGUF (12 functions) |
+| `crates/deriva-compute/src/builtins_format_network.rs` | New | Category O: PCAP, DNS, HAR, Email (8 functions) |
+| `crates/deriva-compute/src/builtins_format_bio.rs` | New | Category P: FASTA, FASTQ, SAM/BAM, VCF, BED (12 functions) |
+| `crates/deriva-compute/src/builtins_format_binary.rs` | New | Category Q: WOFF, glTF, STL, DICOM, WASM, ELF (13 functions) |
+| `crates/deriva-compute/src/builtins_format_erasure.rs` | New | Category R: Reed-Solomon, XOR, replication, striping (9 functions) |
+| `crates/deriva-compute/src/builtins_format_detect.rs` | New | Category S: FormatDetect, universal conversion, schema (9 functions) |
+| `crates/deriva-compute/src/lib.rs` | Modify | Add `mod builtins_format*`; call `register_format_functions` |
+| `crates/deriva-compute/Cargo.toml` | Modify | Add 19 feature flags + ~45 optional dependencies |
+| `crates/deriva-compute/tests/format_columnar.rs` | New | Category A tests (~54) |
+| `crates/deriva-compute/tests/format_csv.rs` | New | Category B tests (~75) |
+| `crates/deriva-compute/tests/format_serialization.rs` | New | Category C tests (~57) |
+| `crates/deriva-compute/tests/format_archive.rs` | New | Category D tests (~60) |
+| `crates/deriva-compute/tests/format_image.rs` | New | Category E tests (~54) |
+| `crates/deriva-compute/tests/format_audio.rs` | New | Category F tests (~48) |
+| `crates/deriva-compute/tests/format_document.rs` | New | Category G tests (~69) |
+| `crates/deriva-compute/tests/format_config.rs` | New | Category H tests (~48) |
+| `crates/deriva-compute/tests/format_geo.rs` | New | Category I tests (~42) |
+| `crates/deriva-compute/tests/format_scientific.rs` | New | Category J tests (~39) |
+| `crates/deriva-compute/tests/format_log.rs` | New | Category K tests (~39) |
+| `crates/deriva-compute/tests/format_cas.rs` | New | Category L tests (~45) |
+| `crates/deriva-compute/tests/format_database.rs` | New | Category M tests (~30) |
+| `crates/deriva-compute/tests/format_ml.rs` | New | Category N tests (~36) |
+| `crates/deriva-compute/tests/format_network.rs` | New | Category O tests (~24) |
+| `crates/deriva-compute/tests/format_bio.rs` | New | Category P tests (~36) |
+| `crates/deriva-compute/tests/format_binary.rs` | New | Category Q tests (~39) |
+| `crates/deriva-compute/tests/format_erasure.rs` | New | Category R tests (~27) |
+| `crates/deriva-compute/tests/format_detect.rs` | New | Category S tests (~27) |
+| `crates/deriva-compute/tests/format_cross_conversion.rs` | New | Cross-category roundtrip tests (~15) |
+| `crates/deriva-compute/tests/format_detection.rs` | New | Format detection integration tests (~33) |
+| `crates/deriva-compute/tests/format_streaming_parity.rs` | New | Streaming equivalence tests (~107) |
+| `crates/deriva-compute/benches/format_benchmarks.rs` | New | Criterion benchmark suite (12 groups) |
+
+**Summary**: 20 new source files, 2 modified files, 23 new test files, 1 benchmark file = **46 files total**.
 
 ---
 
 ## 9. Dependency Changes
 
-TODO — comprehensive table by phase:
-- Phase 1: `csv` 1, `quick-xml` 0.36, `tar` 0.4, `zip` 2, `flate2` 1, `bzip2` 0.4, `xz2` 0.1, `serde_yaml` 0.9, `toml` 0.8, `configparser` 3, `hcl-rs` 0.18, `cid` 0.11, `multihash` 0.19, `iroh-car` 0.6, `infer` 0.16, `mime_guess` 2
-- Phase 2: `parquet` 53, `arrow` 53, `orc-rust` 0.4, `apache-avro` 0.17, `prost` 0.13, `rmp-serde` 1, `ciborium` 0.2, `bson` 2, `reed-solomon-erasure` 6
-- Phase 3: `image` 0.25, `resvg` 0.43, `img-hash` 3, `lopdf` 0.33, `calamine` 0.26, `scraper` 0.20, `pulldown-cmark` 0.12, `symphonia` 0.5
-- Phase 4: `geojson` 0.24, `flatgeobuf` 4, `hdf5` 0.8, `rusqlite` 0.32, `safetensors` 0.4, `wasmparser` 0.218, `noodles` 0.82, `pcap-parser` 0.16, `mailparse` 0.15, `dicom-object` 0.7, `gltf` 1
+All dependencies are optional, gated behind feature flags. No new
+dependencies are added to the default build unless `format-phase1`
+is enabled (which it is by default).
+
+### Phase 1 (16 new crates)
+
+| Crate | Version | Feature Flag | Purpose |
+|-------|---------|-------------|---------|
+| `csv` | 1 | `format-csv` | CSV read/write |
+| `quick-xml` | 0.36 | `format-csv` | XML read/write |
+| `tar` | 0.4 | `format-archive` | tar archive read/write |
+| `zip` | 2 | `format-archive` | zip archive read/write |
+| `flate2` | 1 | `format-archive` | gzip compress/decompress |
+| `bzip2` | 0.4 | `format-archive` | bzip2 compress/decompress |
+| `xz2` | 0.1 | `format-archive` | xz compress/decompress |
+| `zstd` | 0.13 | `format-archive` | zstd compress/decompress |
+| `serde_yaml` | 0.9 | `format-config` | YAML parse/write |
+| `toml` | 0.8 | `format-config` | TOML parse/write |
+| `configparser` | 3 | `format-config` | INI parse/write |
+| `hcl-rs` | 0.18 | `format-config` | HCL parse |
+| `cid` | 0.11 | `format-cas` | CID computation/parsing |
+| `multihash` | 0.19 | `format-cas` | Multihash digests |
+| `libipld` | 0.16 | `format-cas` | DAG-PB, DAG-CBOR codec |
+| `iroh-car` | 0.6 | `format-cas` | CAR archive read/write |
+| `infer` | 0.16 | `format-detect` | Magic byte detection |
+| `mime_guess` | 2 | `format-detect` | MIME↔extension mapping |
+
+### Phase 2 (9 new crates)
+
+| Crate | Version | Feature Flag | Purpose |
+|-------|---------|-------------|---------|
+| `parquet` | 53 | `format-columnar` | Parquet read/write |
+| `arrow` | 53 | `format-columnar` | Arrow arrays, IPC |
+| `orc-rust` | 0.4 | `format-columnar` | ORC read |
+| `apache-avro` | 0.17 | `format-serialization` | Avro read/write |
+| `prost` | 0.13 | `format-serialization` | Protobuf decode/encode |
+| `rmp-serde` | 1 | `format-serialization` | MessagePack serde |
+| `ciborium` | 0.2 | `format-serialization` | CBOR read/write |
+| `bson` | 2 | `format-serialization` | BSON read/write |
+| `reed-solomon-erasure` | 6 | `format-erasure` | Reed-Solomon GF(2^8) |
+
+### Phase 3 (8 new crates)
+
+| Crate | Version | Feature Flag | Purpose |
+|-------|---------|-------------|---------|
+| `image` | 0.25 | `format-image` | PNG/JPEG/WebP/GIF/TIFF decode/encode |
+| `resvg` | 0.43 | `format-image` | SVG rasterization |
+| `img-hash` | 3 | `format-image` | Perceptual hashing |
+| `symphonia` | 0.5 | `format-audio` | MP3/WAV/FLAC/MP4 metadata |
+| `lopdf` | 0.33 | `format-document` | PDF text extraction |
+| `calamine` | 0.26 | `format-document` | XLSX/XLS/ODS read |
+| `scraper` | 0.20 | `format-document` | HTML parsing |
+| `pulldown-cmark` | 0.12 | `format-document` | Markdown parsing |
+
+### Phase 4 (11 new crates)
+
+| Crate | Version | Feature Flag | Purpose |
+|-------|---------|-------------|---------|
+| `geojson` | 0.24 | `format-geo` | GeoJSON read/write |
+| `flatgeobuf` | 4 | `format-geo` | FlatGeobuf, Shapefile |
+| `hdf5` | 0.8 | `format-scientific` | HDF5 read (requires libhdf5 system dep) |
+| `rusqlite` | 0.32 | `format-database` | SQLite read/write (bundled) |
+| `safetensors` | 0.4 | `format-ml` | SafeTensors read/write |
+| `wasmparser` | 0.218 | `format-binary` | WASM validation/metadata |
+| `dicom-object` | 0.7 | `format-binary` | DICOM read/write/anonymize |
+| `gltf` | 1 | `format-binary` | glTF parse/validate |
+| `pcap-parser` | 0.16 | `format-network` | PCAP packet parsing |
+| `mailparse` | 0.15 | `format-network` | Email MIME parsing |
+| `noodles` | 0.82 | `format-bio` | SAM/BAM/VCF/FASTA/FASTQ |
+
+### Summary
+
+| Phase | New Crates | System Dependencies |
+|-------|-----------|-------------------|
+| 1 | 18 | None |
+| 2 | 9 | None |
+| 3 | 8 | None |
+| 4 | 11 | `libhdf5` (for `hdf5` crate, Category J only) |
+| **Total** | **46** | **1 optional** |
+
+**Build impact**: With default features (`format-phase1` only), 18
+new crates are compiled. Full `format-all` adds 46 crates. Each
+phase is additive — enabling Phase 2 does not pull Phase 3/4 deps.
 
 ---
 
@@ -2068,51 +3310,171 @@ TODO — comprehensive table by phase:
 
 ### 10.1 Why Feature Flags Instead of Separate Crates?
 
-TODO — single crate with feature flags keeps the registry unified; separate crates would require dynamic loading or compile-time selection; feature flags are idiomatic Rust
+A single `deriva-compute` crate with feature flags keeps the
+`FunctionRegistry` unified — all 283 functions register through the
+same `ComputeFunction` trait and share the same `Bytes` I/O contract.
+Separate crates would require either:
+- Dynamic loading (`dlopen`) — adds runtime complexity, ABI stability
+  concerns, and platform-specific behavior
+- A workspace of crates with a top-level aggregator — adds 19 crates
+  to the workspace, each with its own `Cargo.toml`, increasing
+  maintenance burden without meaningful isolation benefit
+
+Feature flags are idiomatic Rust for optional functionality. They
+provide compile-time selection with zero runtime cost, and `cargo`
+handles dependency resolution automatically. The tradeoff is longer
+`Cargo.toml` feature sections, which is acceptable for 19 flags.
 
 ### 10.2 Why Phase 1 Prioritizes CSV/Log/Config Over Parquet/Arrow?
 
-TODO — CSV/log/config are ubiquitous, low-dependency, and immediately useful; Parquet/Arrow bring heavy dependencies and are needed primarily for analytics workloads
+Phase 1 targets formats that are:
+1. **Ubiquitous** — CSV, JSON, YAML, gzip are used in every domain
+2. **Low-dependency** — no heavy C/C++ bindings (unlike `parquet`
+   which pulls `arrow` → `arrow-buffer` → `arrow-schema` → ...)
+3. **Immediately useful** — config files, log parsing, and archive
+   extraction are needed for bootstrapping the DFS itself
+4. **CAS-native** — CID/CAR/UnixFS (Category L) directly serve the
+   Computation-Addressed Store, the project's core abstraction
+
+Parquet/Arrow (Phase 2) bring ~2 MB of compiled code and complex
+build requirements. Deferring them lets Phase 1 ship fast with a
+small binary.
 
 ### 10.3 Why Include Niche Formats (DICOM, FASTA, PCAP)?
 
-TODO — data lakes in healthcare, genomics, and security store these formats; a universal CAS must handle them; feature flags make them optional
+A universal content-addressed store must handle data as-is. Real
+data lakes contain:
+- **Healthcare**: DICOM images (PACS systems store petabytes)
+- **Genomics**: FASTA/FASTQ/BAM (a single genome run = 100+ GB)
+- **Security**: PCAP captures (network forensics, compliance)
+
+Without format-aware functions, these files are opaque blobs —
+addressable but not queryable. With them, a CAddr recipe can express
+`bam_read(region="chr1:1000-2000")` and the DFS can skip irrelevant
+blocks.
+
+Feature flags make these zero-cost for users who don't need them.
+The `format-phase4` bundle is not in `default` features.
 
 ### 10.4 Why 283 Functions Instead of Fewer Generic Ones?
 
-TODO — specific functions enable precise CAddr recipes (e.g., `ParquetProjection(columns=["age","name"])` vs generic `read(format="parquet", options=...)`); specific functions have better type safety, error messages, and optimization opportunities
+**Specific functions enable precise computation addresses.** A CAddr
+recipe `parquet_projection(columns=["age","name"])` is:
+- **Self-describing**: the function name documents intent
+- **Type-safe**: params are validated at registration time
+- **Optimizable**: the executor knows to skip unneeded Parquet columns
+- **Cacheable**: identical CAddr → identical result (deterministic)
+
+A generic `read(format="parquet", options={"columns":["age","name"]})`
+loses all of these properties — the executor cannot optimize without
+parsing the opaque `options` map, error messages are generic, and
+the function's behavior depends on a runtime string.
+
+The 283-function approach follows the Unix philosophy: each function
+does one thing well. Composition happens at the pipeline level, not
+inside a monolithic dispatcher.
 
 ---
 
 ## 11. Observability Integration
 
-TODO — per-function metrics (same as §2.14/§2.15), per-category aggregate counters, format detection accuracy tracking, per-format throughput histograms
+Same metric framework as §2.14/§2.15 — all format functions emit
+metrics through the existing `MetricsCollector` trait.
+
+### Per-Function Metrics
+
+Every format function emits on each invocation:
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `compute_function_duration_seconds` | Histogram | `function_id`, `mode` | Wall-clock execution time |
+| `compute_function_input_bytes` | Counter | `function_id` | Total input bytes processed |
+| `compute_function_output_bytes` | Counter | `function_id` | Total output bytes produced |
+| `compute_function_errors_total` | Counter | `function_id`, `error_type` | Error count by variant (`InvalidParam`, `ExecutionFailed`) |
+
+### Per-Category Aggregate Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `format_category_invocations_total` | Counter | `category` (A–S) | Total invocations per category |
+| `format_category_bytes_processed` | Counter | `category` | Total bytes processed per category |
+
+### Format-Specific Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `format_detect_confidence` | Histogram | `detected_format` | Detection confidence distribution |
+| `format_detect_unknown_total` | Counter | — | Files that could not be identified |
+| `format_parquet_row_groups_skipped` | Counter | `function_id` | Row groups skipped via predicate pushdown |
+| `format_parquet_columns_projected` | Histogram | `function_id` | Number of columns read vs total |
+| `format_rs_shards_reconstructed` | Counter | `config` | Shards reconstructed in RS decode |
+| `format_archive_compression_ratio` | Histogram | `algorithm` | Compression ratio (output/input) |
+
+### Structured Logging
+
+All format functions log at `DEBUG` level:
+```
+DEBUG function_id="csv_parse@1.0.0" input_bytes=1048576 output_rows=25000 duration_ms=12
+DEBUG function_id="parquet_projection@1.0.0" columns_requested=2 columns_total=50 row_groups_read=3 row_groups_skipped=7
+DEBUG function_id="format_detect@1.0.0" detected="parquet" confidence=0.99 magic="PAR1"
+DEBUG function_id="rs_decode@1.0.0" config="4+2" missing=[1,3] reconstructed=2
+```
+
+`WARN` level for recoverable issues:
+```
+WARN function_id="wal_parse@1.0.0" msg="truncated record at offset 4096, skipping"
+WARN function_id="csv_parse@1.0.0" msg="non-UTF-8 input, falling back to Latin-1"
+```
 
 ---
 
 ## 12. Checklist
 
-- [ ] Phase 1: Implement Category B — CSV/JSON/XML (25 functions)
-- [ ] Phase 1: Implement Category D — Archive formats (20 functions)
-- [ ] Phase 1: Implement Category H — Config formats (16 functions)
-- [ ] Phase 1: Implement Category K — Log formats (13 functions)
-- [ ] Phase 1: Implement Category L — Content-addressing (15 functions)
-- [ ] Phase 1: Implement Category S — Universal detection (9 functions)
-- [ ] Phase 2: Implement Category A — Columnar formats (18 functions)
-- [ ] Phase 2: Implement Category C — Serialization formats (19 functions)
-- [ ] Phase 2: Implement Category R — Erasure coding (9 functions)
-- [ ] Phase 3: Implement Category E — Image formats (18 functions)
-- [ ] Phase 3: Implement Category F — Audio/Video formats (16 functions)
-- [ ] Phase 3: Implement Category G — Document formats (23 functions)
-- [ ] Phase 4: Implement Categories I, J, M, N, O, P, Q (93 functions)
-- [ ] Set up Cargo feature flags per category
-- [ ] Registration functions per category
-- [ ] Per-category test suites (~849 tests)
+### 12.1 Phase 1 Implementation
+- [ ] Category S: Universal detection — `builtins_format_detect.rs` (9 functions)
+- [ ] Category B: CSV/JSON/XML — `builtins_format_csv.rs` (25 functions)
+- [ ] Category H: Config — `builtins_format_config.rs` (16 functions)
+- [ ] Category D: Archive — `builtins_format_archive.rs` (20 functions)
+- [ ] Category K: Log — `builtins_format_log.rs` (13 functions)
+- [ ] Category L: CAS — `builtins_format_cas.rs` (15 functions)
+
+### 12.2 Phase 2 Implementation
+- [ ] Category R: Erasure coding — `builtins_format_erasure.rs` (9 functions)
+- [ ] Category C: Serialization — `builtins_format_serialization.rs` (19 functions)
+- [ ] Category A: Columnar — `builtins_format_columnar.rs` (18 functions)
+
+### 12.3 Phase 3 Implementation
+- [ ] Category E: Image — `builtins_format_image.rs` (18 functions)
+- [ ] Category G: Document — `builtins_format_document.rs` (23 functions)
+- [ ] Category F: Audio/Video — `builtins_format_audio.rs` (16 functions)
+
+### 12.4 Phase 4 Implementation
+- [ ] Category I: Geospatial — `builtins_format_geo.rs` (14 functions)
+- [ ] Category J: Scientific — `builtins_format_scientific.rs` (13 functions)
+- [ ] Category M: Database — `builtins_format_database.rs` (10 functions)
+- [ ] Category N: ML/Tensor — `builtins_format_ml.rs` (12 functions)
+- [ ] Category O: Network — `builtins_format_network.rs` (8 functions)
+- [ ] Category P: Bioinformatics — `builtins_format_bio.rs` (12 functions)
+- [ ] Category Q: Specialized binary — `builtins_format_binary.rs` (13 functions)
+
+### 12.5 Infrastructure
+- [ ] `builtins_format.rs` registration dispatcher
+- [ ] `Cargo.toml` feature flags (19 category flags + 4 phase bundles + `format-all`)
+- [ ] `lib.rs` module declarations and conditional registration
+- [ ] Feature flag CI matrix (test each phase independently)
+
+### 12.6 Testing
+- [ ] 19 per-category test files (~849 tests)
 - [ ] Cross-category conversion tests (~15 tests)
-- [ ] Format detection integration tests (~20 tests)
+- [ ] Format detection integration tests (~33 tests)
 - [ ] Streaming equivalence tests (~107 tests)
-- [ ] Per-category benchmarks
-- [ ] Add observability metrics
-- [ ] `cargo clippy --workspace -- -D warnings` clean
-- [ ] All existing tests still pass
+- [ ] Criterion benchmark suite (12 groups)
+
+### 12.7 Quality Gates
+- [ ] `cargo clippy --workspace --all-features -- -D warnings` clean
+- [ ] `cargo test --workspace --all-features` passes
+- [ ] `cargo test --workspace` passes (default features only)
+- [ ] All existing §2.14/§2.15 tests still pass
+- [ ] No throughput regression > 10% on benchmarks
+- [ ] Observability metrics emitted for all functions
 - [ ] Commit and push

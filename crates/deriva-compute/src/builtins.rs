@@ -477,6 +477,57 @@ impl ComputeFunction for PadFn {
     }
 }
 
+pub struct LineEndingFn;
+
+impl ComputeFunction for LineEndingFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("line_ending", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let target = match params.get("target") {
+            Some(Value::String(s)) => s.as_str(),
+            _ => return Err(ComputeError::InvalidParam("missing param: target".into())),
+        };
+        let input = &inputs[0];
+        match target {
+            "lf" => {
+                let mut out = Vec::with_capacity(input.len());
+                let mut i = 0;
+                while i < input.len() {
+                    if i + 1 < input.len() && input[i] == b'\r' && input[i + 1] == b'\n' {
+                        out.push(b'\n');
+                        i += 2;
+                    } else {
+                        out.push(input[i]);
+                        i += 1;
+                    }
+                }
+                Ok(Bytes::from(out))
+            }
+            "crlf" => {
+                let mut out = Vec::with_capacity(input.len());
+                for (i, &b) in input.iter().enumerate() {
+                    if b == b'\n' && (i == 0 || input[i - 1] != b'\r') {
+                        out.push(b'\r');
+                    }
+                    out.push(b);
+                }
+                Ok(Bytes::from(out))
+            }
+            _ => Err(ComputeError::InvalidParam("target must be 'lf' or 'crlf'".into())),
+        }
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: 1, memory_bytes: size * 2 }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -498,4 +549,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(ByteSwapFn));
     registry.register(Arc::new(TrimFn));
     registry.register(Arc::new(PadFn));
+    registry.register(Arc::new(LineEndingFn));
 }

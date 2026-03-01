@@ -713,6 +713,56 @@ impl ComputeFunction for Lz4DecompressFn {
     }
 }
 
+// ── #27 SnappyCompressFn ──
+
+pub struct SnappyCompressFn;
+
+impl ComputeFunction for SnappyCompressFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("snappy_compress", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let mut encoder = snap::raw::Encoder::new();
+        encoder.compress_vec(&inputs[0])
+            .map(Bytes::from)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("snappy compress: {}", e)))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: size / 100_000 + 1, memory_bytes: size * 2 }
+    }
+}
+
+// ── #28 SnappyDecompressFn ──
+
+pub struct SnappyDecompressFn;
+
+impl ComputeFunction for SnappyDecompressFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("snappy_decompress", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let mut decoder = snap::raw::Decoder::new();
+        decoder.decompress_vec(&inputs[0])
+            .map(Bytes::from)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("snappy decompress: {}", e)))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: size / 100_000 + 1, memory_bytes: size * 4 }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -741,4 +791,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(ZstdDecompressFn));
     registry.register(Arc::new(Lz4CompressFn));
     registry.register(Arc::new(Lz4DecompressFn));
+    registry.register(Arc::new(SnappyCompressFn));
 }

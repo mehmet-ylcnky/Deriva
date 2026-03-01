@@ -934,3 +934,42 @@ fn lz4_decompress_binary_roundtrip() {
     let decompressed = exec1(&Lz4DecompressFn, &compressed).unwrap();
     assert_eq!(decompressed.as_ref(), input.as_slice());
 }
+
+// ── #27 SnappyCompressFn ──
+
+#[test]
+fn snappy_compress_roundtrip() {
+    let input = b"snappy is optimized for speed over ratio";
+    let compressed = exec1(&SnappyCompressFn, input).unwrap();
+    let decompressed = exec1(&SnappyDecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input);
+}
+
+#[test]
+fn snappy_compress_empty_input() {
+    let compressed = exec1(&SnappyCompressFn, b"").unwrap();
+    assert!(!compressed.is_empty()); // at least varint header
+    let decompressed = exec1(&SnappyDecompressFn, &compressed).unwrap();
+    assert!(decompressed.is_empty());
+}
+
+#[test]
+fn snappy_compress_reduces_repetitive() {
+    let input = vec![b'Z'; 10_000];
+    let compressed = exec1(&SnappyCompressFn, &input).unwrap();
+    assert!(compressed.len() < input.len() / 5);
+}
+
+#[test]
+fn snappy_compress_binary_roundtrip() {
+    let input: Vec<u8> = (0..=255).cycle().take(16_384).collect();
+    let compressed = exec1(&SnappyCompressFn, &input).unwrap();
+    let decompressed = exec1(&SnappyDecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input.as_slice());
+}
+
+#[test]
+fn snappy_compress_rejects_multiple_inputs() {
+    let r = SnappyCompressFn.execute(vec![Bytes::from("a"), Bytes::from("b")], &BTreeMap::new());
+    assert!(matches!(r, Err(ComputeError::InputCount { expected: 1, got: 2 })));
+}

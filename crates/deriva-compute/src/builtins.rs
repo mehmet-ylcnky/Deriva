@@ -414,6 +414,29 @@ impl ComputeFunction for ByteSwapFn {
     }
 }
 
+pub struct TrimFn;
+
+impl ComputeFunction for TrimFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("trim", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let input = &inputs[0];
+        let start = input.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(input.len());
+        let end = input.iter().rposition(|b| !b.is_ascii_whitespace()).map(|p| p + 1).unwrap_or(start);
+        Ok(inputs[0].slice(start..end))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: 1, memory_bytes: size }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -433,4 +456,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(BitwiseOrFn));
     registry.register(Arc::new(BitwiseNotFn));
     registry.register(Arc::new(ByteSwapFn));
+    registry.register(Arc::new(TrimFn));
 }

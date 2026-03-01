@@ -10,6 +10,14 @@ fn parse_byte_param(params: &BTreeMap<String, Value>, name: &str) -> Result<u8, 
     }
 }
 
+fn parse_usize_param(params: &BTreeMap<String, Value>, name: &str) -> Result<usize, ComputeError> {
+    match params.get(name) {
+        Some(Value::String(s)) => s.parse().map_err(|_| ComputeError::InvalidParam(format!("{} must be a positive integer", name))),
+        Some(Value::Int(n)) if *n > 0 => Ok(*n as usize),
+        _ => Err(ComputeError::InvalidParam(format!("missing param: {}", name))),
+    }
+}
+
 pub struct IdentityFn;
 
 impl ComputeFunction for IdentityFn {
@@ -437,6 +445,38 @@ impl ComputeFunction for TrimFn {
     }
 }
 
+pub struct PadFn;
+
+impl ComputeFunction for PadFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("pad", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let block_size = parse_usize_param(params, "block_size")?;
+        if block_size == 0 || block_size > 256 {
+            return Err(ComputeError::InvalidParam("block_size must be 1-256".into()));
+        }
+        let input = &inputs[0];
+        let remainder = input.len() % block_size;
+        if remainder == 0 {
+            return Ok(inputs[0].clone());
+        }
+        let pad_len = block_size - remainder;
+        let mut out = input.to_vec();
+        out.extend(std::iter::repeat(pad_len as u8).take(pad_len));
+        Ok(Bytes::from(out))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: 1, memory_bytes: size + 256 }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -457,4 +497,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(BitwiseNotFn));
     registry.register(Arc::new(ByteSwapFn));
     registry.register(Arc::new(TrimFn));
+    registry.register(Arc::new(PadFn));
 }

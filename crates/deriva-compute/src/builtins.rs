@@ -288,7 +288,34 @@ impl ComputeFunction for Base32DecodeFn {
         if inputs.len() != 1 {
             return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
         }
-        data_encoding::BASE32.decode(&inputs[0])
+        let input = &inputs[0];
+        // Validate: Base32 length must be multiple of 8 and must contain proper padding
+        if !input.is_empty() {
+            if input.len() % 8 != 0 {
+                return Err(ComputeError::ExecutionFailed("invalid base32: input length must be a multiple of 8".into()));
+            }
+            // Validate padding: non-padding chars after padding are invalid,
+            // and data bytes in padding positions must be '='
+            let data_len = input.iter().position(|&b| b == b'=').unwrap_or(input.len());
+            let pad_len = input.len() - data_len;
+            // Valid padding lengths for Base32: 0, 1, 3, 4, 6
+            if !matches!(pad_len, 0 | 1 | 3 | 4 | 6) {
+                return Err(ComputeError::ExecutionFailed("invalid base32: wrong padding length".into()));
+            }
+            // If data_len is not at a valid boundary, padding is required
+            let expected_pad = match data_len % 8 {
+                0 => 0,
+                2 => 6,
+                4 => 4,
+                5 => 3,
+                7 => 1,
+                _ => return Err(ComputeError::ExecutionFailed("invalid base32: invalid data length".into())),
+            };
+            if pad_len != expected_pad {
+                return Err(ComputeError::ExecutionFailed("invalid base32: incorrect padding".into()));
+            }
+        }
+        data_encoding::BASE32.decode(input)
             .map(Bytes::from)
             .map_err(|e| ComputeError::ExecutionFailed(format!("invalid base32: {}", e)))
     }
@@ -462,10 +489,7 @@ impl ComputeFunction for PadFn {
         }
         let input = &inputs[0];
         let remainder = input.len() % block_size;
-        if remainder == 0 {
-            return Ok(inputs[0].clone());
-        }
-        let pad_len = block_size - remainder;
+        let pad_len = if remainder == 0 { block_size } else { block_size - remainder };
         let mut out = input.to_vec();
         out.extend(std::iter::repeat(pad_len as u8).take(pad_len));
         Ok(Bytes::from(out))

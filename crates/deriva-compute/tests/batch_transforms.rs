@@ -1011,3 +1011,43 @@ fn snappy_decompress_large_roundtrip() {
     let decompressed = exec1(&SnappyDecompressFn, &compressed).unwrap();
     assert_eq!(decompressed.as_ref(), input.as_slice());
 }
+
+// ── #29 BrotliCompressFn ──
+
+#[test]
+fn brotli_compress_roundtrip() {
+    let input = b"brotli achieves best text compression ratio";
+    let compressed = exec1(&BrotliCompressFn, input).unwrap();
+    let decompressed = exec1(&BrotliDecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input);
+}
+
+#[test]
+fn brotli_compress_empty_input() {
+    let compressed = exec1(&BrotliCompressFn, b"").unwrap();
+    assert!(!compressed.is_empty());
+    let decompressed = exec1(&BrotliDecompressFn, &compressed).unwrap();
+    assert!(decompressed.is_empty());
+}
+
+#[test]
+fn brotli_compress_custom_quality() {
+    let input = vec![b'B'; 10_000];
+    let fast = exec1_params(&BrotliCompressFn, &input, params(&[("quality", "0")])).unwrap();
+    let max = exec1_params(&BrotliCompressFn, &input, params(&[("quality", "11")])).unwrap();
+    assert!(max.len() <= fast.len());
+}
+
+#[test]
+fn brotli_compress_quality_out_of_range() {
+    let r = exec1_params(&BrotliCompressFn, b"data", params(&[("quality", "12")]));
+    assert!(matches!(r, Err(ComputeError::InvalidParam(_))));
+}
+
+#[test]
+fn brotli_compress_large_roundtrip() {
+    let input: Vec<u8> = (0..=255).cycle().take(50_000).collect();
+    let compressed = exec1(&BrotliCompressFn, &input).unwrap();
+    let decompressed = exec1(&BrotliDecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input.as_slice());
+}

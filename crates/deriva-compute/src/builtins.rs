@@ -763,6 +763,68 @@ impl ComputeFunction for SnappyDecompressFn {
     }
 }
 
+// ── #29 BrotliCompressFn ──
+
+pub struct BrotliCompressFn;
+
+impl ComputeFunction for BrotliCompressFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("brotli_compress", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let quality: u32 = match params.get("quality") {
+            Some(Value::String(s)) => s.parse().map_err(|_| ComputeError::InvalidParam("quality must be 0-11".into()))?,
+            None => 6,
+            _ => return Err(ComputeError::InvalidParam("quality must be a string".into())),
+        };
+        if quality > 11 {
+            return Err(ComputeError::InvalidParam("quality must be 0-11".into()));
+        }
+        let mut output = Vec::new();
+        let bp = brotli::enc::BrotliEncoderParams {
+            quality: quality as i32,
+            ..Default::default()
+        };
+        brotli::BrotliCompress(&mut &inputs[0][..], &mut output, &bp)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("brotli compress: {}", e)))?;
+        Ok(Bytes::from(output))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: size / 20_000 + 1, memory_bytes: size * 3 }
+    }
+}
+
+// ── #30 BrotliDecompressFn ──
+
+pub struct BrotliDecompressFn;
+
+impl ComputeFunction for BrotliDecompressFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("brotli_decompress", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let mut output = Vec::new();
+        brotli::BrotliDecompress(&mut &inputs[0][..], &mut output)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("brotli decompress: {}", e)))?;
+        Ok(Bytes::from(output))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: size / 50_000 + 1, memory_bytes: size * 4 }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -793,4 +855,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(Lz4DecompressFn));
     registry.register(Arc::new(SnappyCompressFn));
     registry.register(Arc::new(SnappyDecompressFn));
+    registry.register(Arc::new(BrotliCompressFn));
 }

@@ -3,6 +3,13 @@ use bytes::Bytes;
 use deriva_core::address::{FunctionId, Value};
 use std::collections::BTreeMap;
 
+fn parse_byte_param(params: &BTreeMap<String, Value>, name: &str) -> Result<u8, ComputeError> {
+    match params.get(name) {
+        Some(Value::String(s)) => s.parse().map_err(|_| ComputeError::InvalidParam(format!("{} must be 0-255", name))),
+        _ => Err(ComputeError::InvalidParam(format!("missing param: {}", name))),
+    }
+}
+
 pub struct IdentityFn;
 
 impl ComputeFunction for IdentityFn {
@@ -308,6 +315,27 @@ impl ComputeFunction for XorFn {
     }
 }
 
+pub struct BitwiseAndFn;
+
+impl ComputeFunction for BitwiseAndFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("bitwise_and", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let mask = parse_byte_param(params, "mask")?;
+        Ok(Bytes::from(inputs[0].iter().map(|b| b & mask).collect::<Vec<_>>()))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: 1, memory_bytes: size }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -323,4 +351,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(Base32EncodeFn));
     registry.register(Arc::new(Base32DecodeFn));
     registry.register(Arc::new(XorFn));
+    registry.register(Arc::new(BitwiseAndFn));
 }

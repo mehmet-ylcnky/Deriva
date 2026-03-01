@@ -854,3 +854,45 @@ fn zstd_decompress_high_level_roundtrip() {
     let decompressed = exec1(&ZstdDecompressFn, &compressed).unwrap();
     assert_eq!(decompressed.as_ref(), input);
 }
+
+// ── #25 Lz4CompressFn ──
+
+#[test]
+fn lz4_compress_has_size_header() {
+    let input = b"hello lz4 world";
+    let compressed = exec1(&Lz4CompressFn, input).unwrap();
+    // First 4 bytes are little-endian original size
+    let size = u32::from_le_bytes([compressed[0], compressed[1], compressed[2], compressed[3]]);
+    assert_eq!(size as usize, input.len());
+}
+
+#[test]
+fn lz4_compress_roundtrip() {
+    let input = b"content-addressed storage with lz4";
+    let compressed = exec1(&Lz4CompressFn, input).unwrap();
+    let decompressed = exec1(&Lz4DecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input);
+}
+
+#[test]
+fn lz4_compress_empty_input() {
+    let compressed = exec1(&Lz4CompressFn, b"").unwrap();
+    assert!(!compressed.is_empty()); // size header at minimum
+    let decompressed = exec1(&Lz4DecompressFn, &compressed).unwrap();
+    assert!(decompressed.is_empty());
+}
+
+#[test]
+fn lz4_compress_reduces_repetitive() {
+    let input = vec![b'X'; 10_000];
+    let compressed = exec1(&Lz4CompressFn, &input).unwrap();
+    assert!(compressed.len() < input.len() / 5);
+}
+
+#[test]
+fn lz4_compress_large_roundtrip() {
+    let input: Vec<u8> = (0..=255).cycle().take(50_000).collect();
+    let compressed = exec1(&Lz4CompressFn, &input).unwrap();
+    let decompressed = exec1(&Lz4DecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input.as_slice());
+}

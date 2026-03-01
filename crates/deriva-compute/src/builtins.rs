@@ -666,6 +666,53 @@ impl ComputeFunction for ZstdDecompressFn {
     }
 }
 
+// ── #25 Lz4CompressFn ──
+
+pub struct Lz4CompressFn;
+
+impl ComputeFunction for Lz4CompressFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("lz4_compress", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let compressed = lz4_flex::compress_prepend_size(&inputs[0]);
+        Ok(Bytes::from(compressed))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: size / 100_000 + 1, memory_bytes: size * 2 }
+    }
+}
+
+// ── #26 Lz4DecompressFn ──
+
+pub struct Lz4DecompressFn;
+
+impl ComputeFunction for Lz4DecompressFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("lz4_decompress", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        lz4_flex::decompress_size_prepended(&inputs[0])
+            .map(Bytes::from)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("lz4 decompress: {}", e)))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: size / 100_000 + 1, memory_bytes: size * 4 }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -692,4 +739,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(DecompressFn));
     registry.register(Arc::new(ZstdCompressFn));
     registry.register(Arc::new(ZstdDecompressFn));
+    registry.register(Arc::new(Lz4CompressFn));
 }

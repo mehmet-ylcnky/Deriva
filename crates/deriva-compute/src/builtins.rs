@@ -100,10 +100,31 @@ impl ComputeFunction for RepeatFn {
     }
 }
 
+pub struct LowercaseFn;
+
+impl ComputeFunction for LowercaseFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("lowercase", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        Ok(Bytes::from(inputs[0].iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<_>>()))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: 1, memory_bytes: size }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
     registry.register(Arc::new(ConcatFn));
     registry.register(Arc::new(UppercaseFn));
     registry.register(Arc::new(RepeatFn));
+    registry.register(Arc::new(LowercaseFn));
 }

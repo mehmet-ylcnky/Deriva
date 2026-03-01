@@ -642,6 +642,30 @@ impl ComputeFunction for ZstdCompressFn {
     }
 }
 
+// ── #24 ZstdDecompressFn ──
+
+pub struct ZstdDecompressFn;
+
+impl ComputeFunction for ZstdDecompressFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("zstd_decompress", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        zstd::decode_all(&inputs[0][..])
+            .map(Bytes::from)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("zstd decompress: {}", e)))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: size / 40_000 + 1, memory_bytes: size * 4 }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -667,4 +691,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(CompressFn));
     registry.register(Arc::new(DecompressFn));
     registry.register(Arc::new(ZstdCompressFn));
+    registry.register(Arc::new(ZstdDecompressFn));
 }

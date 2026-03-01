@@ -815,3 +815,42 @@ fn zstd_compress_level_zero_error() {
     let r = exec1_params(&ZstdCompressFn, b"data", params(&[("level", "0")]));
     assert!(matches!(r, Err(ComputeError::InvalidParam(_))));
 }
+
+// ── #24 ZstdDecompressFn ──
+
+#[test]
+fn zstd_decompress_roundtrip() {
+    let input = b"content-addressed distributed file system";
+    let compressed = exec1(&ZstdCompressFn, input).unwrap();
+    let decompressed = exec1(&ZstdDecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input);
+}
+
+#[test]
+fn zstd_decompress_empty_frame() {
+    let compressed = exec1(&ZstdCompressFn, b"").unwrap();
+    let decompressed = exec1(&ZstdDecompressFn, &compressed).unwrap();
+    assert!(decompressed.is_empty());
+}
+
+#[test]
+fn zstd_decompress_corrupt_data() {
+    let r = exec1(&ZstdDecompressFn, b"not a zstd frame");
+    assert!(matches!(r, Err(ComputeError::ExecutionFailed(_))));
+}
+
+#[test]
+fn zstd_decompress_large_roundtrip() {
+    let input: Vec<u8> = (0..=255).cycle().take(100_000).collect();
+    let compressed = exec1(&ZstdCompressFn, &input).unwrap();
+    let decompressed = exec1(&ZstdDecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input.as_slice());
+}
+
+#[test]
+fn zstd_decompress_high_level_roundtrip() {
+    let input = b"test data compressed at max level";
+    let compressed = exec1_params(&ZstdCompressFn, input, params(&[("level", "19")])).unwrap();
+    let decompressed = exec1(&ZstdDecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input);
+}

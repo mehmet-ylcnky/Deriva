@@ -142,6 +142,28 @@ impl ComputeFunction for ReverseFn {
     }
 }
 
+pub struct Base64EncodeFn;
+
+impl ComputeFunction for Base64EncodeFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("base64_encode", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&inputs[0]);
+        Ok(Bytes::from(encoded))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: 1, memory_bytes: size * 4 / 3 + 4 }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -150,4 +172,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(RepeatFn));
     registry.register(Arc::new(LowercaseFn));
     registry.register(Arc::new(ReverseFn));
+    registry.register(Arc::new(Base64EncodeFn));
 }

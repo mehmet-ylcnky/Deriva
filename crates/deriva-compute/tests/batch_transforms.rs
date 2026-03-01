@@ -1051,3 +1051,42 @@ fn brotli_compress_large_roundtrip() {
     let decompressed = exec1(&BrotliDecompressFn, &compressed).unwrap();
     assert_eq!(decompressed.as_ref(), input.as_slice());
 }
+
+// ── #30 BrotliDecompressFn ──
+
+#[test]
+fn brotli_decompress_roundtrip() {
+    let input = b"verify brotli decompression correctness";
+    let compressed = exec1(&BrotliCompressFn, input).unwrap();
+    let decompressed = exec1(&BrotliDecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input);
+}
+
+#[test]
+fn brotli_decompress_corrupt_data() {
+    let r = exec1(&BrotliDecompressFn, b"not brotli data");
+    assert!(matches!(r, Err(ComputeError::ExecutionFailed(_))));
+}
+
+#[test]
+fn brotli_decompress_empty_stream() {
+    let compressed = exec1(&BrotliCompressFn, b"").unwrap();
+    let decompressed = exec1(&BrotliDecompressFn, &compressed).unwrap();
+    assert!(decompressed.is_empty());
+}
+
+#[test]
+fn brotli_decompress_high_quality_roundtrip() {
+    let input = b"compressed at maximum brotli quality";
+    let compressed = exec1_params(&BrotliCompressFn, input, params(&[("quality", "11")])).unwrap();
+    let decompressed = exec1(&BrotliDecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input);
+}
+
+#[test]
+fn brotli_decompress_binary_roundtrip() {
+    let input: Vec<u8> = (0..=255).cycle().take(32_768).collect();
+    let compressed = exec1(&BrotliCompressFn, &input).unwrap();
+    let decompressed = exec1(&BrotliDecompressFn, &compressed).unwrap();
+    assert_eq!(decompressed.as_ref(), input.as_slice());
+}

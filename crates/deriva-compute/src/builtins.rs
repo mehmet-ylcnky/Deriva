@@ -241,6 +241,27 @@ impl ComputeFunction for HexDecodeFn {
     }
 }
 
+pub struct Base32EncodeFn;
+
+impl ComputeFunction for Base32EncodeFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("base32_encode", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let encoded = data_encoding::BASE32.encode(&inputs[0]);
+        Ok(Bytes::from(encoded))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: 1, memory_bytes: size * 8 / 5 + 8 }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -253,4 +274,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(Base64DecodeFn));
     registry.register(Arc::new(HexEncodeFn));
     registry.register(Arc::new(HexDecodeFn));
+    registry.register(Arc::new(Base32EncodeFn));
 }

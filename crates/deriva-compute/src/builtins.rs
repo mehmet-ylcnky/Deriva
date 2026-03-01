@@ -336,6 +336,27 @@ impl ComputeFunction for BitwiseAndFn {
     }
 }
 
+pub struct BitwiseOrFn;
+
+impl ComputeFunction for BitwiseOrFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("bitwise_or", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let mask = parse_byte_param(params, "mask")?;
+        Ok(Bytes::from(inputs[0].iter().map(|b| b | mask).collect::<Vec<_>>()))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: 1, memory_bytes: size }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -352,4 +373,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(Base32DecodeFn));
     registry.register(Arc::new(XorFn));
     registry.register(Arc::new(BitwiseAndFn));
+    registry.register(Arc::new(BitwiseOrFn));
 }

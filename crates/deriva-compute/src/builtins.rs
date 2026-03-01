@@ -377,6 +377,43 @@ impl ComputeFunction for BitwiseNotFn {
     }
 }
 
+pub struct ByteSwapFn;
+
+impl ComputeFunction for ByteSwapFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("byte_swap", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let ws: usize = match params.get("word_size") {
+            Some(Value::String(s)) => s.parse().map_err(|_| ComputeError::InvalidParam("word_size must be 2, 4, or 8".into()))?,
+            _ => return Err(ComputeError::InvalidParam("missing param: word_size".into())),
+        };
+        if !matches!(ws, 2 | 4 | 8) {
+            return Err(ComputeError::InvalidParam("word_size must be 2, 4, or 8".into()));
+        }
+        let input = &inputs[0];
+        if input.len() % ws != 0 {
+            return Err(ComputeError::ExecutionFailed(
+                format!("input length {} not a multiple of word_size {}", input.len(), ws),
+            ));
+        }
+        let mut out = input.to_vec();
+        for chunk in out.chunks_mut(ws) {
+            chunk.reverse();
+        }
+        Ok(Bytes::from(out))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: 1, memory_bytes: size }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -395,4 +432,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(BitwiseAndFn));
     registry.register(Arc::new(BitwiseOrFn));
     registry.register(Arc::new(BitwiseNotFn));
+    registry.register(Arc::new(ByteSwapFn));
 }

@@ -779,3 +779,39 @@ fn decompress_large_roundtrip() {
     let decompressed = exec1(&DecompressFn, &compressed).unwrap();
     assert_eq!(decompressed.as_ref(), input.as_slice());
 }
+
+// ── #23 ZstdCompressFn ──
+
+#[test]
+fn zstd_compress_produces_valid_frame() {
+    let input = b"The quick brown fox jumps over the lazy dog";
+    let compressed = exec1(&ZstdCompressFn, input).unwrap();
+    // Zstd magic number: 0xFD2FB528
+    assert_eq!(&compressed[..4], &[0x28, 0xB5, 0x2F, 0xFD]);
+}
+
+#[test]
+fn zstd_compress_empty_input() {
+    let compressed = exec1(&ZstdCompressFn, b"").unwrap();
+    assert!(!compressed.is_empty()); // valid zstd frame
+}
+
+#[test]
+fn zstd_compress_custom_level() {
+    let input = vec![b'A'; 10_000];
+    let fast = exec1_params(&ZstdCompressFn, &input, params(&[("level", "1")])).unwrap();
+    let max = exec1_params(&ZstdCompressFn, &input, params(&[("level", "22")])).unwrap();
+    assert!(max.len() <= fast.len()); // higher level = better or equal ratio
+}
+
+#[test]
+fn zstd_compress_level_out_of_range() {
+    let r = exec1_params(&ZstdCompressFn, b"data", params(&[("level", "23")]));
+    assert!(matches!(r, Err(ComputeError::InvalidParam(_))));
+}
+
+#[test]
+fn zstd_compress_level_zero_error() {
+    let r = exec1_params(&ZstdCompressFn, b"data", params(&[("level", "0")]));
+    assert!(matches!(r, Err(ComputeError::InvalidParam(_))));
+}

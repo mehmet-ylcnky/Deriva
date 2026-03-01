@@ -610,6 +610,38 @@ impl ComputeFunction for DecompressFn {
     }
 }
 
+// ── #23 ZstdCompressFn ──
+
+pub struct ZstdCompressFn;
+
+impl ComputeFunction for ZstdCompressFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("zstd_compress", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let level: i32 = match params.get("level") {
+            Some(Value::String(s)) => s.parse().map_err(|_| ComputeError::InvalidParam("level must be 1-22".into()))?,
+            None => 3,
+            _ => return Err(ComputeError::InvalidParam("level must be a string".into())),
+        };
+        if !(1..=22).contains(&level) {
+            return Err(ComputeError::InvalidParam("level must be 1-22".into()));
+        }
+        zstd::encode_all(&inputs[0][..], level)
+            .map(Bytes::from)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("zstd compress: {}", e)))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: size / 40_000 + 1, memory_bytes: size * 2 }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -634,4 +666,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(LineEndingFn));
     registry.register(Arc::new(CompressFn));
     registry.register(Arc::new(DecompressFn));
+    registry.register(Arc::new(ZstdCompressFn));
 }

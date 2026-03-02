@@ -653,6 +653,7 @@ dependencies = [
  "deriva-core",
  "deriva-server",
  "deriva-storage",
+ "serde_json",
  "sled",
  "tempfile",
  "tokio",

@@ -1769,6 +1769,207 @@ impl ComputeFunction for SampleFn {
     }
 }
 
+// ── #66 ReplaceFn ──
+
+pub struct ReplaceFn;
+
+impl ComputeFunction for ReplaceFn {
+    fn id(&self) -> FunctionId { FunctionId::new("replace", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let find = get_string_param(params, "find")?;
+        let replace = get_string_param(params, "replace")?;
+        if find.is_empty() { return Ok(inputs[0].clone()); }
+        let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("replace requires UTF-8 input".into()))?;
+        Ok(Bytes::from(text.replace(find, replace)))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let s = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: s / 100_000 + 1, memory_bytes: s * 2 }
+    }
+}
+
+// ── #67 RegexReplaceFn ──
+
+pub struct RegexReplaceFn;
+
+impl ComputeFunction for RegexReplaceFn {
+    fn id(&self) -> FunctionId { FunctionId::new("regex_replace", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let pattern = get_string_param(params, "pattern")?;
+        let replacement = get_string_param(params, "replacement")?;
+        let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("regex_replace requires UTF-8 input".into()))?;
+        let re = regex::Regex::new(pattern).map_err(|e| ComputeError::InvalidParam(format!("invalid regex: {}", e)))?;
+        Ok(Bytes::from(re.replace_all(text, replacement).into_owned()))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let s = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: s / 50_000 + 1, memory_bytes: s * 2 }
+    }
+}
+
+// ── #68 GrepFn ──
+
+pub struct GrepFn;
+
+impl ComputeFunction for GrepFn {
+    fn id(&self) -> FunctionId { FunctionId::new("grep", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let pattern = get_string_param(params, "pattern")?;
+        let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("grep requires UTF-8 input".into()))?;
+        let re = regex::Regex::new(pattern).map_err(|e| ComputeError::InvalidParam(format!("invalid regex: {}", e)))?;
+        let matched: Vec<&str> = text.lines().filter(|l| re.is_match(l)).collect();
+        Ok(Bytes::from(matched.join("\n")))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let s = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: s / 50_000 + 1, memory_bytes: s }
+    }
+}
+
+// ── #69 GrepInvertFn ──
+
+pub struct GrepInvertFn;
+
+impl ComputeFunction for GrepInvertFn {
+    fn id(&self) -> FunctionId { FunctionId::new("grep_invert", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let pattern = get_string_param(params, "pattern")?;
+        let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("grep_invert requires UTF-8 input".into()))?;
+        let re = regex::Regex::new(pattern).map_err(|e| ComputeError::InvalidParam(format!("invalid regex: {}", e)))?;
+        let filtered: Vec<&str> = text.lines().filter(|l| !re.is_match(l)).collect();
+        Ok(Bytes::from(filtered.join("\n")))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let s = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: s / 50_000 + 1, memory_bytes: s }
+    }
+}
+
+// ── #70 PrefixFn ──
+
+pub struct PrefixFn;
+
+impl ComputeFunction for PrefixFn {
+    fn id(&self) -> FunctionId { FunctionId::new("prefix", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let prefix = get_string_param(params, "prefix")?;
+        let mut out = Vec::with_capacity(prefix.len() + inputs[0].len());
+        out.extend_from_slice(prefix.as_bytes());
+        out.extend_from_slice(&inputs[0]);
+        Ok(Bytes::from(out))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let s = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: 1, memory_bytes: s + 256 }
+    }
+}
+
+// ── #71 SuffixFn ──
+
+pub struct SuffixFn;
+
+impl ComputeFunction for SuffixFn {
+    fn id(&self) -> FunctionId { FunctionId::new("suffix", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let suffix = get_string_param(params, "suffix")?;
+        let mut out = Vec::with_capacity(inputs[0].len() + suffix.len());
+        out.extend_from_slice(&inputs[0]);
+        out.extend_from_slice(suffix.as_bytes());
+        Ok(Bytes::from(out))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let s = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: 1, memory_bytes: s + 256 }
+    }
+}
+
+// ── #72 LinePrefixFn ──
+
+pub struct LinePrefixFn;
+
+impl ComputeFunction for LinePrefixFn {
+    fn id(&self) -> FunctionId { FunctionId::new("line_prefix", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let prefix = get_string_param(params, "prefix")?;
+        let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("line_prefix requires UTF-8 input".into()))?;
+        let result: Vec<String> = text.lines().map(|l| format!("{}{}", prefix, l)).collect();
+        Ok(Bytes::from(result.join("\n")))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let s = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: s / 100_000 + 1, memory_bytes: s * 2 }
+    }
+}
+
+// ── #73 LineNumberFn ──
+
+pub struct LineNumberFn;
+
+impl ComputeFunction for LineNumberFn {
+    fn id(&self) -> FunctionId { FunctionId::new("line_number", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("line_number requires UTF-8 input".into()))?;
+        let result: Vec<String> = text.lines().enumerate().map(|(i, l)| format!("{:>6}\t{}", i + 1, l)).collect();
+        Ok(Bytes::from(result.join("\n")))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let s = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: s / 100_000 + 1, memory_bytes: s * 2 }
+    }
+}
+
+// ── #74 TruncateLinesFn ──
+
+pub struct TruncateLinesFn;
+
+impl ComputeFunction for TruncateLinesFn {
+    fn id(&self) -> FunctionId { FunctionId::new("truncate_lines", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let max: usize = parse_usize_param(params, "max_line_bytes")?;
+        let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("truncate_lines requires UTF-8 input".into()))?;
+        let result: Vec<&str> = text.lines().map(|l| if l.len() > max { &l[..max] } else { l }).collect();
+        Ok(Bytes::from(result.join("\n")))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let s = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: s / 100_000 + 1, memory_bytes: s }
+    }
+}
+
+// ── #75 CharsetConvertFn ──
+
+pub struct CharsetConvertFn;
+
+impl ComputeFunction for CharsetConvertFn {
+    fn id(&self) -> FunctionId { FunctionId::new("charset_convert", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let from_name = get_string_param(params, "from")?;
+        let to_name = get_string_param(params, "to")?;
+        let from_enc = encoding_rs::Encoding::for_label(from_name.as_bytes())
+            .ok_or_else(|| ComputeError::InvalidParam(format!("unknown encoding: {}", from_name)))?;
+        let to_enc = encoding_rs::Encoding::for_label(to_name.as_bytes())
+            .ok_or_else(|| ComputeError::InvalidParam(format!("unknown encoding: {}", to_name)))?;
+        let (decoded, _, had_errors) = from_enc.decode(&inputs[0]);
+        if had_errors { return Err(ComputeError::ExecutionFailed(format!("invalid {} input", from_name))); }
+        let (encoded, _, _) = to_enc.encode(&decoded);
+        Ok(Bytes::from(encoded.into_owned()))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let s = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: s / 50_000 + 1, memory_bytes: s * 3 }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -1836,4 +2037,14 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(HeadFn));
     registry.register(Arc::new(TailFn));
     registry.register(Arc::new(SampleFn));
+    registry.register(Arc::new(ReplaceFn));
+    registry.register(Arc::new(RegexReplaceFn));
+    registry.register(Arc::new(GrepFn));
+    registry.register(Arc::new(GrepInvertFn));
+    registry.register(Arc::new(PrefixFn));
+    registry.register(Arc::new(SuffixFn));
+    registry.register(Arc::new(LinePrefixFn));
+    registry.register(Arc::new(LineNumberFn));
+    registry.register(Arc::new(TruncateLinesFn));
+    registry.register(Arc::new(CharsetConvertFn));
 }

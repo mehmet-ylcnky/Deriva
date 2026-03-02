@@ -2335,3 +2335,327 @@ fn sample_empty() {
     let r = exec1_params(&SampleFn, b"", params(&[("lines", "5"), ("seed", "0")])).unwrap();
     assert_eq!(r.as_ref(), b"");
 }
+
+// ── #66 ReplaceFn ──
+
+#[test]
+fn replace_basic() {
+    let r = exec1_params(&ReplaceFn, b"hello world", params(&[("find", "world"), ("replace", "rust")])).unwrap();
+    assert_eq!(r.as_ref(), b"hello rust");
+}
+
+#[test]
+fn replace_multiple_occurrences() {
+    let r = exec1_params(&ReplaceFn, b"aabaa", params(&[("find", "a"), ("replace", "x")])).unwrap();
+    assert_eq!(r.as_ref(), b"xxbxx");
+}
+
+#[test]
+fn replace_no_match() {
+    let r = exec1_params(&ReplaceFn, b"hello", params(&[("find", "xyz"), ("replace", "!")])).unwrap();
+    assert_eq!(r.as_ref(), b"hello");
+}
+
+#[test]
+fn replace_empty_find_unchanged() {
+    let r = exec1_params(&ReplaceFn, b"hello", params(&[("find", ""), ("replace", "x")])).unwrap();
+    assert_eq!(r.as_ref(), b"hello");
+}
+
+#[test]
+fn replace_empty_input() {
+    let r = exec1_params(&ReplaceFn, b"", params(&[("find", "a"), ("replace", "b")])).unwrap();
+    assert!(r.is_empty());
+}
+
+// ── #67 RegexReplaceFn ──
+
+#[test]
+fn regex_replace_basic() {
+    let r = exec1_params(&RegexReplaceFn, b"foo123bar", params(&[("pattern", r"\d+"), ("replacement", "NUM")])).unwrap();
+    assert_eq!(r.as_ref(), b"fooNUMbar");
+}
+
+#[test]
+fn regex_replace_capture_group() {
+    let r = exec1_params(&RegexReplaceFn, b"2024-01-15", params(&[("pattern", r"(\d{4})-(\d{2})-(\d{2})"), ("replacement", "$2/$3/$1")])).unwrap();
+    assert_eq!(r.as_ref(), b"01/15/2024");
+}
+
+#[test]
+fn regex_replace_no_match() {
+    let r = exec1_params(&RegexReplaceFn, b"hello", params(&[("pattern", r"\d+"), ("replacement", "X")])).unwrap();
+    assert_eq!(r.as_ref(), b"hello");
+}
+
+#[test]
+fn regex_replace_invalid_regex() {
+    let r = exec1_params(&RegexReplaceFn, b"test", params(&[("pattern", "[invalid"), ("replacement", "x")]));
+    assert!(matches!(r, Err(ComputeError::InvalidParam(_))));
+}
+
+#[test]
+fn regex_replace_multiple() {
+    let r = exec1_params(&RegexReplaceFn, b"a1b2c3", params(&[("pattern", r"[0-9]"), ("replacement", "")])).unwrap();
+    assert_eq!(r.as_ref(), b"abc");
+}
+
+// ── #68 GrepFn ──
+
+#[test]
+fn grep_matching_lines() {
+    let r = exec1_params(&GrepFn, b"error: bad\ninfo: ok\nerror: fail", params(&[("pattern", "^error")])).unwrap();
+    assert_eq!(r.as_ref(), b"error: bad\nerror: fail");
+}
+
+#[test]
+fn grep_no_matches() {
+    let r = exec1_params(&GrepFn, b"hello\nworld", params(&[("pattern", "xyz")])).unwrap();
+    assert!(r.is_empty());
+}
+
+#[test]
+fn grep_all_match() {
+    let r = exec1_params(&GrepFn, b"aa\nab\nac", params(&[("pattern", "^a")])).unwrap();
+    assert_eq!(r.as_ref(), b"aa\nab\nac");
+}
+
+#[test]
+fn grep_invalid_regex() {
+    let r = exec1_params(&GrepFn, b"test", params(&[("pattern", "[bad")]));
+    assert!(matches!(r, Err(ComputeError::InvalidParam(_))));
+}
+
+#[test]
+fn grep_empty_input() {
+    let r = exec1_params(&GrepFn, b"", params(&[("pattern", ".*")])).unwrap();
+    assert_eq!(r.as_ref(), b"");
+}
+
+// ── #69 GrepInvertFn ──
+
+#[test]
+fn grep_invert_basic() {
+    let r = exec1_params(&GrepInvertFn, b"error: bad\ninfo: ok\nerror: fail", params(&[("pattern", "^error")])).unwrap();
+    assert_eq!(r.as_ref(), b"info: ok");
+}
+
+#[test]
+fn grep_invert_no_matches_keeps_all() {
+    let r = exec1_params(&GrepInvertFn, b"a\nb\nc", params(&[("pattern", "xyz")])).unwrap();
+    assert_eq!(r.as_ref(), b"a\nb\nc");
+}
+
+#[test]
+fn grep_invert_all_match_empty() {
+    let r = exec1_params(&GrepInvertFn, b"aa\nab\nac", params(&[("pattern", "^a")])).unwrap();
+    assert!(r.is_empty());
+}
+
+#[test]
+fn grep_invert_invalid_regex() {
+    let r = exec1_params(&GrepInvertFn, b"test", params(&[("pattern", "[bad")]));
+    assert!(matches!(r, Err(ComputeError::InvalidParam(_))));
+}
+
+#[test]
+fn grep_invert_empty_input() {
+    let r = exec1_params(&GrepInvertFn, b"", params(&[("pattern", ".*")])).unwrap();
+    assert_eq!(r.as_ref(), b"");
+}
+
+// ── #70 PrefixFn ──
+
+#[test]
+fn prefix_basic() {
+    let r = exec1_params(&PrefixFn, b"world", params(&[("prefix", "hello ")])).unwrap();
+    assert_eq!(r.as_ref(), b"hello world");
+}
+
+#[test]
+fn prefix_empty_prefix() {
+    let r = exec1_params(&PrefixFn, b"data", params(&[("prefix", "")])).unwrap();
+    assert_eq!(r.as_ref(), b"data");
+}
+
+#[test]
+fn prefix_empty_input() {
+    let r = exec1_params(&PrefixFn, b"", params(&[("prefix", ">>")])).unwrap();
+    assert_eq!(r.as_ref(), b">>");
+}
+
+#[test]
+fn prefix_binary_safe() {
+    let r = exec1_params(&PrefixFn, &[0xFF, 0xFE], params(&[("prefix", "BOM:")])).unwrap();
+    assert_eq!(&r[..4], b"BOM:");
+    assert_eq!(&r[4..], &[0xFF, 0xFE]);
+}
+
+#[test]
+fn prefix_missing_param() {
+    let r = exec1(&PrefixFn, b"data");
+    assert!(matches!(r, Err(ComputeError::InvalidParam(_))));
+}
+
+// ── #71 SuffixFn ──
+
+#[test]
+fn suffix_basic() {
+    let r = exec1_params(&SuffixFn, b"hello", params(&[("suffix", " world")])).unwrap();
+    assert_eq!(r.as_ref(), b"hello world");
+}
+
+#[test]
+fn suffix_empty_suffix() {
+    let r = exec1_params(&SuffixFn, b"data", params(&[("suffix", "")])).unwrap();
+    assert_eq!(r.as_ref(), b"data");
+}
+
+#[test]
+fn suffix_empty_input() {
+    let r = exec1_params(&SuffixFn, b"", params(&[("suffix", "END")])).unwrap();
+    assert_eq!(r.as_ref(), b"END");
+}
+
+#[test]
+fn suffix_newline() {
+    let r = exec1_params(&SuffixFn, b"line", params(&[("suffix", "\n")])).unwrap();
+    assert_eq!(r.as_ref(), b"line\n");
+}
+
+#[test]
+fn suffix_missing_param() {
+    let r = exec1(&SuffixFn, b"data");
+    assert!(matches!(r, Err(ComputeError::InvalidParam(_))));
+}
+
+// ── #72 LinePrefixFn ──
+
+#[test]
+fn line_prefix_basic() {
+    let r = exec1_params(&LinePrefixFn, b"a\nb\nc", params(&[("prefix", "> ")])).unwrap();
+    assert_eq!(r.as_ref(), b"> a\n> b\n> c");
+}
+
+#[test]
+fn line_prefix_empty_prefix() {
+    let r = exec1_params(&LinePrefixFn, b"a\nb", params(&[("prefix", "")])).unwrap();
+    assert_eq!(r.as_ref(), b"a\nb");
+}
+
+#[test]
+fn line_prefix_single_line() {
+    let r = exec1_params(&LinePrefixFn, b"hello", params(&[("prefix", "# ")])).unwrap();
+    assert_eq!(r.as_ref(), b"# hello");
+}
+
+#[test]
+fn line_prefix_empty_input() {
+    let r = exec1_params(&LinePrefixFn, b"", params(&[("prefix", "> ")])).unwrap();
+    assert_eq!(r.as_ref(), b"");
+}
+
+#[test]
+fn line_prefix_tab_indent() {
+    let r = exec1_params(&LinePrefixFn, b"x\ny", params(&[("prefix", "\t")])).unwrap();
+    assert_eq!(r.as_ref(), b"\tx\n\ty");
+}
+
+// ── #73 LineNumberFn ──
+
+#[test]
+fn line_number_basic() {
+    let r = exec1(&LineNumberFn, b"alpha\nbeta\ngamma").unwrap();
+    assert_eq!(r.as_ref(), b"     1\talpha\n     2\tbeta\n     3\tgamma");
+}
+
+#[test]
+fn line_number_single() {
+    let r = exec1(&LineNumberFn, b"only").unwrap();
+    assert_eq!(r.as_ref(), b"     1\tonly");
+}
+
+#[test]
+fn line_number_empty() {
+    let r = exec1(&LineNumberFn, b"").unwrap();
+    assert_eq!(r.as_ref(), b"");
+}
+
+#[test]
+fn line_number_starts_at_one() {
+    let r = exec1(&LineNumberFn, b"a\nb").unwrap();
+    let text = std::str::from_utf8(&r).unwrap();
+    assert!(text.starts_with("     1\t"));
+}
+
+#[test]
+fn line_number_tab_separator() {
+    let r = exec1(&LineNumberFn, b"test").unwrap();
+    assert!(r.as_ref().contains(&b'\t'));
+}
+
+// ── #74 TruncateLinesFn ──
+
+#[test]
+fn truncate_lines_basic() {
+    let r = exec1_params(&TruncateLinesFn, b"hello world\nhi", params(&[("max_line_bytes", "5")])).unwrap();
+    assert_eq!(r.as_ref(), b"hello\nhi");
+}
+
+#[test]
+fn truncate_lines_no_truncation() {
+    let r = exec1_params(&TruncateLinesFn, b"ab\ncd", params(&[("max_line_bytes", "100")])).unwrap();
+    assert_eq!(r.as_ref(), b"ab\ncd");
+}
+
+#[test]
+fn truncate_lines_exact_length() {
+    let r = exec1_params(&TruncateLinesFn, b"abcde", params(&[("max_line_bytes", "5")])).unwrap();
+    assert_eq!(r.as_ref(), b"abcde");
+}
+
+#[test]
+fn truncate_lines_empty() {
+    let r = exec1_params(&TruncateLinesFn, b"", params(&[("max_line_bytes", "5")])).unwrap();
+    assert_eq!(r.as_ref(), b"");
+}
+
+#[test]
+fn truncate_lines_multiple() {
+    let r = exec1_params(&TruncateLinesFn, b"abcdef\nghijkl\nmn", params(&[("max_line_bytes", "3")])).unwrap();
+    assert_eq!(r.as_ref(), b"abc\nghi\nmn");
+}
+
+// ── #75 CharsetConvertFn ──
+
+#[test]
+fn charset_convert_latin1_to_utf8() {
+    // ISO-8859-1: 0xE9 = é
+    let r = exec1_params(&CharsetConvertFn, &[0xE9], params(&[("from", "iso-8859-1"), ("to", "utf-8")])).unwrap();
+    assert_eq!(r.as_ref(), "é".as_bytes());
+}
+
+#[test]
+fn charset_convert_utf8_to_latin1() {
+    let r = exec1_params(&CharsetConvertFn, "é".as_bytes(), params(&[("from", "utf-8"), ("to", "iso-8859-1")])).unwrap();
+    assert_eq!(r.as_ref(), &[0xE9]);
+}
+
+#[test]
+fn charset_convert_utf8_roundtrip() {
+    let input = "hello world".as_bytes();
+    let r = exec1_params(&CharsetConvertFn, input, params(&[("from", "utf-8"), ("to", "utf-8")])).unwrap();
+    assert_eq!(r.as_ref(), input);
+}
+
+#[test]
+fn charset_convert_unknown_encoding() {
+    let r = exec1_params(&CharsetConvertFn, b"test", params(&[("from", "bogus-999"), ("to", "utf-8")]));
+    assert!(matches!(r, Err(ComputeError::InvalidParam(_))));
+}
+
+#[test]
+fn charset_convert_empty_input() {
+    let r = exec1_params(&CharsetConvertFn, b"", params(&[("from", "utf-8"), ("to", "iso-8859-1")])).unwrap();
+    assert!(r.is_empty());
+}

@@ -2498,6 +2498,42 @@ impl ComputeFunction for DedupAnalyzeFn {
     }
 }
 
+// ── #99 ReverseByteFn ──
+
+pub struct ReverseByteFn;
+
+impl ComputeFunction for ReverseByteFn {
+    fn id(&self) -> FunctionId { FunctionId::new("reverse_bytes", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let mut out = inputs[0].to_vec();
+        out.reverse();
+        Ok(Bytes::from(out))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let s = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: s / 200_000 + 1, memory_bytes: s }
+    }
+}
+
+// ── #100 SortBytesFn ──
+
+pub struct SortBytesFn;
+
+impl ComputeFunction for SortBytesFn {
+    fn id(&self) -> FunctionId { FunctionId::new("sort_bytes", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let mut out = inputs[0].to_vec();
+        out.sort_unstable();
+        Ok(Bytes::from(out))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let s = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: s / 100_000 + 1, memory_bytes: s }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -2598,4 +2634,6 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(ContentTypeFn));
     registry.register(Arc::new(ChunkHashFn));
     registry.register(Arc::new(DedupAnalyzeFn));
+    registry.register(Arc::new(ReverseByteFn));
+    registry.register(Arc::new(SortBytesFn));
 }

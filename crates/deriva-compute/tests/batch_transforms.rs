@@ -3514,3 +3514,70 @@ fn dedup_analyze_small_input() {
     let boundaries: Vec<u64> = serde_json::from_slice(&r).unwrap();
     assert_eq!(boundaries, vec![0, 100]);
 }
+
+// ── #99 ReverseByteFn ──
+
+#[test]
+fn reverse_bytes_basic() {
+    let r = exec1(&ReverseByteFn, b"abcd").unwrap();
+    assert_eq!(r.as_ref(), b"dcba");
+}
+
+#[test]
+fn reverse_bytes_roundtrip() {
+    let data = b"hello world";
+    let r1 = exec1(&ReverseByteFn, data).unwrap();
+    let r2 = exec1(&ReverseByteFn, &r1).unwrap();
+    assert_eq!(r2.as_ref(), data);
+}
+
+#[test]
+fn reverse_bytes_empty() {
+    let r = exec1(&ReverseByteFn, b"").unwrap();
+    assert!(r.is_empty());
+}
+
+#[test]
+fn reverse_bytes_single() {
+    let r = exec1(&ReverseByteFn, b"x").unwrap();
+    assert_eq!(r.as_ref(), b"x");
+}
+
+#[test]
+fn reverse_bytes_binary() {
+    let r = exec1(&ReverseByteFn, &[0x00, 0x01, 0xFF]).unwrap();
+    assert_eq!(r.as_ref(), &[0xFF, 0x01, 0x00]);
+}
+
+// ── #100 SortBytesFn ──
+
+#[test]
+fn sort_bytes_basic() {
+    let r = exec1(&SortBytesFn, b"dcba").unwrap();
+    assert_eq!(r.as_ref(), b"abcd");
+}
+
+#[test]
+fn sort_bytes_already_sorted() {
+    let r = exec1(&SortBytesFn, b"abcd").unwrap();
+    assert_eq!(r.as_ref(), b"abcd");
+}
+
+#[test]
+fn sort_bytes_empty() {
+    let r = exec1(&SortBytesFn, b"").unwrap();
+    assert!(r.is_empty());
+}
+
+#[test]
+fn sort_bytes_all_same() {
+    let r = exec1(&SortBytesFn, b"aaaa").unwrap();
+    assert_eq!(r.as_ref(), b"aaaa");
+}
+
+#[test]
+fn sort_bytes_idempotent() {
+    let r1 = exec1(&SortBytesFn, b"zxywvu").unwrap();
+    let r2 = exec1(&SortBytesFn, &r1).unwrap();
+    assert_eq!(r1, r2);
+}

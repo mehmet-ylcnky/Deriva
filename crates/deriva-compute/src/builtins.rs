@@ -3,14 +3,14 @@ use bytes::Bytes;
 use deriva_core::address::{CAddr, FunctionId, Value};
 use std::collections::BTreeMap;
 
-fn parse_byte_param(params: &BTreeMap<String, Value>, name: &str) -> Result<u8, ComputeError> {
+pub(crate) fn parse_byte_param(params: &BTreeMap<String, Value>, name: &str) -> Result<u8, ComputeError> {
     match params.get(name) {
         Some(Value::String(s)) => s.parse().map_err(|_| ComputeError::InvalidParam(format!("{} must be 0-255", name))),
         _ => Err(ComputeError::InvalidParam(format!("missing param: {}", name))),
     }
 }
 
-fn parse_usize_param(params: &BTreeMap<String, Value>, name: &str) -> Result<usize, ComputeError> {
+pub(crate) fn parse_usize_param(params: &BTreeMap<String, Value>, name: &str) -> Result<usize, ComputeError> {
     match params.get(name) {
         Some(Value::String(s)) => s.parse().map_err(|_| ComputeError::InvalidParam(format!("{} must be a positive integer", name))),
         Some(Value::Int(n)) if *n > 0 => Ok(*n as usize),
@@ -18,7 +18,7 @@ fn parse_usize_param(params: &BTreeMap<String, Value>, name: &str) -> Result<usi
     }
 }
 
-fn parse_u64_param(params: &BTreeMap<String, Value>, name: &str) -> Result<u64, ComputeError> {
+pub(crate) fn parse_u64_param(params: &BTreeMap<String, Value>, name: &str) -> Result<u64, ComputeError> {
     match params.get(name) {
         Some(Value::String(s)) => s.parse::<u64>().map_err(|_| ComputeError::InvalidParam(format!("{} must be a non-negative integer", name))),
         Some(Value::Int(n)) => u64::try_from(*n).map_err(|_| ComputeError::InvalidParam(format!("{} must be non-negative", name))),
@@ -26,7 +26,13 @@ fn parse_u64_param(params: &BTreeMap<String, Value>, name: &str) -> Result<u64, 
     }
 }
 
-/// Spec §4.1 cost formula: base_cost * (total_input_bytes / 1024).max(1)
+/// Split on \n, preserving empty trailing segment.
+pub(crate) fn split_lines(input: &[u8]) -> Vec<&[u8]> {
+    if input.is_empty() { return vec![b""]; }
+    input.split(|&b| b == b'\n').collect()
+}
+
+/// Spec §4.2 cost formula: base_cost * (total_input_bytes / 1024).max(1)
 fn spec_cost(base: u64, input_sizes: &[u64]) -> ComputeCost {
     let total: u64 = input_sizes.iter().sum();
     let scale = (total / 1024).max(1);
@@ -795,14 +801,14 @@ impl ComputeFunction for Sha512Fn {
 
 // ── Shared helpers for crypto functions ──
 
-fn get_string_param<'a>(params: &'a BTreeMap<String, Value>, name: &str) -> Result<&'a str, ComputeError> {
+pub(crate) fn get_string_param<'a>(params: &'a BTreeMap<String, Value>, name: &str) -> Result<&'a str, ComputeError> {
     match params.get(name) {
         Some(Value::String(s)) => Ok(s.as_str()),
         _ => Err(ComputeError::InvalidParam(format!("missing param: {}", name))),
     }
 }
 
-fn hex_decode_param(hex: &str, name: &str) -> Result<Vec<u8>, ComputeError> {
+pub(crate) fn hex_decode_param(hex: &str, name: &str) -> Result<Vec<u8>, ComputeError> {
     if hex.len() % 2 != 0 {
         return Err(ComputeError::InvalidParam(format!("odd-length hex in {}", name)));
     }

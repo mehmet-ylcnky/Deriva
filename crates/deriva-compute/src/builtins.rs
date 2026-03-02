@@ -1611,7 +1611,7 @@ impl ComputeFunction for ReplaceFn {
         if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
         let find = get_string_param(params, "find")?;
         let replace = get_string_param(params, "replace")?;
-        if find.is_empty() { return Ok(inputs[0].clone()); }
+        if find.is_empty() { return Err(ComputeError::InvalidParam("find must not be empty".into())); }
         let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("replace requires UTF-8 input".into()))?;
         Ok(Bytes::from(text.replace(find, replace)))
     }

@@ -26,6 +26,13 @@ fn parse_u64_param(params: &BTreeMap<String, Value>, name: &str) -> Result<u64, 
     }
 }
 
+/// Spec §4.1 cost formula: base_cost * (total_input_bytes / 1024).max(1)
+fn spec_cost(base: u64, input_sizes: &[u64]) -> ComputeCost {
+    let total: u64 = input_sizes.iter().sum();
+    let scale = (total / 1024).max(1);
+    ComputeCost { cpu_ms: base * scale, memory_bytes: total }
+}
+
 pub struct IdentityFn;
 
 impl ComputeFunction for IdentityFn {
@@ -40,9 +47,7 @@ impl ComputeFunction for IdentityFn {
         Ok(inputs.into_iter().next().unwrap())
     }
 
-    fn estimated_cost(&self, _input_sizes: &[u64]) -> ComputeCost {
-        ComputeCost { cpu_ms: 0, memory_bytes: 0 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(1, input_sizes) }
 }
 
 pub struct ConcatFn;
@@ -61,10 +66,7 @@ impl ComputeFunction for ConcatFn {
         Ok(Bytes::from(out))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let total: u64 = input_sizes.iter().sum();
-        ComputeCost { cpu_ms: 1, memory_bytes: total }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 pub struct UppercaseFn;
@@ -83,10 +85,7 @@ impl ComputeFunction for UppercaseFn {
         Ok(Bytes::from(s.to_uppercase()))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 pub struct RepeatFn;
@@ -117,10 +116,7 @@ impl ComputeFunction for RepeatFn {
         Ok(Bytes::from(out))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size * 10 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 pub struct LowercaseFn;
@@ -137,10 +133,7 @@ impl ComputeFunction for LowercaseFn {
         Ok(Bytes::from(inputs[0].iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<_>>()))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 pub struct ReverseFn;
@@ -159,10 +152,7 @@ impl ComputeFunction for ReverseFn {
         Ok(Bytes::from(v))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 pub struct Base64EncodeFn;
@@ -181,10 +171,7 @@ impl ComputeFunction for Base64EncodeFn {
         Ok(Bytes::from(encoded))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size * 4 / 3 + 4 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 pub struct Base64DecodeFn;
@@ -204,10 +191,7 @@ impl ComputeFunction for Base64DecodeFn {
             .map_err(|e| ComputeError::ExecutionFailed(format!("invalid base64: {}", e)))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size * 3 / 4 + 4 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 pub struct HexEncodeFn;
@@ -225,10 +209,7 @@ impl ComputeFunction for HexEncodeFn {
         Ok(Bytes::from(hex))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 pub struct HexDecodeFn;
@@ -258,10 +239,7 @@ impl ComputeFunction for HexDecodeFn {
         Ok(Bytes::from(bytes?))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size / 2 + 1 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 pub struct Base32EncodeFn;
@@ -279,10 +257,7 @@ impl ComputeFunction for Base32EncodeFn {
         Ok(Bytes::from(encoded))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size * 8 / 5 + 8 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 pub struct Base32DecodeFn;
@@ -328,10 +303,7 @@ impl ComputeFunction for Base32DecodeFn {
             .map_err(|e| ComputeError::ExecutionFailed(format!("invalid base32: {}", e)))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size * 5 / 8 + 5 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 pub struct XorFn;
@@ -352,10 +324,7 @@ impl ComputeFunction for XorFn {
         Ok(Bytes::from(inputs[0].iter().map(|b| b ^ key).collect::<Vec<_>>()))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 pub struct BitwiseAndFn;
@@ -373,10 +342,7 @@ impl ComputeFunction for BitwiseAndFn {
         Ok(Bytes::from(inputs[0].iter().map(|b| b & mask).collect::<Vec<_>>()))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 pub struct BitwiseOrFn;
@@ -394,10 +360,7 @@ impl ComputeFunction for BitwiseOrFn {
         Ok(Bytes::from(inputs[0].iter().map(|b| b | mask).collect::<Vec<_>>()))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 pub struct BitwiseNotFn;
@@ -414,10 +377,7 @@ impl ComputeFunction for BitwiseNotFn {
         Ok(Bytes::from(inputs[0].iter().map(|b| !b).collect::<Vec<_>>()))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 pub struct ByteSwapFn;
@@ -451,10 +411,7 @@ impl ComputeFunction for ByteSwapFn {
         Ok(Bytes::from(out))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 pub struct TrimFn;
@@ -474,10 +431,7 @@ impl ComputeFunction for TrimFn {
         Ok(inputs[0].slice(start..end))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 pub struct PadFn;
@@ -503,10 +457,7 @@ impl ComputeFunction for PadFn {
         Ok(Bytes::from(out))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size + 256 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 pub struct LineEndingFn;
@@ -554,10 +505,7 @@ impl ComputeFunction for LineEndingFn {
         }
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #21 CompressFn (zlib) ──
@@ -584,10 +532,7 @@ impl ComputeFunction for CompressFn {
         Ok(Bytes::from(compressed))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 50_000 + 1, memory_bytes: size * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #22 DecompressFn (zlib) ──
@@ -612,10 +557,7 @@ impl ComputeFunction for DecompressFn {
         Ok(Bytes::from(decompressed))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 50_000 + 1, memory_bytes: size * 4 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #23 ZstdCompressFn ──
@@ -644,10 +586,7 @@ impl ComputeFunction for ZstdCompressFn {
             .map_err(|e| ComputeError::ExecutionFailed(format!("zstd compress: {}", e)))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 40_000 + 1, memory_bytes: size * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #24 ZstdDecompressFn ──
@@ -668,10 +607,7 @@ impl ComputeFunction for ZstdDecompressFn {
             .map_err(|e| ComputeError::ExecutionFailed(format!("zstd decompress: {}", e)))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 40_000 + 1, memory_bytes: size * 4 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #25 Lz4CompressFn ──
@@ -691,10 +627,7 @@ impl ComputeFunction for Lz4CompressFn {
         Ok(Bytes::from(compressed))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 100_000 + 1, memory_bytes: size * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #26 Lz4DecompressFn ──
@@ -715,10 +648,7 @@ impl ComputeFunction for Lz4DecompressFn {
             .map_err(|e| ComputeError::ExecutionFailed(format!("lz4 decompress: {}", e)))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 100_000 + 1, memory_bytes: size * 4 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #27 SnappyCompressFn ──
@@ -740,10 +670,7 @@ impl ComputeFunction for SnappyCompressFn {
             .map_err(|e| ComputeError::ExecutionFailed(format!("snappy compress: {}", e)))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 100_000 + 1, memory_bytes: size * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #28 SnappyDecompressFn ──
@@ -765,10 +692,7 @@ impl ComputeFunction for SnappyDecompressFn {
             .map_err(|e| ComputeError::ExecutionFailed(format!("snappy decompress: {}", e)))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 100_000 + 1, memory_bytes: size * 4 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #29 BrotliCompressFn ──
@@ -802,10 +726,7 @@ impl ComputeFunction for BrotliCompressFn {
         Ok(Bytes::from(output))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 20_000 + 1, memory_bytes: size * 3 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #30 BrotliDecompressFn ──
@@ -827,10 +748,7 @@ impl ComputeFunction for BrotliDecompressFn {
         Ok(Bytes::from(output))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 50_000 + 1, memory_bytes: size * 4 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #31 Sha256Fn ──
@@ -851,10 +769,7 @@ impl ComputeFunction for Sha256Fn {
         Ok(Bytes::copy_from_slice(&hash))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 100_000 + 1, memory_bytes: 256 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #32 Sha512Fn ──
@@ -875,10 +790,7 @@ impl ComputeFunction for Sha512Fn {
         Ok(Bytes::copy_from_slice(&hash))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 100_000 + 1, memory_bytes: 256 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── Shared helpers for crypto functions ──
@@ -921,10 +833,7 @@ impl ComputeFunction for Md5Fn {
         Ok(Bytes::copy_from_slice(&hash))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 100_000 + 1, memory_bytes: 256 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #34 Blake3Fn ──
@@ -944,10 +853,7 @@ impl ComputeFunction for Blake3Fn {
         Ok(Bytes::copy_from_slice(hash.as_bytes()))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 200_000 + 1, memory_bytes: 256 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #35 HmacSha256Fn ──
@@ -976,10 +882,7 @@ impl ComputeFunction for HmacSha256Fn {
         Ok(Bytes::copy_from_slice(&result.into_bytes()))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 100_000 + 1, memory_bytes: 256 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #36 Crc32Fn ──
@@ -999,10 +902,7 @@ impl ComputeFunction for Crc32Fn {
         Ok(Bytes::copy_from_slice(&crc.to_be_bytes()))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 500_000 + 1, memory_bytes: 64 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #37 EncryptFn (AES-256-CTR) ──
@@ -1036,10 +936,7 @@ impl ComputeFunction for EncryptFn {
         Ok(Bytes::from(buf))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 50_000 + 1, memory_bytes: size + 256 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(200, input_sizes) }
 }
 
 // ── #38 DecryptFn (AES-256-CTR) ──
@@ -1055,9 +952,7 @@ impl ComputeFunction for DecryptFn {
         EncryptFn.execute(inputs, params)
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        EncryptFn.estimated_cost(input_sizes)
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(200, input_sizes) }
 }
 
 // ── #39 AeadEncryptFn (AES-256-GCM) ──
@@ -1090,10 +985,7 @@ impl ComputeFunction for AeadEncryptFn {
             .map_err(|e| ComputeError::ExecutionFailed(format!("aead encrypt: {}", e)))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 50_000 + 1, memory_bytes: size + 256 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(200, input_sizes) }
 }
 
 // ── #40 AeadDecryptFn (AES-256-GCM) ──
@@ -1129,10 +1021,7 @@ impl ComputeFunction for AeadDecryptFn {
             .map_err(|_| ComputeError::ExecutionFailed("aead decrypt: authentication failed".into()))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 50_000 + 1, memory_bytes: size + 256 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(200, input_sizes) }
 }
 
 // ── #41 RedactFn ──
@@ -1160,10 +1049,7 @@ impl ComputeFunction for RedactFn {
         Ok(Bytes::from(result))
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 10_000 + 1, memory_bytes: size * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #42 ByteCountFn ──
@@ -1176,7 +1062,7 @@ impl ComputeFunction for ByteCountFn {
         if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
         Ok(Bytes::copy_from_slice(&(inputs[0].len() as u64).to_be_bytes()))
     }
-    fn estimated_cost(&self, _: &[u64]) -> ComputeCost { ComputeCost { cpu_ms: 1, memory_bytes: 8 } }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #43 LineCountFn ──
@@ -1195,10 +1081,7 @@ impl ComputeFunction for LineCountFn {
         let count = if input.last() == Some(&b'\n') { newlines } else { newlines + 1 };
         Ok(Bytes::copy_from_slice(&count.to_be_bytes()))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 500_000 + 1, memory_bytes: 8 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #44 WordCountFn ──
@@ -1221,10 +1104,7 @@ impl ComputeFunction for WordCountFn {
         }
         Ok(Bytes::copy_from_slice(&count.to_be_bytes()))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 500_000 + 1, memory_bytes: 8 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #45 HistogramFn ──
@@ -1245,10 +1125,7 @@ impl ComputeFunction for HistogramFn {
         }
         Ok(Bytes::from(out))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 500_000 + 1, memory_bytes: 2048 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #46 EntropyFn ──
@@ -1274,10 +1151,7 @@ impl ComputeFunction for EntropyFn {
             .sum();
         Ok(Bytes::copy_from_slice(&entropy.to_be_bytes()))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 200_000 + 1, memory_bytes: 2048 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #47 MinMaxFn ──
@@ -1296,10 +1170,7 @@ impl ComputeFunction for MinMaxFn {
         let max = *input.iter().max().unwrap();
         Ok(Bytes::from(vec![min, max]))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 500_000 + 1, memory_bytes: 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #48 SumFn ──
@@ -1322,10 +1193,7 @@ impl ComputeFunction for SumFn {
         }
         Ok(Bytes::from(total.to_string()))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 100_000 + 1, memory_bytes: size + 64 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #49 AverageFn ──
@@ -1353,10 +1221,7 @@ impl ComputeFunction for AverageFn {
         }
         Ok(Bytes::from((total / count as f64).to_string()))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: size / 100_000 + 1, memory_bytes: size + 64 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #50 InterleaveFn ──
@@ -1391,10 +1256,7 @@ impl ComputeFunction for InterleaveFn {
         }
         Ok(Bytes::from(out))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size: u64 = input_sizes.iter().sum();
-        ComputeCost { cpu_ms: size / 200_000 + 1, memory_bytes: size }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #51 ZipConcatFn ──
@@ -1420,10 +1282,7 @@ impl ComputeFunction for ZipConcatFn {
         }
         Ok(Bytes::from(out))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size: u64 = input_sizes.iter().sum();
-        ComputeCost { cpu_ms: size / 200_000 + 1, memory_bytes: size }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #52 DiffFn ──
@@ -1467,10 +1326,7 @@ impl ComputeFunction for DiffFn {
         }
         Ok(Bytes::from(out))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size: u64 = input_sizes.iter().sum();
-        ComputeCost { cpu_ms: size / 100_000 + 1, memory_bytes: size * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(100, input_sizes) }
 }
 
 // ── #53 PatchFn ──
@@ -1508,10 +1364,7 @@ impl ComputeFunction for PatchFn {
         }
         Ok(Bytes::from(out))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size: u64 = input_sizes.iter().sum();
-        ComputeCost { cpu_ms: size / 100_000 + 1, memory_bytes: size * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(100, input_sizes) }
 }
 
 // ── #54 MergeSortedFn ──
@@ -1542,10 +1395,7 @@ impl ComputeFunction for MergeSortedFn {
         }
         Ok(Bytes::from(lines.join("\n")))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size: u64 = input_sizes.iter().sum();
-        ComputeCost { cpu_ms: size / 50_000 + 1, memory_bytes: size * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(100, input_sizes) }
 }
 
 // ── #55 SelectFn ──
@@ -1561,10 +1411,7 @@ impl ComputeFunction for SelectFn {
         }
         Ok(inputs[idx].clone())
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let size = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: size }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #56 TakeFn ──
@@ -1579,7 +1426,7 @@ impl ComputeFunction for TakeFn {
         let end = n.min(inputs[0].len());
         Ok(inputs[0].slice(..end))
     }
-    fn estimated_cost(&self, _: &[u64]) -> ComputeCost { ComputeCost { cpu_ms: 1, memory_bytes: 0 } }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #57 SkipFn ──
@@ -1594,7 +1441,7 @@ impl ComputeFunction for SkipFn {
         let start = n.min(inputs[0].len());
         Ok(inputs[0].slice(start..))
     }
-    fn estimated_cost(&self, _: &[u64]) -> ComputeCost { ComputeCost { cpu_ms: 1, memory_bytes: 0 } }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #58 SliceFn ──
@@ -1612,7 +1459,7 @@ impl ComputeFunction for SliceFn {
         let end = start.saturating_add(length).min(input.len());
         Ok(inputs[0].slice(start..end))
     }
-    fn estimated_cost(&self, _: &[u64]) -> ComputeCost { ComputeCost { cpu_ms: 1, memory_bytes: 0 } }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #59 SortFn ──
@@ -1628,10 +1475,7 @@ impl ComputeFunction for SortFn {
         lines.sort();
         Ok(Bytes::from(lines.join("\n")))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 50_000 + 1, memory_bytes: s * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(100, input_sizes) }
 }
 
 // ── #60 UniqueFn ──
@@ -1650,10 +1494,7 @@ impl ComputeFunction for UniqueFn {
         }
         Ok(Bytes::from(result.join("\n")))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 100_000 + 1, memory_bytes: s * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #61 SortUniqueFn ──
@@ -1670,10 +1511,7 @@ impl ComputeFunction for SortUniqueFn {
         lines.dedup();
         Ok(Bytes::from(lines.join("\n")))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 50_000 + 1, memory_bytes: s * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(100, input_sizes) }
 }
 
 // ── #62 ShuffleFn ──
@@ -1693,10 +1531,7 @@ impl ComputeFunction for ShuffleFn {
         lines.shuffle(&mut rng);
         Ok(Bytes::from(lines.join("\n")))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 100_000 + 1, memory_bytes: s * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #63 HeadFn ──
@@ -1712,10 +1547,7 @@ impl ComputeFunction for HeadFn {
         let result: Vec<&str> = text.lines().take(n).collect();
         Ok(Bytes::from(result.join("\n")))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: s }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #64 TailFn ──
@@ -1732,10 +1564,7 @@ impl ComputeFunction for TailFn {
         let start = all_lines.len().saturating_sub(n);
         Ok(Bytes::from(all_lines[start..].join("\n")))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: s }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #65 SampleFn ──
@@ -1763,10 +1592,7 @@ impl ComputeFunction for SampleFn {
         let sampled: Vec<&str> = reservoir.iter().map(|&i| all_lines[i]).collect();
         Ok(Bytes::from(sampled.join("\n")))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 50_000 + 1, memory_bytes: s * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #66 ReplaceFn ──
@@ -1783,10 +1609,7 @@ impl ComputeFunction for ReplaceFn {
         let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("replace requires UTF-8 input".into()))?;
         Ok(Bytes::from(text.replace(find, replace)))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 100_000 + 1, memory_bytes: s * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #67 RegexReplaceFn ──
@@ -1803,10 +1626,7 @@ impl ComputeFunction for RegexReplaceFn {
         let re = regex::Regex::new(pattern).map_err(|e| ComputeError::InvalidParam(format!("invalid regex: {}", e)))?;
         Ok(Bytes::from(re.replace_all(text, replacement).into_owned()))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 50_000 + 1, memory_bytes: s * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(100, input_sizes) }
 }
 
 // ── #68 GrepFn ──
@@ -1823,10 +1643,7 @@ impl ComputeFunction for GrepFn {
         let matched: Vec<&str> = text.lines().filter(|l| re.is_match(l)).collect();
         Ok(Bytes::from(matched.join("\n")))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 50_000 + 1, memory_bytes: s }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(100, input_sizes) }
 }
 
 // ── #69 GrepInvertFn ──
@@ -1843,10 +1660,7 @@ impl ComputeFunction for GrepInvertFn {
         let filtered: Vec<&str> = text.lines().filter(|l| !re.is_match(l)).collect();
         Ok(Bytes::from(filtered.join("\n")))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 50_000 + 1, memory_bytes: s }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(100, input_sizes) }
 }
 
 // ── #70 PrefixFn ──
@@ -1863,10 +1677,7 @@ impl ComputeFunction for PrefixFn {
         out.extend_from_slice(&inputs[0]);
         Ok(Bytes::from(out))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: s + 256 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #71 SuffixFn ──
@@ -1883,10 +1694,7 @@ impl ComputeFunction for SuffixFn {
         out.extend_from_slice(suffix.as_bytes());
         Ok(Bytes::from(out))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: 1, memory_bytes: s + 256 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #72 LinePrefixFn ──
@@ -1902,10 +1710,7 @@ impl ComputeFunction for LinePrefixFn {
         let result: Vec<String> = text.lines().map(|l| format!("{}{}", prefix, l)).collect();
         Ok(Bytes::from(result.join("\n")))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 100_000 + 1, memory_bytes: s * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #73 LineNumberFn ──
@@ -1920,10 +1725,7 @@ impl ComputeFunction for LineNumberFn {
         let result: Vec<String> = text.lines().enumerate().map(|(i, l)| format!("{:>6}\t{}", i + 1, l)).collect();
         Ok(Bytes::from(result.join("\n")))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 100_000 + 1, memory_bytes: s * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #74 TruncateLinesFn ──
@@ -1939,10 +1741,7 @@ impl ComputeFunction for TruncateLinesFn {
         let result: Vec<&str> = text.lines().map(|l| if l.len() > max { &l[..max] } else { l }).collect();
         Ok(Bytes::from(result.join("\n")))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 100_000 + 1, memory_bytes: s }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #75 CharsetConvertFn ──
@@ -1964,10 +1763,7 @@ impl ComputeFunction for CharsetConvertFn {
         let (encoded, _, _) = to_enc.encode(&decoded);
         Ok(Bytes::from(encoded.into_owned()))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 50_000 + 1, memory_bytes: s * 3 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #76 Utf8ValidateFn ──
@@ -1983,10 +1779,7 @@ impl ComputeFunction for Utf8ValidateFn {
             Err(e) => Err(ComputeError::ExecutionFailed(format!("invalid UTF-8 at byte offset {}", e.valid_up_to()))),
         }
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 200_000 + 1, memory_bytes: 0 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #77 JsonValidateFn ──
@@ -2001,10 +1794,7 @@ impl ComputeFunction for JsonValidateFn {
         serde_json::from_str::<serde_json::Value>(text).map_err(|e| ComputeError::ExecutionFailed(format!("invalid JSON: {}", e)))?;
         Ok(inputs[0].clone())
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 50_000 + 1, memory_bytes: s * 3 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #78 SchemaValidateFn ──
@@ -2024,10 +1814,7 @@ impl ComputeFunction for SchemaValidateFn {
         if errors.is_empty() { Ok(inputs[0].clone()) }
         else { Err(ComputeError::ExecutionFailed(format!("schema validation failed:\n{}", errors.join("\n")))) }
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 10_000 + 1, memory_bytes: s * 5 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(200, input_sizes) }
 }
 
 // ── #79 MagicBytesFn ──
@@ -2050,7 +1837,7 @@ impl ComputeFunction for MagicBytesFn {
         }
         Ok(inputs[0].clone())
     }
-    fn estimated_cost(&self, _: &[u64]) -> ComputeCost { ComputeCost { cpu_ms: 1, memory_bytes: 0 } }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #80 SizeLimitFn ──
@@ -2067,7 +1854,7 @@ impl ComputeFunction for SizeLimitFn {
         }
         Ok(inputs[0].clone())
     }
-    fn estimated_cost(&self, _: &[u64]) -> ComputeCost { ComputeCost { cpu_ms: 1, memory_bytes: 0 } }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #81 NonEmptyFn ──
@@ -2081,7 +1868,7 @@ impl ComputeFunction for NonEmptyFn {
         if inputs[0].is_empty() { return Err(ComputeError::ExecutionFailed("input is empty".into())); }
         Ok(inputs[0].clone())
     }
-    fn estimated_cost(&self, _: &[u64]) -> ComputeCost { ComputeCost { cpu_ms: 1, memory_bytes: 0 } }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #82 Sha256VerifyFn ──
@@ -2103,10 +1890,7 @@ impl ComputeFunction for Sha256VerifyFn {
         }
         Ok(inputs[0].clone())
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 100_000 + 1, memory_bytes: 0 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #83 Crc32VerifyFn ──
@@ -2127,10 +1911,7 @@ impl ComputeFunction for Crc32VerifyFn {
         }
         Ok(inputs[0].clone())
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 200_000 + 1, memory_bytes: 0 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #84 JsonPrettyPrintFn ──
@@ -2146,10 +1927,7 @@ impl ComputeFunction for JsonPrettyPrintFn {
         let pretty = serde_json::to_string_pretty(&value).map_err(|e| ComputeError::ExecutionFailed(format!("json serialize: {}", e)))?;
         Ok(Bytes::from(pretty))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 50_000 + 1, memory_bytes: s * 3 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #85 JsonMinifyFn ──
@@ -2165,10 +1943,7 @@ impl ComputeFunction for JsonMinifyFn {
         let compact = serde_json::to_string(&value).map_err(|e| ComputeError::ExecutionFailed(format!("json serialize: {}", e)))?;
         Ok(Bytes::from(compact))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 50_000 + 1, memory_bytes: s * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #86 CsvToJsonFn ──
@@ -2194,10 +1969,7 @@ impl ComputeFunction for CsvToJsonFn {
         let json = serde_json::to_string_pretty(&records).map_err(|e| ComputeError::ExecutionFailed(format!("json serialize: {}", e)))?;
         Ok(Bytes::from(json))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 20_000 + 1, memory_bytes: s * 5 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #87 JsonToCsvFn ──
@@ -2226,10 +1998,7 @@ impl ComputeFunction for JsonToCsvFn {
         let csv_bytes = wtr.into_inner().map_err(|e| ComputeError::ExecutionFailed(format!("csv flush: {}", e)))?;
         Ok(Bytes::from(csv_bytes))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 20_000 + 1, memory_bytes: s * 3 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #88 JsonLinesFn ──
@@ -2245,10 +2014,7 @@ impl ComputeFunction for JsonLinesFn {
         let lines: Vec<String> = array.iter().map(|v| serde_json::to_string(v)).collect::<Result<_, _>>().map_err(|e| ComputeError::ExecutionFailed(format!("json serialize: {}", e)))?;
         Ok(Bytes::from(lines.join("\n")))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 50_000 + 1, memory_bytes: s * 2 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #89 YamlToJsonFn ──
@@ -2264,10 +2030,7 @@ impl ComputeFunction for YamlToJsonFn {
         let json = serde_json::to_string_pretty(&value).map_err(|e| ComputeError::ExecutionFailed(format!("json serialize: {}", e)))?;
         Ok(Bytes::from(json))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 30_000 + 1, memory_bytes: s * 3 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #90 JsonToYamlFn ──
@@ -2283,10 +2046,7 @@ impl ComputeFunction for JsonToYamlFn {
         let yaml = serde_yaml::to_string(&value).map_err(|e| ComputeError::ExecutionFailed(format!("yaml serialize: {}", e)))?;
         Ok(Bytes::from(yaml))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 30_000 + 1, memory_bytes: s * 3 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #91 TomlToJsonFn ──
@@ -2302,10 +2062,7 @@ impl ComputeFunction for TomlToJsonFn {
         let json = serde_json::to_string_pretty(&value).map_err(|e| ComputeError::ExecutionFailed(format!("json serialize: {}", e)))?;
         Ok(Bytes::from(json))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 30_000 + 1, memory_bytes: s * 3 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #92 CAddrComputeFn ──
@@ -2319,10 +2076,7 @@ impl ComputeFunction for CAddrComputeFn {
         let addr = CAddr::from_bytes(&inputs[0]);
         Ok(Bytes::copy_from_slice(addr.as_bytes()))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 200_000 + 1, memory_bytes: 32 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #93 CAddrVerifyFn ──
@@ -2343,10 +2097,7 @@ impl ComputeFunction for CAddrVerifyFn {
         }
         Ok(inputs[0].clone())
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 200_000 + 1, memory_bytes: 32 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #94 CAddrEmbedFn ──
@@ -2363,10 +2114,7 @@ impl ComputeFunction for CAddrEmbedFn {
         out.extend_from_slice(addr.as_bytes());
         Ok(Bytes::from(out))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 200_000 + 1, memory_bytes: s + 32 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #95 MerkleRootFn ──
@@ -2399,10 +2147,7 @@ impl ComputeFunction for MerkleRootFn {
         }
         Ok(Bytes::copy_from_slice(&hashes[0]))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 100_000 + 1, memory_bytes: s / 1000 + 32 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(100, input_sizes) }
 }
 
 // ── #96 ContentTypeFn ──
@@ -2426,7 +2171,7 @@ impl ComputeFunction for ContentTypeFn {
             else { "application/octet-stream" };
         Ok(Bytes::from(mime))
     }
-    fn estimated_cost(&self, _: &[u64]) -> ComputeCost { ComputeCost { cpu_ms: 1, memory_bytes: 64 } }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #97 ChunkHashFn ──
@@ -2449,10 +2194,7 @@ impl ComputeFunction for ChunkHashFn {
         for chunk in input.chunks(bs) { out.extend_from_slice(&Sha256::digest(chunk)); }
         Ok(Bytes::from(out))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 100_000 + 1, memory_bytes: s / 1000 + 32 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
 // ── #98 DedupAnalyzeFn ──
@@ -2492,10 +2234,7 @@ impl ComputeFunction for DedupAnalyzeFn {
         let json = serde_json::to_string(&boundaries).map_err(|e| ComputeError::ExecutionFailed(format!("json: {}", e)))?;
         Ok(Bytes::from(json))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 50_000 + 1, memory_bytes: s / 100 + 256 }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(100, input_sizes) }
 }
 
 // ── #99 ReverseByteFn ──
@@ -2510,10 +2249,7 @@ impl ComputeFunction for ReverseByteFn {
         out.reverse();
         Ok(Bytes::from(out))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 200_000 + 1, memory_bytes: s }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
 // ── #100 SortBytesFn ──
@@ -2528,10 +2264,7 @@ impl ComputeFunction for SortBytesFn {
         out.sort_unstable();
         Ok(Bytes::from(out))
     }
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
-        let s = input_sizes.first().copied().unwrap_or(0);
-        ComputeCost { cpu_ms: s / 100_000 + 1, memory_bytes: s }
-    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(100, input_sizes) }
 }
 
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {

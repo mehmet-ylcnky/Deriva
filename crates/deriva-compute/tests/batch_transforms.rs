@@ -1090,3 +1090,43 @@ fn brotli_decompress_binary_roundtrip() {
     let decompressed = exec1(&BrotliDecompressFn, &compressed).unwrap();
     assert_eq!(decompressed.as_ref(), input.as_slice());
 }
+
+// ── #31 Sha256Fn ──
+
+#[test]
+fn sha256_empty_input() {
+    let result = exec1(&Sha256Fn, b"").unwrap();
+    assert_eq!(result.len(), 32);
+    // Known SHA-256 of empty string
+    let hex = result.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    assert_eq!(hex, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+}
+
+#[test]
+fn sha256_known_vector() {
+    let result = exec1(&Sha256Fn, b"abc").unwrap();
+    let hex = result.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    assert_eq!(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+}
+
+#[test]
+fn sha256_output_always_32_bytes() {
+    let short = exec1(&Sha256Fn, b"x").unwrap();
+    let long = exec1(&Sha256Fn, &vec![0u8; 100_000]).unwrap();
+    assert_eq!(short.len(), 32);
+    assert_eq!(long.len(), 32);
+}
+
+#[test]
+fn sha256_different_inputs_different_hashes() {
+    let h1 = exec1(&Sha256Fn, b"hello").unwrap();
+    let h2 = exec1(&Sha256Fn, b"hello!").unwrap();
+    assert_ne!(h1, h2);
+}
+
+#[test]
+fn sha256_deterministic() {
+    let h1 = exec1(&Sha256Fn, b"deterministic").unwrap();
+    let h2 = exec1(&Sha256Fn, b"deterministic").unwrap();
+    assert_eq!(h1, h2);
+}

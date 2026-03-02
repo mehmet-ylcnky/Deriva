@@ -825,6 +825,30 @@ impl ComputeFunction for BrotliDecompressFn {
     }
 }
 
+// ── #31 Sha256Fn ──
+
+pub struct Sha256Fn;
+
+impl ComputeFunction for Sha256Fn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("sha256", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        use sha2::{Sha256, Digest};
+        let hash = Sha256::digest(&inputs[0]);
+        Ok(Bytes::copy_from_slice(&hash))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        let size = input_sizes.first().copied().unwrap_or(0);
+        ComputeCost { cpu_ms: size / 100_000 + 1, memory_bytes: 256 }
+    }
+}
+
 pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     use std::sync::Arc;
     registry.register(Arc::new(IdentityFn));
@@ -857,4 +881,5 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(SnappyDecompressFn));
     registry.register(Arc::new(BrotliCompressFn));
     registry.register(Arc::new(BrotliDecompressFn));
+    registry.register(Arc::new(Sha256Fn));
 }

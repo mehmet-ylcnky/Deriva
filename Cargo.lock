@@ -648,6 +648,7 @@ dependencies = [
  "md-5",
  "num_cpus",
  "prometheus",
+ "rand 0.8.5",
  "regex",
  "sha2",
  "sled",

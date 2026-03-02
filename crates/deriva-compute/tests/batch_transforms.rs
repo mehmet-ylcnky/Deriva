@@ -3739,3 +3739,117 @@ mod batch_only {
 
 
 }
+
+mod roundtrips {
+    use super::*;
+
+    #[test]
+    fn roundtrip_base64() {
+        let input = b"hello world \xF0\x9F\x8C\x8D";
+        let enc = exec1(&Base64EncodeFn, input).unwrap();
+        let dec = exec1(&Base64DecodeFn, &enc).unwrap();
+        assert_eq!(dec.as_ref(), input);
+    }
+
+    #[test]
+    fn roundtrip_hex() {
+        let input = b"\x00\xff\x80binary";
+        let enc = exec1(&HexEncodeFn, input).unwrap();
+        let dec = exec1(&HexDecodeFn, &enc).unwrap();
+        assert_eq!(dec.as_ref(), input);
+    }
+
+    #[test]
+    fn roundtrip_base32() {
+        let input = b"roundtrip test data";
+        let enc = exec1(&Base32EncodeFn, input).unwrap();
+        let dec = exec1(&Base32DecodeFn, &enc).unwrap();
+        assert_eq!(dec.as_ref(), input);
+    }
+
+    #[test]
+    fn roundtrip_aes_ctr() {
+        let input = b"secret data for CTR mode";
+        let p = params(&[("key", TEST_KEY), ("nonce", TEST_NONCE)]);
+        let enc = exec1_params(&EncryptFn, input, p.clone()).unwrap();
+        let dec = exec1_params(&DecryptFn, &enc, p).unwrap();
+        assert_eq!(dec.as_ref(), input);
+    }
+
+    #[test]
+    fn roundtrip_aes_gcm() {
+        let input = b"secret data for GCM mode";
+        let p = params(&[("key", TEST_KEY), ("nonce", TEST_GCM_NONCE)]);
+        let enc = exec1_params(&AeadEncryptFn, input, p.clone()).unwrap();
+        let dec = exec1_params(&AeadDecryptFn, &enc, p).unwrap();
+        assert_eq!(dec.as_ref(), input);
+    }
+
+    #[test]
+    fn roundtrip_zlib() {
+        let input = b"compress me with zlib please";
+        let c = exec1(&CompressFn, input).unwrap();
+        let d = exec1(&DecompressFn, &c).unwrap();
+        assert_eq!(d.as_ref(), input);
+    }
+
+    #[test]
+    fn roundtrip_zstd() {
+        let input = b"compress me with zstd please";
+        let c = exec1(&ZstdCompressFn, input).unwrap();
+        let d = exec1(&ZstdDecompressFn, &c).unwrap();
+        assert_eq!(d.as_ref(), input);
+    }
+
+    #[test]
+    fn roundtrip_lz4() {
+        let input = b"compress me with lz4 please";
+        let c = exec1(&Lz4CompressFn, input).unwrap();
+        let d = exec1(&Lz4DecompressFn, &c).unwrap();
+        assert_eq!(d.as_ref(), input);
+    }
+
+    #[test]
+    fn roundtrip_snappy() {
+        let input = b"compress me with snappy please";
+        let c = exec1(&SnappyCompressFn, input).unwrap();
+        let d = exec1(&SnappyDecompressFn, &c).unwrap();
+        assert_eq!(d.as_ref(), input);
+    }
+
+    #[test]
+    fn roundtrip_brotli() {
+        let input = b"compress me with brotli please";
+        let c = exec1(&BrotliCompressFn, input).unwrap();
+        let d = exec1(&BrotliDecompressFn, &c).unwrap();
+        assert_eq!(d.as_ref(), input);
+    }
+
+    #[test]
+    fn roundtrip_reverse_bytes() {
+        let input = b"\x00\x01\x02\xff";
+        let r1 = exec1(&ReverseByteFn, input).unwrap();
+        let r2 = exec1(&ReverseByteFn, &r1).unwrap();
+        assert_eq!(r2.as_ref(), input);
+    }
+
+    #[test]
+    fn roundtrip_diff_patch() {
+        let a = Bytes::from("line one\nline two\nline three\n");
+        let b = Bytes::from("line one\nmodified\nline three\nnew line\n");
+        let diff = DiffFn.execute(vec![a.clone(), b.clone()], &BTreeMap::new()).unwrap();
+        let patched = PatchFn.execute(vec![a, diff], &BTreeMap::new()).unwrap();
+        assert_eq!(patched, b);
+    }
+
+    #[test]
+    fn roundtrip_json_format() {
+        let input = b"{\"key\":\"value\",\"num\":42}";
+        let pretty = exec1(&JsonPrettyPrintFn, input).unwrap();
+        let mini = exec1(&JsonMinifyFn, &pretty).unwrap();
+        // Semantic roundtrip: parse both and compare
+        let orig: serde_json::Value = serde_json::from_slice(input).unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&mini).unwrap();
+        assert_eq!(orig, result);
+    }
+}

@@ -1,0 +1,188 @@
+mod transforms;
+mod compression;
+mod crypto;
+mod accumulators;
+mod combiners;
+mod slicing;
+mod text;
+mod validation;
+mod format_conversion;
+mod cas;
+mod batch_only;
+
+pub use transforms::*;
+pub use compression::*;
+pub use crypto::*;
+pub use accumulators::*;
+pub use combiners::*;
+pub use slicing::*;
+pub use text::*;
+pub use validation::*;
+pub use format_conversion::*;
+pub use cas::*;
+pub use batch_only::*;
+
+use crate::function::{ComputeCost, ComputeError, ComputeFunction};
+use bytes::Bytes;
+use deriva_core::address::Value;
+use std::collections::BTreeMap;
+
+pub(crate) fn parse_byte_param(params: &BTreeMap<String, Value>, name: &str) -> Result<u8, ComputeError> {
+    match params.get(name) {
+        Some(Value::String(s)) => s.parse().map_err(|_| ComputeError::InvalidParam(format!("{} must be 0-255", name))),
+        _ => Err(ComputeError::InvalidParam(format!("missing param: {}", name))),
+    }
+}
+
+pub(crate) fn parse_usize_param(params: &BTreeMap<String, Value>, name: &str) -> Result<usize, ComputeError> {
+    match params.get(name) {
+        Some(Value::String(s)) => s.parse().map_err(|_| ComputeError::InvalidParam(format!("{} must be a positive integer", name))),
+        Some(Value::Int(n)) if *n > 0 => Ok(*n as usize),
+        _ => Err(ComputeError::InvalidParam(format!("missing param: {}", name))),
+    }
+}
+
+pub(crate) fn parse_u64_param(params: &BTreeMap<String, Value>, name: &str) -> Result<u64, ComputeError> {
+    match params.get(name) {
+        Some(Value::String(s)) => s.parse::<u64>().map_err(|_| ComputeError::InvalidParam(format!("{} must be a non-negative integer", name))),
+        Some(Value::Int(n)) => u64::try_from(*n).map_err(|_| ComputeError::InvalidParam(format!("{} must be non-negative", name))),
+        _ => Err(ComputeError::InvalidParam(format!("missing param: {}", name))),
+    }
+}
+
+/// Split on \n, preserving empty trailing segment.
+pub(crate) fn split_lines(input: &[u8]) -> Vec<&[u8]> {
+    if input.is_empty() { return vec![b""]; }
+    input.split(|&b| b == b'\n').collect()
+}
+
+pub(crate) fn get_string_param<'a>(params: &'a BTreeMap<String, Value>, name: &str) -> Result<&'a str, ComputeError> {
+    match params.get(name) {
+        Some(Value::String(s)) => Ok(s.as_str()),
+        _ => Err(ComputeError::InvalidParam(format!("missing param: {}", name))),
+    }
+}
+
+pub(crate) fn hex_decode_param(hex: &str, name: &str) -> Result<Vec<u8>, ComputeError> {
+    if hex.len() % 2 != 0 {
+        return Err(ComputeError::InvalidParam(format!("odd-length hex in {}", name)));
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&hex[i..i + 2], 16)
+                .map_err(|_| ComputeError::InvalidParam(format!("invalid hex in {}", name)))
+        })
+        .collect()
+}
+
+/// Spec §4.2 cost formula: base_cost * (total_input_bytes / 1024).max(1)
+fn spec_cost(base: u64, input_sizes: &[u64]) -> ComputeCost {
+    let total: u64 = input_sizes.iter().sum();
+    let scale = (total / 1024).max(1);
+    ComputeCost { cpu_ms: base * scale, memory_bytes: total }
+}
+
+pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
+    use std::sync::Arc;
+    registry.register(Arc::new(IdentityFn));
+    registry.register(Arc::new(ConcatFn));
+    registry.register(Arc::new(UppercaseFn));
+    registry.register(Arc::new(RepeatFn));
+    registry.register(Arc::new(LowercaseFn));
+    registry.register(Arc::new(ReverseFn));
+    registry.register(Arc::new(Base64EncodeFn));
+    registry.register(Arc::new(Base64DecodeFn));
+    registry.register(Arc::new(HexEncodeFn));
+    registry.register(Arc::new(HexDecodeFn));
+    registry.register(Arc::new(Base32EncodeFn));
+    registry.register(Arc::new(Base32DecodeFn));
+    registry.register(Arc::new(XorFn));
+    registry.register(Arc::new(BitwiseAndFn));
+    registry.register(Arc::new(BitwiseOrFn));
+    registry.register(Arc::new(BitwiseNotFn));
+    registry.register(Arc::new(ByteSwapFn));
+    registry.register(Arc::new(TrimFn));
+    registry.register(Arc::new(PadFn));
+    registry.register(Arc::new(LineEndingFn));
+    registry.register(Arc::new(CompressFn));
+    registry.register(Arc::new(DecompressFn));
+    registry.register(Arc::new(ZstdCompressFn));
+    registry.register(Arc::new(ZstdDecompressFn));
+    registry.register(Arc::new(Lz4CompressFn));
+    registry.register(Arc::new(Lz4DecompressFn));
+    registry.register(Arc::new(SnappyCompressFn));
+    registry.register(Arc::new(SnappyDecompressFn));
+    registry.register(Arc::new(BrotliCompressFn));
+    registry.register(Arc::new(BrotliDecompressFn));
+    registry.register(Arc::new(Sha256Fn));
+    registry.register(Arc::new(Sha512Fn));
+    registry.register(Arc::new(Md5Fn));
+    registry.register(Arc::new(Blake3Fn));
+    registry.register(Arc::new(HmacSha256Fn));
+    registry.register(Arc::new(Crc32Fn));
+    registry.register(Arc::new(EncryptFn));
+    registry.register(Arc::new(DecryptFn));
+    registry.register(Arc::new(AeadEncryptFn));
+    registry.register(Arc::new(AeadDecryptFn));
+    registry.register(Arc::new(RedactFn));
+    registry.register(Arc::new(ByteCountFn));
+    registry.register(Arc::new(LineCountFn));
+    registry.register(Arc::new(WordCountFn));
+    registry.register(Arc::new(HistogramFn));
+    registry.register(Arc::new(EntropyFn));
+    registry.register(Arc::new(MinMaxFn));
+    registry.register(Arc::new(SumFn));
+    registry.register(Arc::new(AverageFn));
+    registry.register(Arc::new(InterleaveFn));
+    registry.register(Arc::new(ZipConcatFn));
+    registry.register(Arc::new(DiffFn));
+    registry.register(Arc::new(PatchFn));
+    registry.register(Arc::new(MergeSortedFn));
+    registry.register(Arc::new(SelectFn));
+    registry.register(Arc::new(TakeFn));
+    registry.register(Arc::new(SkipFn));
+    registry.register(Arc::new(SliceFn));
+    registry.register(Arc::new(SortFn));
+    registry.register(Arc::new(UniqueFn));
+    registry.register(Arc::new(SortUniqueFn));
+    registry.register(Arc::new(ShuffleFn));
+    registry.register(Arc::new(HeadFn));
+    registry.register(Arc::new(TailFn));
+    registry.register(Arc::new(SampleFn));
+    registry.register(Arc::new(ReplaceFn));
+    registry.register(Arc::new(RegexReplaceFn));
+    registry.register(Arc::new(GrepFn));
+    registry.register(Arc::new(GrepInvertFn));
+    registry.register(Arc::new(PrefixFn));
+    registry.register(Arc::new(SuffixFn));
+    registry.register(Arc::new(LinePrefixFn));
+    registry.register(Arc::new(LineNumberFn));
+    registry.register(Arc::new(TruncateLinesFn));
+    registry.register(Arc::new(CharsetConvertFn));
+    registry.register(Arc::new(Utf8ValidateFn));
+    registry.register(Arc::new(JsonValidateFn));
+    registry.register(Arc::new(SchemaValidateFn));
+    registry.register(Arc::new(MagicBytesFn));
+    registry.register(Arc::new(SizeLimitFn));
+    registry.register(Arc::new(NonEmptyFn));
+    registry.register(Arc::new(Sha256VerifyFn));
+    registry.register(Arc::new(Crc32VerifyFn));
+    registry.register(Arc::new(JsonPrettyPrintFn));
+    registry.register(Arc::new(JsonMinifyFn));
+    registry.register(Arc::new(CsvToJsonFn));
+    registry.register(Arc::new(JsonToCsvFn));
+    registry.register(Arc::new(JsonLinesFn));
+    registry.register(Arc::new(YamlToJsonFn));
+    registry.register(Arc::new(JsonToYamlFn));
+    registry.register(Arc::new(TomlToJsonFn));
+    registry.register(Arc::new(CAddrComputeFn));
+    registry.register(Arc::new(CAddrVerifyFn));
+    registry.register(Arc::new(CAddrEmbedFn));
+    registry.register(Arc::new(MerkleRootFn));
+    registry.register(Arc::new(ContentTypeFn));
+    registry.register(Arc::new(ChunkHashFn));
+    registry.register(Arc::new(DedupAnalyzeFn));
+    registry.register(Arc::new(ReverseByteFn));
+    registry.register(Arc::new(SortBytesFn));
+}

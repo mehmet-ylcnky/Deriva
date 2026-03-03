@@ -171,7 +171,7 @@ fn s09_byte_count(c: &mut Criterion) {
 fn s10_xor(c: &mut Criterion) {
     let mut g = c.benchmark_group("7.1_10_xor");
     let input = Bytes::from(vec![0xAA; 1_048_576]);
-    let bp_xor = bp(&[("key", "ff")]);
+    let bp_xor = bp(&[("key", "255")]);
     let sp_xor = sp(&[("key", "ff")]);
     g.throughput(Throughput::Bytes(1_048_576));
     g.bench_function("batch_1mb", |b| {
@@ -214,7 +214,7 @@ fn s11_pipeline_3stage(c: &mut Criterion) {
 fn s12_compress_encrypt(c: &mut Criterion) {
     let mut g = c.benchmark_group("7.1_12_compress_xor");
     let input = Bytes::from(vec![b'z'; 1_048_576]);
-    let bp_xor = bp(&[("key", "ab")]);
+    let bp_xor = bp(&[("key", "171")]);
     let sp_xor = sp(&[("key", "ab")]);
     g.throughput(Throughput::Bytes(1_048_576));
     g.bench_function("batch_1mb", |b| {

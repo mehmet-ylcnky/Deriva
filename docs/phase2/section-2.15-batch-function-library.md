@@ -4158,6 +4158,73 @@ No function exceeds O(n²) worst case. DiffFn uses Myers' algorithm
 which is O(n × d) where d = edit distance, bounded by O(n²) for
 completely different inputs.
 
+### 7.4 Benchmark Results (Batch vs Streaming)
+
+Measured on 1MB inputs unless noted. Run with:
+`cargo bench -p deriva-benchmarks --bench batch_vs_streaming`
+
+#### 7.4.1 Throughput Comparison
+
+| Scenario | Batch | Streaming | Batch Advantage |
+|----------|-------|-----------|-----------------|
+| Identity (64KB) | 1.94 TiB/s | 41 MiB/s | ~48,000× |
+| Identity (1MB) | 28.3 TiB/s | 625 MiB/s | ~46,000× |
+| Identity (10MB) | 322 TiB/s | 2.86 GiB/s | ~115,000× |
+| Uppercase | 15.1 GiB/s | 618 MiB/s | 25× |
+| Lowercase | 29.9 GiB/s | 570 MiB/s | 54× |
+| Base64 Encode | 2.82 GiB/s | 409 MiB/s | 7× |
+| Base64 Decode | 3.17 GiB/s | 553 MiB/s | 6× |
+| Zlib Compress | 768 MiB/s | 489 MiB/s | 1.6× |
+| Zlib Decompress | 5.76 MiB/s | 494 KiB/s | 12× |
+| SHA-256 | 2.0 GiB/s | 401 MiB/s | 5× |
+| Byte Count | 23.4 TiB/s | 625 MiB/s | ~38,000× |
+| XOR | 40.2 GiB/s | 548 MiB/s | 75× |
+| 3-Stage Pipeline | 1.62 GiB/s | 450 MiB/s | 3.7× |
+| Compress+XOR | 735 MiB/s | 518 MiB/s | 1.4× |
+| 5-Stage Pipeline | 687 MiB/s | 367 MiB/s | 1.9× |
+
+#### 7.4.2 Chunk Size Impact (Streaming)
+
+| Chunk Size | Throughput | Notes |
+|------------|------------|-------|
+| 4KB | 276 MiB/s | High channel overhead |
+| 64KB (default) | 553 MiB/s | Optimal balance |
+| 256KB | 546 MiB/s | No improvement |
+| Batch baseline | 13.3 GiB/s | 24× faster than best streaming |
+
+#### 7.4.3 Key Findings
+
+1. **Identity/passthrough**: Batch ~40,000-100,000× faster due to
+   zero-copy semantics vs streaming chunking + channel overhead.
+
+2. **Simple transforms** (upper/lower/xor): Batch 25-75× faster;
+   streaming overhead dominates the lightweight per-byte operations.
+
+3. **CPU-heavy operations** (compress): Gap narrows to 1.4-1.6× as
+   compute time dominates the fixed streaming overhead.
+
+4. **Accumulators** (sha256, byte_count): Batch 5-38,000× faster;
+   streaming implementations must buffer all chunks anyway.
+
+5. **Pipelines**: Gap narrows with depth (3.7× → 1.9×) as streaming
+   amortizes setup cost across multiple stages.
+
+6. **Chunk size**: 64KB is optimal; smaller chunks add channel
+   overhead, larger chunks provide no throughput benefit.
+
+#### 7.4.4 When to Use Each Mode
+
+| Use Batch When | Use Streaming When |
+|----------------|-------------------|
+| Input fits in memory | Input exceeds memory budget |
+| Latency-sensitive | Memory-constrained |
+| Simple transforms | Progressive output needed |
+| Accumulators/aggregates | Backpressure required |
+| Format conversion | Tee/fan-out patterns |
+
+The §2.9 size-aware mode selection uses `streaming_threshold` (default
+3MB) to automatically choose the optimal mode based on input size.
+
 ---
 
 ## 8. Files Changed

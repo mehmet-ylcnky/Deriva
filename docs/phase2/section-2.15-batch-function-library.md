@@ -4595,7 +4595,7 @@ topk(10, sum(rate(deriva_batch_fn_input_bytes_sum[5m])) by (function))
 
 ### 12.5 Observability
 
-- [ ] 4 Prometheus metrics wired in executor layer (§11)
+- [x] Compute metrics wired in executor layer (§11) — `COMPUTE_DURATION`, `COMPUTE_INPUT_BYTES`, `COMPUTE_OUTPUT_BYTES` with `function` label
 
 ### 12.6 Benchmarks
 

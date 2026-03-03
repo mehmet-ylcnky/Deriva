@@ -740,3 +740,103 @@ impl StreamingComputeFunction for StreamingTeeCount {
         out
     }
 }
+
+// ---------------------------------------------------------------------------
+// Pattern 3: Boundary-aware map (buffers trailing partial line)
+// ---------------------------------------------------------------------------
+
+/// Spawn a boundary-aware map — buffers trailing bytes after last \n,
+/// prepends leftover to next chunk. Flushes remainder on End.
+pub(crate) fn spawn_boundary_map(
+    mut rx: mpsc::Receiver<StreamChunk>,
+    cap: usize,
+    f: impl Fn(&[u8]) -> Result<Bytes, String> + Send + 'static,
+) -> mpsc::Receiver<StreamChunk> {
+    let (tx, out) = mpsc::channel(cap);
+    tokio::spawn(async move {
+        let mut leftover = Vec::new();
+        loop {
+            match rx.recv().await {
+                Some(StreamChunk::Data(chunk)) => {
+                    let mut buf = std::mem::take(&mut leftover);
+                    buf.extend_from_slice(&chunk);
+                    // Find last newline
+                    if let Some(pos) = buf.iter().rposition(|&b| b == b'\n') {
+                        let process = &buf[..pos + 1];
+                        leftover = buf[pos + 1..].to_vec();
+                        match f(process) {
+                            Ok(b) => { if tx.send(StreamChunk::Data(b)).await.is_err() { return; } }
+                            Err(e) => {
+                                let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(e))).await;
+                                return;
+                            }
+                        }
+                    } else {
+                        leftover = buf;
+                    }
+                }
+                Some(StreamChunk::End) => {
+                    if !leftover.is_empty() {
+                        match f(&leftover) {
+                            Ok(b) => { let _ = tx.send(StreamChunk::Data(b)).await; }
+                            Err(e) => {
+                                let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(e))).await;
+                                return;
+                            }
+                        }
+                    }
+                    let _ = tx.send(StreamChunk::End).await;
+                    return;
+                }
+                Some(StreamChunk::Error(e)) => {
+                    let _ = tx.send(StreamChunk::Error(e)).await;
+                    return;
+                }
+                None => return,
+            }
+        }
+    });
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Pattern 4: Buffered transform (collect all, transform, re-emit)
+// ---------------------------------------------------------------------------
+
+/// Collect entire input, apply transform, re-emit as chunked output.
+pub(crate) fn spawn_buffered(
+    mut rx: mpsc::Receiver<StreamChunk>,
+    cap: usize,
+    chunk_size: usize,
+    f: impl FnOnce(Bytes) -> Result<Bytes, String> + Send + 'static,
+) -> mpsc::Receiver<StreamChunk> {
+    let (tx, out) = mpsc::channel(cap);
+    tokio::spawn(async move {
+        let mut buf = Vec::new();
+        loop {
+            match rx.recv().await {
+                Some(StreamChunk::Data(chunk)) => buf.extend_from_slice(&chunk),
+                Some(StreamChunk::End) => break,
+                Some(StreamChunk::Error(e)) => {
+                    let _ = tx.send(StreamChunk::Error(e)).await;
+                    return;
+                }
+                None => break,
+            }
+        }
+        match f(Bytes::from(buf)) {
+            Ok(result) => {
+                for chunk in result.chunks(chunk_size) {
+                    if tx.send(StreamChunk::Data(Bytes::copy_from_slice(chunk))).await.is_err() {
+                        return;
+                    }
+                }
+                let _ = tx.send(StreamChunk::End).await;
+            }
+            Err(e) => {
+                let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(e))).await;
+            }
+        }
+    });
+    out
+}

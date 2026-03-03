@@ -2621,6 +2621,30 @@ A `Compress → Encrypt` pipeline is dominated by compression:
 Boundary-aware functions add ~2 μs/chunk overhead for leftover buffer
 management — negligible relative to the transform itself.
 
+#### 7.4.1 Benchmark Results (Measured)
+
+> Full analysis: [`docs/phase2/section-2.14-7.4-text-processing-benchmark-results.md`](section-2.14-7.4-text-processing-benchmark-results.md)
+
+10 benchmark scenarios executed via Criterion (`benches/text_processing_overhead.rs`), covering all 8 text functions:
+
+| Function | Measured Throughput (MB/s) | Time (1 MB) |
+|----------|---------------------------:|------------:|
+| Prefix | 11,164 | 0.090 ms |
+| Suffix | 6,111 | 0.164 ms |
+| TruncateLines | 1,440 | 0.694 ms |
+| Grep (simple) | 1,078 | 0.927 ms |
+| Sed (simple) | 1,008 | 0.992 ms |
+| LinePrefix | 752 | 1.330 ms |
+| CharsetConvert (latin1→utf8) | 624 | 1.603 ms |
+| Replace (literal) | 446 | 2.242 ms |
+
+**Key findings:**
+- Prefix/Suffix are near-zero-cost (single prepend/append, no per-chunk work)
+- Complex regex costs 3× more than simple patterns (Grep: 222 vs 1,078 MB/s)
+- Grep and Sed outperform Replace by 2–3× due to line-by-line processing
+- CharsetConvert exceeds spec at 624 MB/s (spec predicted 500 MB/s)
+- Replace scaling peaks at ~1 MB, drops at 4 MB due to cache pressure
+
 ### 7.5 Flow Control Overhead
 
 | Function | Overhead per Chunk | Notes |

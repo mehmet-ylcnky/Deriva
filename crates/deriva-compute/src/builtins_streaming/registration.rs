@@ -31,6 +31,9 @@ pub fn register_streaming_builtins(registry: &mut FunctionRegistry) {
     registry.register_streaming(Arc::new(StreamingRepeat), sid("streaming_repeat"));
     registry.register_streaming(Arc::new(StreamingTeeCount), sid("streaming_tee_count"));
 
+    // Extended library (#21–#100) — feature-gated
+    #[cfg(feature = "extended-streaming")]
+    {
     // §3.1 Crypto & Security (#21–#29)
     registry.register_streaming(Arc::new(StreamingEncrypt), sid("streaming_encrypt"));
     registry.register_streaming(Arc::new(StreamingDecrypt), sid("streaming_decrypt"));
@@ -128,4 +131,5 @@ pub fn register_streaming_builtins(registry: &mut FunctionRegistry) {
     registry.register_streaming(Arc::new(StreamingByteSwap), sid("streaming_byte_swap"));
     registry.register_streaming(Arc::new(StreamingEntropy), sid("streaming_entropy"));
     registry.register_streaming(Arc::new(StreamingRollingHash), sid("streaming_rolling_hash"));
+    } // end extended-streaming
 }

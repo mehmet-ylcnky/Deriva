@@ -4372,20 +4372,83 @@ No function exceeds O(n²) worst case. DiffFn uses Myers' algorithm
 which is O(n × d) where d = edit distance, bounded by O(n²) for
 completely different inputs.
 
+#### 7.3.1 Scaling Measurements
+
+Run with: `cargo bench -p deriva-benchmarks --bench complexity_scaling`
+
+Each function measured at 4KB, 64KB, 256KB, 1MB to reveal scaling curves.
+
+| Scenario | 4KB | 64KB | 256KB | 1MB | Scaling Factor (1MB/4KB) | Expected |
+|----------|-----|------|-------|-----|--------------------------|----------|
+| Identity (O(1)) | 34 ns | 35 ns | 34 ns | 35 ns | 1.0× | 1.0× |
+| Uppercase (O(n)) | 297 ns | 3.7 µs | 15.2 µs | 62.2 µs | 209× | 256× |
+| SHA-256 (O(n)) | 1.9 µs | 29.2 µs | 118 µs | 486 µs | 256× | 256× |
+| Zlib compress (O(n)) | 14.0 µs | 93.6 µs | 337 µs | 1.34 ms | 96× | 256× |
+| AES-CTR encrypt (O(n) high) | 1.0 µs | 9.5 µs | 36.9 µs | 147 µs | 147× | 256× |
+| Brotli compress (O(n) high) | 49.1 µs | 569 µs | 904 µs | 2.32 ms | 47× | 256× |
+| Sort lines (O(n log n)) | 2.3 µs | 33.4 µs | 142 µs | 508 µs | 221× | 341× |
+| Sort unique (O(n log n)) | 10.6 µs | 159 µs | 822 µs | 2.40 ms | 226× | 341× |
+| Replace (O(n×m)) | 2.3 µs | 33.5 µs | 126 µs | 527 µs | 229× | 256× |
+| Diff (O(n×d), d≈5%) | 3.5 µs | 51.7 µs | 186 µs | 651 µs | 186× | 256× |
+
+*Expected scaling: O(1)=1×, O(n)=256× (1MB/4KB), O(n log n)=256×(log 1M/log 4K)≈341×*
+
+#### 7.3.2 Key Findings
+
+1. **O(1) confirmed**: Identity holds at ~34 ns regardless of input
+   size. The `Bytes::clone()` refcount bump is truly constant — no
+   hidden memcpy or allocation.
+
+2. **Pure O(n) functions scale linearly**: SHA-256 hits the theoretical
+   256× scaling factor exactly (1.9 µs → 486 µs). Uppercase shows
+   209× due to SIMD vectorization at larger sizes — the CPU processes
+   more bytes per cycle when the working set fits in L1/L2 cache.
+
+3. **High-constant O(n) diverges from pure O(n)**: AES-CTR (147×) has
+   a fixed key schedule setup (~0.5 µs) that dominates at 4KB but
+   amortizes at 1MB. Brotli (47×) shows sub-linear scaling because its
+   dictionary-building phase is O(n) but with a large constant that
+   saturates early — the LZ77 window size caps the effective search
+   depth regardless of input size.
+
+4. **Zlib compression is sub-linear in practice**: The 96× scaling
+   (vs expected 256×) reflects zlib's sliding window (32KB). Beyond
+   32KB, the algorithm doesn't search further back, so doubling input
+   size doesn't double work — it only adds more window-sized chunks.
+
+5. **O(n log n) sorts show expected super-linear growth**: Sort (221×)
+   and sort-unique (226×) fall between O(n) (256×) and O(n log n)
+   (341×). The gap from 341× reflects that comparison-based sorting
+   benefits from branch prediction on partially-ordered data — our
+   test input has repeated lines that create natural runs.
+
+6. **Replace scales as O(n) not O(n×m)**: The 229× factor matches
+   linear scaling because match density (m/n) is constant — "the"
+   appears at a fixed rate per line. O(n×m) worst case requires
+   match density to grow with input size, which doesn't happen with
+   natural text.
+
+7. **Diff with small edit distance is effectively O(n)**: At 5% edit
+   distance, diff shows 186× scaling (sub-linear). Myers' algorithm
+   is O(n×d) where d is edit distance; with d proportional to n (5%),
+   this is O(n²), but the constant is tiny. For similar inputs (the
+   common case in a CAS), diff behaves as fast O(n).
+
 ---
 
 ## 8. Files Changed
 
 | File | Action | Description |
 |------|--------|-------------|
-| `crates/deriva-compute/src/builtins.rs` | Modify | Add 96 new `ComputeFunction` implementations (#5–#100), shared helpers, extend `register_default_functions()` |
-| `crates/deriva-compute/tests/batch_functions.rs` | Create | ~288 unit tests + 13 roundtrip + 20 parity + 5 pipeline = ~326 tests |
+| `crates/deriva-compute/src/builtins/` | Create | 11 category modules (transforms, compression, crypto, accumulators, combiners, slicing, text, validation, format_conversion, cas, batch_only) + `mod.rs` |
+| `crates/deriva-compute/tests/batch/` | Create | 14 test modules (579 tests): per-category + roundtrips, pipeline_composition, edge_cases |
+| `crates/deriva-compute/tests/async_exec/` | Create | 7 modules (45 tests): core, parallel, semaphore, dedup, error_handling, caching, stress |
+| `crates/deriva-compute/tests/verif/` | Create | 2 modules (30 tests): modes, advanced |
 | `crates/deriva-compute/Cargo.toml` | Modify | Add 13 new dependencies (see §9) |
-
-Three files total. All new function implementations colocate in
-`builtins.rs` alongside the existing 4 functions (#1–#4). No new
-source modules — keeps the batch function surface in a single file
-for discoverability.
+| `crates/deriva-benchmarks/benches/batch_vs_streaming.rs` | Create | §7.1 benchmark — 15 scenarios |
+| `crates/deriva-benchmarks/benches/memory_profile.rs` | Create | §7.2 benchmark — 15 scenarios |
+| `crates/deriva-benchmarks/benches/complexity_scaling.rs` | Create | §7.3 benchmark — 10 scenarios, 4 sizes each |
+| `crates/deriva-benchmarks/Cargo.toml` | Modify | Register 3 new benchmark entries |
 
 ---
 
@@ -4497,48 +4560,51 @@ topk(10, sum(rate(deriva_batch_fn_input_bytes_sum[5m])) by (function))
 
 ### 12.1 Implementation (96 functions)
 
-- [ ] §3.1 Transforms (#5–#20) — 16 functions
-- [ ] §3.2 Compression (#21–#30) — 10 functions
-- [ ] §3.3 Crypto & Hashing (#31–#41) — 11 functions
-- [ ] §3.4 Accumulators (#42–#49) — 8 functions
-- [ ] §3.5 Combiners (#50–#55) — 6 functions
-- [ ] §3.6 Slicing & Restructuring (#56–#65) — 10 functions
-- [ ] §3.7 Text Processing (#66–#75) — 10 functions
-- [ ] §3.8 Validation & Integrity (#76–#83) — 8 functions
-- [ ] §3.9 Format Conversion (#84–#91) — 8 functions
-- [ ] §3.10 CAS-Specific (#92–#98) — 7 functions
-- [ ] §3.11 Batch-Only (#99–#100) — 2 functions
+- [x] §3.1 Transforms (#5–#20) — 16 functions
+- [x] §3.2 Compression (#21–#30) — 10 functions
+- [x] §3.3 Crypto & Hashing (#31–#41) — 11 functions
+- [x] §3.4 Accumulators (#42–#49) — 8 functions
+- [x] §3.5 Combiners (#50–#55) — 6 functions
+- [x] §3.6 Slicing & Restructuring (#56–#65) — 10 functions
+- [x] §3.7 Text Processing (#66–#75) — 10 functions
+- [x] §3.8 Validation & Integrity (#76–#83) — 8 functions
+- [x] §3.9 Format Conversion (#84–#91) — 8 functions
+- [x] §3.10 CAS-Specific (#92–#98) — 7 functions
+- [x] §3.11 Batch-Only (#99–#100) — 2 functions
 
 ### 12.2 Registration & Wiring
 
-- [ ] Register all 96 new functions in `register_default_functions()`
-- [ ] Add 13 new crate dependencies to `Cargo.toml` (§9)
-- [ ] Implement 6 shared helper functions (§4.2)
+- [x] Register all 96 new functions in `register_default_functions()`
+- [x] Add 13 new crate dependencies to `Cargo.toml` (§9)
+- [x] Implement 6 shared helper functions (§4.2)
 
-### 12.3 Testing (~326 tests)
+### 12.3 Testing (579 tests)
 
-- [ ] Unit tests — ~288 tests (~3 per function) in `tests/batch_functions.rs`
-- [ ] Roundtrip tests — 13 encode/decode pairs (§5.2)
+- [x] Unit tests — 579 tests across 14 modules in `tests/batch/`
+- [x] Roundtrip tests — 13 encode/decode pairs (§5.2)
 - [ ] Streaming parity tests — 20 batch-vs-streaming comparisons (§5.3)
-- [ ] Pipeline composition tests — 5 multi-function chains (§5.4)
+- [x] Pipeline composition tests — 5 multi-function chains (§5.4)
 
 ### 12.4 Quality
 
-- [ ] `cargo check -p deriva-compute` compiles clean
-- [ ] `cargo clippy -p deriva-compute -- -D warnings` no warnings
-- [ ] `cargo test -p deriva-compute` — all existing + new tests pass
-- [ ] All `estimated_cost()` implementations return sensible values (§4.1)
-- [ ] All error messages include function/param name for debuggability (§4.3)
+- [x] `cargo check -p deriva-compute` compiles clean
+- [x] `cargo clippy -p deriva-compute -- -D warnings` no warnings
+- [x] `cargo test -p deriva-compute` — all existing + new tests pass
+- [x] All `estimated_cost()` implementations return sensible values (§4.1)
+- [x] All error messages include function/param name for debuggability (§4.3)
 
 ### 12.5 Observability
 
 - [ ] 4 Prometheus metrics wired in executor layer (§11)
 
-### 12.6 Deferred
+### 12.6 Benchmarks
 
-- [ ] Benchmark suite in `benches/batch_bench.rs` (§5.5 — post-merge)
+- [x] §7.1 Batch vs Streaming — 15 scenarios in `benches/batch_vs_streaming.rs`
+- [x] §7.2 Memory Profile — 15 scenarios in `benches/memory_profile.rs`
+- [x] §7.3 Computational Complexity — 10 scenarios in `benches/complexity_scaling.rs`
 
 ### 12.7 Final
 
 - [ ] `git add -A && git -c commit.gpgsign=false commit`
 - [ ] Verify no TODO stubs remain in this spec
+

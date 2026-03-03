@@ -15,7 +15,7 @@ use crate::streaming::{StreamingComputeFunction, DEFAULT_CHANNEL_CAPACITY};
 // ---------------------------------------------------------------------------
 
 /// Spawn a task that reads one input, transforms each Data chunk, and forwards.
-fn spawn_map(
+pub(crate) fn spawn_map(
     mut rx: mpsc::Receiver<StreamChunk>,
     cap: usize,
     f: impl Fn(&[u8]) -> Result<Bytes, String> + Send + 'static,
@@ -55,8 +55,49 @@ fn spawn_map(
     out
 }
 
+/// Spawn a stateful map — like spawn_map but with FnMut for mutable state across chunks.
+pub(crate) fn spawn_map_stateful(
+    mut rx: mpsc::Receiver<StreamChunk>,
+    cap: usize,
+    mut f: impl FnMut(&[u8]) -> Result<Bytes, String> + Send + 'static,
+) -> mpsc::Receiver<StreamChunk> {
+    let (tx, out) = mpsc::channel(cap);
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Some(StreamChunk::Data(chunk)) => {
+                    let mapped = match f(&chunk) {
+                        Ok(b) => StreamChunk::Data(b),
+                        Err(e) => {
+                            let _ = tx
+                                .send(StreamChunk::Error(
+                                    deriva_core::DerivaError::ComputeFailed(e),
+                                ))
+                                .await;
+                            return;
+                        }
+                    };
+                    if tx.send(mapped).await.is_err() {
+                        return;
+                    }
+                }
+                Some(StreamChunk::End) => {
+                    let _ = tx.send(StreamChunk::End).await;
+                    return;
+                }
+                Some(StreamChunk::Error(e)) => {
+                    let _ = tx.send(StreamChunk::Error(e)).await;
+                    return;
+                }
+                None => return,
+            }
+        }
+    });
+    out
+}
+
 /// Spawn a task that accumulates all input, then emits a single result.
-fn spawn_accumulate<S: Send + 'static>(
+pub(crate) fn spawn_accumulate<S: Send + 'static>(
     mut rx: mpsc::Receiver<StreamChunk>,
     init: S,
     fold: impl Fn(&mut S, &[u8]) + Send + 'static,
@@ -82,7 +123,7 @@ fn spawn_accumulate<S: Send + 'static>(
     out
 }
 
-fn take_one(inputs: &mut Vec<mpsc::Receiver<StreamChunk>>, name: &str) -> mpsc::Receiver<StreamChunk> {
+pub(crate) fn take_one(inputs: &mut Vec<mpsc::Receiver<StreamChunk>>, name: &str) -> mpsc::Receiver<StreamChunk> {
     assert_eq!(inputs.len(), 1, "{name} takes exactly 1 input");
     inputs.remove(0)
 }

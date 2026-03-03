@@ -2541,6 +2541,28 @@ Key takeaways:
 - CRC32 with SSE4.2 is the fastest integrity check
 - HMAC-SHA256 is ~10% slower than raw SHA-256 (key mixing overhead)
 
+#### 7.2.1 Benchmark Results (Measured)
+
+> Full analysis: [`docs/phase2/section-2.14-7.2-hash-algorithm-benchmark-results.md`](section-2.14-7.2-hash-algorithm-benchmark-results.md)
+
+10 benchmark scenarios executed via Criterion (`benches/hash_algorithm_comparison.rs`), covering all 6 hash producers + ChunkHash, RollingHash, ChecksumVerify, Sha256Verify:
+
+| Algorithm | Measured Throughput (MB/s) | Output Size | Per-Chunk (64 KB) |
+|-----------|---------------------------:|:-----------:|-----------:|
+| CRC32 | 780 | 4 bytes | 1,238 μs |
+| SHA-256 | 638 | 32 bytes | 1,273 μs |
+| BLAKE3 | 610 | 32 bytes | 1,356 μs |
+| HMAC-SHA256 | 558 | 32 bytes | 1,168 μs |
+| MD5 | 385 | 16 bytes | 1,481 μs |
+| SHA-512 | 337 | 64 bytes | 1,406 μs |
+
+**Key findings:**
+- SHA-256 is the best general-purpose hash (638 MB/s with SHA-NI)
+- BLAKE3 parallelism unrealized in single-chunk streaming (610 MB/s vs spec 5,000 MB/s)
+- HMAC-SHA256 overhead is only 4.5% over raw SHA-256
+- All algorithms overhead-bound at 64 KB (~1.2 ms floor)
+- Verify functions add 35–45% overhead due to data passthrough
+
 ### 7.3 Crypto Overhead
 
 | Operation | Throughput (MB/s) | Per-Chunk (64 KB) | Notes |

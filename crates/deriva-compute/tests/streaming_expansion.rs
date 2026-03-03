@@ -4,4 +4,5 @@ mod streaming_ext {
     mod analytics;
     mod flow;
     mod validation;
+    mod text;
 }

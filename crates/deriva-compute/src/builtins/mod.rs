@@ -185,4 +185,7 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(DedupAnalyzeFn));
     registry.register(Arc::new(ReverseByteFn));
     registry.register(Arc::new(SortBytesFn));
+
+    // Streaming functions (#1–#100)
+    crate::builtins_streaming::register_streaming_builtins(registry);
 }

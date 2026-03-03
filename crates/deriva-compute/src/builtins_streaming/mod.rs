@@ -8,6 +8,7 @@ mod text;
 mod cas;
 mod compression;
 mod numeric;
+mod registration;
 
 pub use self::core::*;
 pub use crypto::*;
@@ -19,3 +20,4 @@ pub use text::*;
 pub use cas::*;
 pub use compression::*;
 pub use numeric::*;
+pub use registration::register_streaming_builtins;

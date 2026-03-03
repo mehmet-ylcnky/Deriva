@@ -9,4 +9,5 @@ mod streaming_ext {
     mod compression;
     mod numeric;
     mod integration;
+    mod spec_gaps;
 }

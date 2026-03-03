@@ -237,20 +237,16 @@ impl StreamingComputeFunction for StreamingCsvToJson {
                 .map_err(|e| format!("csv: {}", e))?
                 .iter().map(|s| s.to_string()).collect();
             let mut out = Vec::new();
-            out.push(b'[');
-            let mut first = true;
             for result in rdr.records() {
                 let record = result.map_err(|e| format!("csv: {}", e))?;
-                if !first { out.push(b','); }
-                first = false;
                 let obj: serde_json::Map<String, serde_json::Value> = headers.iter()
                     .zip(record.iter())
                     .map(|(h, v)| (h.clone(), serde_json::Value::String(v.to_string())))
                     .collect();
                 serde_json::to_writer(&mut out, &obj)
                     .map_err(|e| format!("csv: {}", e))?;
+                out.push(b'\n');
             }
-            out.push(b']');
             Ok(Bytes::from(out))
         })
     }

@@ -284,45 +284,51 @@ async fn json_lines_multi_chunk() {
 async fn csv_to_json_basic() {
     let csv = b"name,age\nAlice,30\nBob,25\n";
     let out = run_one(&StreamingCsvToJson, vec![csv], &hp(&[])).await;
-    let arr: Vec<serde_json::Value> = serde_json::from_slice(&out).unwrap();
-    assert_eq!(arr.len(), 2);
-    assert_eq!(arr[0]["name"], "Alice");
-    assert_eq!(arr[0]["age"], "30");
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out).lines()
+        .filter(|l| !l.is_empty()).map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["name"], "Alice");
+    assert_eq!(lines[0]["age"], "30");
 }
 
 #[tokio::test]
 async fn csv_to_json_single_row() {
     let csv = b"x\n42\n";
     let out = run_one(&StreamingCsvToJson, vec![csv], &hp(&[])).await;
-    let arr: Vec<serde_json::Value> = serde_json::from_slice(&out).unwrap();
-    assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["x"], "42");
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out).lines()
+        .filter(|l| !l.is_empty()).map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["x"], "42");
 }
 
 #[tokio::test]
 async fn csv_to_json_multi_chunk() {
     let out = run_one(&StreamingCsvToJson, vec![b"a,b\n1,", b"2\n"], &hp(&[])).await;
-    let arr: Vec<serde_json::Value> = serde_json::from_slice(&out).unwrap();
-    assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["a"], "1");
-    assert_eq!(arr[0]["b"], "2");
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out).lines()
+        .filter(|l| !l.is_empty()).map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["a"], "1");
+    assert_eq!(lines[0]["b"], "2");
 }
 
 #[tokio::test]
 async fn csv_to_json_empty_body() {
     let csv = b"col1,col2\n";
     let out = run_one(&StreamingCsvToJson, vec![csv], &hp(&[])).await;
-    let arr: Vec<serde_json::Value> = serde_json::from_slice(&out).unwrap();
-    assert_eq!(arr.len(), 0);
+    let text = String::from_utf8_lossy(&out);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 0);
 }
 
 #[tokio::test]
 async fn csv_to_json_quoted_fields() {
     let csv = b"name,desc\n\"A,B\",\"hello\"\n";
     let out = run_one(&StreamingCsvToJson, vec![csv], &hp(&[])).await;
-    let arr: Vec<serde_json::Value> = serde_json::from_slice(&out).unwrap();
-    assert_eq!(arr[0]["name"], "A,B");
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out).lines()
+        .filter(|l| !l.is_empty()).map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines[0]["name"], "A,B");
 }
+
 
 // ═══════════════════════════════════════════════════════════════════════
 // #38 StreamingBase32Encode

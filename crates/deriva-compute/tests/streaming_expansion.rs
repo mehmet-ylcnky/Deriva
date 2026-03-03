@@ -5,4 +5,5 @@ mod streaming_ext {
     mod flow;
     mod validation;
     mod text;
+    mod cas;
 }

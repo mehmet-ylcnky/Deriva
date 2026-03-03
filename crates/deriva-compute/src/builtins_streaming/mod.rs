@@ -5,6 +5,7 @@ mod analytics;
 mod flow;
 mod validation;
 mod text;
+mod cas;
 
 pub use self::core::*;
 pub use crypto::*;
@@ -13,3 +14,4 @@ pub use analytics::*;
 pub use flow::*;
 pub use validation::*;
 pub use text::*;
+pub use cas::*;

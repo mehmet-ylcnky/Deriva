@@ -47,3 +47,7 @@ harness = false
 [[bench]]
 name = "batch_vs_streaming"
 harness = false
+
+[[bench]]
+name = "memory_profile"
+harness = false

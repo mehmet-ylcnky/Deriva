@@ -6,6 +6,7 @@ mod flow;
 mod validation;
 mod text;
 mod cas;
+mod compression;
 mod numeric;
 
 pub use self::core::*;
@@ -16,4 +17,5 @@ pub use flow::*;
 pub use validation::*;
 pub use text::*;
 pub use cas::*;
+pub use compression::*;
 pub use numeric::*;

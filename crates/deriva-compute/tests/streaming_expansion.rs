@@ -6,5 +6,6 @@ mod streaming_ext {
     mod validation;
     mod text;
     mod cas;
+    mod compression;
     mod numeric;
 }

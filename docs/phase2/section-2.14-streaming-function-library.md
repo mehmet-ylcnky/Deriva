@@ -2579,6 +2579,32 @@ A `Compress → Encrypt` pipeline is dominated by compression:
 - AES-CTR encrypt: 21 μs/chunk
 - Total: 204 μs/chunk (encryption adds 10%)
 
+#### 7.3.1 Benchmark Results (Measured)
+
+> Full analysis: [`docs/phase2/section-2.14-7.3-crypto-overhead-benchmark-results.md`](section-2.14-7.3-crypto-overhead-benchmark-results.md)
+
+10 benchmark scenarios executed via Criterion (`benches/crypto_overhead.rs`), covering all 9 crypto functions + Redact:
+
+| Operation | Measured Throughput (MB/s) | Time (1 MB) |
+|-----------|---------------------------:|------------:|
+| XOR cipher | 751 | 1.332 ms |
+| BLAKE3 | 697 | 1.435 ms |
+| AES-256-CTR decrypt | 673 | 1.485 ms |
+| AES-256-CTR encrypt | 665 | 1.503 ms |
+| HMAC-SHA256 | 607 | 1.647 ms |
+| AES-256-GCM decrypt | 501 | 1.998 ms |
+| AES-256-GCM encrypt | 495 | 2.019 ms |
+| MD5 | 359 | 2.789 ms |
+| SHA-512 | 346 | 2.892 ms |
+| Redact | 200 | 5.012 ms |
+
+**Key findings:**
+- AES-GCM adds 36% overhead over CTR (GHASH authentication cost)
+- Encrypt adds only 6.3% to a Compress→Encrypt pipeline
+- AES-CTR scales to 1,414 MB/s at 4 MB data size
+- Redact is regex-bound at 200 MB/s; scales linearly with pattern count
+- All ciphers overhead-bound at 64 KB (~1.1–1.4 ms floor)
+
 ### 7.4 Text Processing Overhead
 
 | Function | Throughput (MB/s) | Per-Chunk (64 KB) | Notes |

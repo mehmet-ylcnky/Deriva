@@ -3,4 +3,5 @@ mod streaming_ext {
     mod encoding;
     mod analytics;
     mod flow;
+    mod validation;
 }

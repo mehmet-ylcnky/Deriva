@@ -137,6 +137,7 @@ pub struct StreamingIdentity;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingIdentity {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(
         &self,
         mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
@@ -151,6 +152,7 @@ pub struct StreamingUppercase;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingUppercase {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(
         &self,
         mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
@@ -168,6 +170,7 @@ pub struct StreamingLowercase;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingLowercase {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(
         &self,
         mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
@@ -185,6 +188,7 @@ pub struct StreamingReverse;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingReverse {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(
         &self,
         mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
@@ -204,6 +208,7 @@ pub struct StreamingBase64Encode;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingBase64Encode {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(
         &self,
         mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
@@ -223,6 +228,7 @@ pub struct StreamingBase64Decode;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingBase64Decode {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(
         &self,
         mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
@@ -243,6 +249,7 @@ pub struct StreamingXor;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingXor {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(
         &self,
         mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
@@ -264,6 +271,7 @@ pub struct StreamingCompress;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingCompress {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(
         &self,
         mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
@@ -285,6 +293,7 @@ pub struct StreamingDecompress;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingDecompress {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(
         &self,
         mut inputs: Vec<mpsc::Receiver<StreamChunk>>,

@@ -39,6 +39,11 @@ pub trait StreamingComputeFunction: Send + Sync {
     fn channel_capacity(&self) -> usize {
         DEFAULT_CHANNEL_CAPACITY
     }
+
+    /// Whether this function can be fused with adjacent fusible stages.
+    fn is_fusible(&self) -> bool {
+        false
+    }
 }
 
 /// Wraps a batch result as a chunked stream.

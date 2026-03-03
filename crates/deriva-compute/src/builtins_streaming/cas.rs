@@ -229,6 +229,7 @@ pub struct StreamingChunkHash;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingChunkHash {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, _params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "StreamingChunkHash");
         spawn_map(rx, 2, |chunk| {

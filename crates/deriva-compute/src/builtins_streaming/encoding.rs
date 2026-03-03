@@ -20,6 +20,7 @@ pub struct StreamingHexEncode;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingHexEncode {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(
         &self,
         mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
@@ -39,6 +40,7 @@ pub struct StreamingHexDecode;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingHexDecode {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(
         &self,
         mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
@@ -108,6 +110,7 @@ pub struct StreamingLineEnding;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingLineEnding {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(
         &self,
         mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
@@ -259,6 +262,7 @@ pub struct StreamingBase32Encode;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingBase32Encode {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(
         &self,
         mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
@@ -277,6 +281,7 @@ pub struct StreamingBase32Decode;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingBase32Decode {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(
         &self,
         mut inputs: Vec<mpsc::Receiver<StreamChunk>>,

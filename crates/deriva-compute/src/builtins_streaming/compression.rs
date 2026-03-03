@@ -120,6 +120,7 @@ impl StreamingComputeFunction for StreamingBrotliDecompress {
 pub struct StreamingPad;
 #[async_trait]
 impl StreamingComputeFunction for StreamingPad {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "Pad");
         let block_size = params.get("block_size").and_then(|v| v.parse::<usize>().ok()).unwrap_or(16);
@@ -140,6 +141,7 @@ impl StreamingComputeFunction for StreamingPad {
 pub struct StreamingTrim;
 #[async_trait]
 impl StreamingComputeFunction for StreamingTrim {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, _params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "Trim");
         spawn_map(rx, CAP, |chunk| {

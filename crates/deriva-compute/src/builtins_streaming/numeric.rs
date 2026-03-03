@@ -61,6 +61,7 @@ impl StreamingComputeFunction for StreamingAverage {
 pub struct StreamingBitwiseAnd;
 #[async_trait]
 impl StreamingComputeFunction for StreamingBitwiseAnd {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "BitwiseAnd");
         let mask = params.get("mask").and_then(|v| v.parse::<u8>().ok()).unwrap_or(0xFF);
@@ -74,6 +75,7 @@ impl StreamingComputeFunction for StreamingBitwiseAnd {
 pub struct StreamingBitwiseOr;
 #[async_trait]
 impl StreamingComputeFunction for StreamingBitwiseOr {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "BitwiseOr");
         let mask = params.get("mask").and_then(|v| v.parse::<u8>().ok()).unwrap_or(0x00);
@@ -87,6 +89,7 @@ impl StreamingComputeFunction for StreamingBitwiseOr {
 pub struct StreamingBitwiseNot;
 #[async_trait]
 impl StreamingComputeFunction for StreamingBitwiseNot {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, _params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "BitwiseNot");
         spawn_map(rx, DEFAULT_CAP, |b| {
@@ -99,6 +102,7 @@ impl StreamingComputeFunction for StreamingBitwiseNot {
 pub struct StreamingByteSwap;
 #[async_trait]
 impl StreamingComputeFunction for StreamingByteSwap {
+    fn is_fusible(&self) -> bool { true }
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "ByteSwap");
         let ws: usize = params.get("word_size").and_then(|v| v.parse().ok()).unwrap_or(2);

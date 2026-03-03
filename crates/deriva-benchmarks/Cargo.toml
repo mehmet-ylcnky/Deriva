@@ -53,5 +53,9 @@ name = "memory_profile"
 harness = false
 
 [[bench]]
+name = "compression_codec_comparison"
+harness = false
+
+[[bench]]
 name = "complexity_scaling"
 harness = false

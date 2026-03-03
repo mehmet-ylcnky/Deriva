@@ -2501,6 +2501,29 @@ Key takeaways:
 - All codecs decompress faster than they compress (asymmetric)
 - Per-chunk latency at 64 KB: LZ4 (32 μs) to brotli-11 (12.8 ms)
 
+#### 7.1.1 Benchmark Results (Measured)
+
+> Full analysis: [`docs/phase2/section-2.14-7.1-compression-codec-benchmark-results.md`](section-2.14-7.1-compression-codec-benchmark-results.md)
+
+10 benchmark scenarios executed via Criterion (`benches/compression_codec_comparison.rs`):
+
+| Codec | Measured Compress (MB/s) | Measured Decompress (MB/s) | Per-Chunk Latency (64 KB) |
+|-------|-------------------------:|---------------------------:|--------------------------:|
+| zstd level 1 | 717 | 657 | 1,421 μs |
+| zstd level 3 | 695 | 703 | 1,479 μs |
+| zstd level 19 | 30 | 670 | 31,305 μs |
+| lz4 | 728 | 720 | 1,331 μs |
+| snappy | 733 | 709 | 1,325 μs |
+| brotli quality 4 | 96 | 164 | 2,347 μs |
+| brotli quality 11 | 16 | 159 | 4,607 μs |
+
+**Key findings:**
+- Streaming framework overhead (~1.2 ms) creates a ~730 MB/s throughput ceiling for fast codecs
+- Zstd level 3 is the optimal default: 695 MB/s compress, near-identical to level 1
+- LZ4 ≈ Snappy in streaming context (raw speed differences masked by overhead)
+- Brotli quality 4 is the practical maximum for real-time streaming (96 MB/s)
+- Decompression throughput is overhead-bound for all fast codecs (~670–720 MB/s)
+
 ### 7.2 Hash Algorithm Comparison
 
 | Algorithm | Throughput (MB/s) | Output Size | Per-Chunk (64 KB) | SIMD | Use Case |

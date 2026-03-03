@@ -182,6 +182,9 @@ impl StreamingComputeFunction for StreamingChecksumVerify {
             Some(s) => s.clone(),
             None => return error_stream("missing param: expected_crc32".into()),
         };
+        if expected.len() != 8 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
+            return error_stream(format!("checksum: invalid hex in expected_crc32: '{}'", expected));
+        }
         let (tx, out) = mpsc::channel(2);
         tokio::spawn(async move {
             let mut hasher = crc32fast::Hasher::new();
@@ -224,6 +227,9 @@ impl StreamingComputeFunction for StreamingSha256Verify {
             Some(s) => s.clone(),
             None => return error_stream("missing param: expected_hash".into()),
         };
+        if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
+            return error_stream(format!("sha256_verify: expected 64 hex chars, got {}", expected.len()));
+        }
         let (tx, out) = mpsc::channel(2);
         tokio::spawn(async move {
             use sha2::{Sha256, Digest};

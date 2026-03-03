@@ -10,4 +10,5 @@ mod streaming_ext {
     mod numeric;
     mod integration;
     mod spec_gaps;
+    mod edge_cases;
 }

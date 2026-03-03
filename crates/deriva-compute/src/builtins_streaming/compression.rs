@@ -9,6 +9,14 @@ use super::core::*;
 
 const CAP: usize = 8;
 
+fn error_stream(msg: String) -> mpsc::Receiver<StreamChunk> {
+    let (tx, rx) = mpsc::channel(1);
+    tokio::spawn(async move {
+        let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg))).await;
+    });
+    rx
+}
+
 // #51 StreamingZstdCompress
 pub struct StreamingZstdCompress;
 #[async_trait]
@@ -16,6 +24,9 @@ impl StreamingComputeFunction for StreamingZstdCompress {
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "ZstdCompress");
         let level = params.get("level").and_then(|v| v.parse::<i32>().ok()).unwrap_or(3);
+        if !(1..=22).contains(&level) {
+            return error_stream(format!("zstd: level {} out of range 1..=22", level));
+        }
         spawn_map(rx, CAP, move |chunk| {
             zstd::encode_all(chunk, level).map(Bytes::from).map_err(|e| e.to_string())
         })
@@ -91,6 +102,9 @@ impl StreamingComputeFunction for StreamingBrotliCompress {
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "BrotliCompress");
         let quality = params.get("quality").and_then(|v| v.parse::<u32>().ok()).unwrap_or(4);
+        if quality > 11 {
+            return error_stream(format!("brotli: quality {} out of range 0..=11", quality));
+        }
         spawn_map(rx, CAP, move |chunk| {
             let mut out = Vec::new();
             {
@@ -124,6 +138,9 @@ impl StreamingComputeFunction for StreamingPad {
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "Pad");
         let block_size = params.get("block_size").and_then(|v| v.parse::<usize>().ok()).unwrap_or(16);
+        if block_size == 0 {
+            return error_stream("pad: block_size must be > 0".into());
+        }
         let pad_byte = params.get("padding_byte").and_then(|v| v.parse::<u8>().ok()).unwrap_or(0x00);
         spawn_map(rx, CAP, move |chunk| {
             if chunk.is_empty() || chunk.len() % block_size == 0 {

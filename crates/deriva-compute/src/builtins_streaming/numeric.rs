@@ -8,6 +8,14 @@ use super::core::*;
 
 const DEFAULT_CAP: usize = 8;
 
+fn error_stream(msg: String) -> mpsc::Receiver<StreamChunk> {
+    let (tx, rx) = mpsc::channel(1);
+    tokio::spawn(async move {
+        let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg))).await;
+    });
+    rx
+}
+
 // #93 StreamingSum — newline-delimited decimal sum
 pub struct StreamingSum;
 #[async_trait]
@@ -147,6 +155,9 @@ impl StreamingComputeFunction for StreamingRollingHash {
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "RollingHash");
         let window_size: usize = params.get("window_size").and_then(|v| v.parse().ok()).unwrap_or(48);
+        if window_size == 0 {
+            return error_stream("rolling_hash: window_size must be > 0".into());
+        }
         let base: u64 = 257;
         let modulus: u64 = (1 << 61) - 1; // Mersenne prime
         // Precompute base^window_size mod modulus

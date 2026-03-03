@@ -7,6 +7,14 @@ use deriva_core::streaming::StreamChunk;
 use crate::streaming::StreamingComputeFunction;
 use super::core::take_one;
 
+fn error_stream(msg: String) -> mpsc::Receiver<StreamChunk> {
+    let (tx, rx) = mpsc::channel(1);
+    tokio::spawn(async move {
+        let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg))).await;
+    });
+    rx
+}
+
 // ── #61 StreamingRateLimit ───────────────────────────────────────────
 
 pub struct StreamingRateLimit;
@@ -16,6 +24,9 @@ impl StreamingComputeFunction for StreamingRateLimit {
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let mut rx = take_one(&mut inputs, "StreamingRateLimit");
         let bps: f64 = params.get("bytes_per_sec").and_then(|v| v.parse().ok()).unwrap_or(1_048_576.0);
+        if bps <= 0.0 {
+            return error_stream("rate_limit: bytes_per_sec must be > 0".into());
+        }
         let (tx, out) = mpsc::channel(2);
         tokio::spawn(async move {
             loop {

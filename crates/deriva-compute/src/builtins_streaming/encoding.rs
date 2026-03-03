@@ -69,20 +69,42 @@ impl StreamingComputeFunction for StreamingUtf8Validate {
         mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
         _params: &HashMap<String, String>,
     ) -> mpsc::Receiver<StreamChunk> {
-        let rx = take_one(&mut inputs, "utf8_validate");
-        // Buffer up to 3 trailing bytes for split multi-byte chars
-        let mut pending: Vec<u8> = Vec::new();
-        spawn_map_stateful(rx, DEFAULT_CHANNEL_CAPACITY, move |b| {
-            let mut buf = std::mem::take(&mut pending);
-            buf.extend_from_slice(b);
-            // Find how many trailing bytes might be incomplete UTF-8
-            let trail = incomplete_utf8_tail(&buf);
-            let valid_end = buf.len() - trail;
-            std::str::from_utf8(&buf[..valid_end])
-                .map_err(|e| format!("utf8: invalid byte at position {}", e.valid_up_to()))?;
-            pending = buf[valid_end..].to_vec();
-            Ok(Bytes::copy_from_slice(&buf[..valid_end]))
-        })
+        let mut rx = take_one(&mut inputs, "utf8_validate");
+        let (tx, out) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
+        tokio::spawn(async move {
+            let mut pending: Vec<u8> = Vec::new();
+            loop {
+                match rx.recv().await {
+                    Some(StreamChunk::Data(chunk)) => {
+                        let mut buf = std::mem::take(&mut pending);
+                        buf.extend_from_slice(&chunk);
+                        let trail = incomplete_utf8_tail(&buf);
+                        let valid_end = buf.len() - trail;
+                        if let Err(e) = std::str::from_utf8(&buf[..valid_end]) {
+                            let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(
+                                format!("utf8: invalid byte at position {}", e.valid_up_to())))).await;
+                            return;
+                        }
+                        pending = buf[valid_end..].to_vec();
+                        if valid_end > 0 {
+                            if tx.send(StreamChunk::Data(Bytes::copy_from_slice(&buf[..valid_end]))).await.is_err() { return; }
+                        }
+                    }
+                    Some(StreamChunk::End) => {
+                        if !pending.is_empty() {
+                            let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(
+                                format!("utf8: incomplete sequence at end of stream ({} trailing bytes)", pending.len())))).await;
+                            return;
+                        }
+                        let _ = tx.send(StreamChunk::End).await;
+                        return;
+                    }
+                    Some(StreamChunk::Error(e)) => { let _ = tx.send(StreamChunk::Error(e)).await; return; }
+                    None => return,
+                }
+            }
+        });
+        out
     }
 }
 

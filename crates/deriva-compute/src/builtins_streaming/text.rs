@@ -23,7 +23,8 @@ impl StreamingComputeFunction for StreamingReplace {
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "StreamingReplace");
         let find = match params.get("find") {
-            Some(s) => s.clone(),
+            Some(s) if !s.is_empty() => s.clone(),
+            Some(_) => return error_stream("replace: find pattern must not be empty".into()),
             None => return error_stream("missing param: find".into()),
         };
         let replace = params.get("replace").cloned().unwrap_or_default();

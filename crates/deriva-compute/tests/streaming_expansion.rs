@@ -8,4 +8,5 @@ mod streaming_ext {
     mod cas;
     mod compression;
     mod numeric;
+    mod integration;
 }

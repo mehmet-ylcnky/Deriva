@@ -128,8 +128,38 @@ impl StreamPipeline {
                                 "input already consumed — DAG has fan-out on streaming node"
                             )
                         }).collect();
-                    let rx = function.stream_execute(inputs, &params).await;
-                    outputs.push(Some(rx));
+                    let fn_name = function.metric_name();
+                    crate::metrics::STREAMING_FN_CALLS.with_label_values(&[fn_name]).inc();
+                    let timer = crate::metrics::STREAMING_FN_DURATION.with_label_values(&[fn_name]).start_timer();
+                    let mut rx = function.stream_execute(inputs, &params).await;
+                    // Wrap output to observe duration on End and count errors
+                    let (tx, out) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
+                    let err_name = fn_name.to_string();
+                    tokio::spawn(async move {
+                        while let Some(chunk) = rx.recv().await {
+                            match &chunk {
+                                StreamChunk::End => {
+                                    timer.observe_duration();
+                                    let _ = tx.send(chunk).await;
+                                    return;
+                                }
+                                StreamChunk::Error(_) => {
+                                    crate::metrics::STREAMING_FN_ERRORS.with_label_values(&[&err_name]).inc();
+                                    timer.observe_duration();
+                                    let _ = tx.send(chunk).await;
+                                    return;
+                                }
+                                _ => {
+                                    if tx.send(chunk).await.is_err() {
+                                        timer.observe_duration();
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        timer.observe_duration();
+                    });
+                    outputs.push(Some(out));
                 }
 
                 PipelineNode::BatchStage {

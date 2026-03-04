@@ -1,8 +1,8 @@
 use lazy_static::lazy_static;
 use prometheus::{
     register_counter_vec, register_gauge, register_histogram, register_histogram_vec,
-    register_int_counter,
-    CounterVec, Gauge, Histogram, HistogramVec, IntCounter,
+    register_int_counter, register_int_counter_vec,
+    CounterVec, Gauge, Histogram, HistogramVec, IntCounter, IntCounterVec,
 };
 
 lazy_static! {
@@ -54,5 +54,25 @@ lazy_static! {
         "deriva_stream_pipeline_duration_seconds",
         "End-to-end streaming pipeline duration",
         vec![0.001, 0.01, 0.1, 0.5, 1.0, 5.0, 30.0]
+    ).unwrap();
+}
+
+// §11 Per-function streaming metrics
+lazy_static! {
+    pub static ref STREAMING_FN_CALLS: IntCounterVec = register_int_counter_vec!(
+        "deriva_streaming_fn_calls_total",
+        "Number of streaming function invocations",
+        &["function"]
+    ).unwrap();
+    pub static ref STREAMING_FN_ERRORS: IntCounterVec = register_int_counter_vec!(
+        "deriva_streaming_fn_errors_total",
+        "Number of streaming function errors",
+        &["function"]
+    ).unwrap();
+    pub static ref STREAMING_FN_DURATION: HistogramVec = register_histogram_vec!(
+        "deriva_streaming_fn_duration_seconds",
+        "Streaming function execution duration",
+        &["function"],
+        vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 30.0, 60.0]
     ).unwrap();
 }

@@ -44,6 +44,12 @@ pub trait StreamingComputeFunction: Send + Sync {
     fn is_fusible(&self) -> bool {
         false
     }
+
+    /// Metric label for observability (§11). Defaults to the struct type name.
+    fn metric_name(&self) -> &'static str {
+        let full = std::any::type_name::<Self>();
+        full.rsplit("::").next().unwrap_or(full)
+    }
 }
 
 /// Wraps a batch result as a chunked stream.

@@ -20,7 +20,7 @@ impl ComputeFunction for IdentityFn {
         Ok(inputs.into_iter().next().unwrap())
     }
 
-    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(1, input_sizes) }
+    fn estimated_cost(&self, _input_sizes: &[u64]) -> ComputeCost { ComputeCost { cpu_ms: 0, memory_bytes: 0 } }
 }
 
 pub struct ConcatFn;

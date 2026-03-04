@@ -3085,8 +3085,12 @@ Pipeline depth scaling (Identity chain, 64 KB):
 | `bytes` | 1 | default | All (chunk data) | Existing |
 | `criterion` | 0.5 | dev | Benchmarks | Existing |
 
-12 new dependencies, all gated behind `feature = "extended-streaming"`.
-Base binary size unchanged when feature is disabled.
+12 dependencies shared with batch builtins (non-optional at crate level).
+The `extended-streaming` feature gates the 10 streaming category modules
+(`crypto`, `encoding`, `analytics`, `flow`, `validation`, `text`, `cas`,
+`compression`, `numeric`, and their registrations) via `#[cfg(feature)]`.
+When disabled, streaming functions #21–#100 are excluded from compilation
+and registration; batch builtins remain unaffected.
 
 ---
 

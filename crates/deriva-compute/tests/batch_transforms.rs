@@ -13,4 +13,5 @@ mod batch {
     mod roundtrips;
     mod pipeline_composition;
     mod edge_cases;
+    mod streaming_parity;
 }

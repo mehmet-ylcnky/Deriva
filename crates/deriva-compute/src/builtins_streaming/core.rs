@@ -415,7 +415,7 @@ impl StreamingComputeFunction for StreamingConcat {
     }
 }
 
-/// 14. Round-robin chunks from N inputs.
+/// 14. Byte-level interleave from N inputs (matches batch InterleaveFn).
 pub struct StreamingInterleave;
 
 #[async_trait]
@@ -423,40 +423,51 @@ impl StreamingComputeFunction for StreamingInterleave {
     async fn stream_execute(
         &self,
         inputs: Vec<mpsc::Receiver<StreamChunk>>,
-        _params: &HashMap<String, String>,
+        params: &HashMap<String, String>,
     ) -> mpsc::Receiver<StreamChunk> {
+        let bs: usize = params.get("block_size").and_then(|s| s.parse().ok()).unwrap_or(1);
         let (tx, rx) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
         tokio::spawn(async move {
-            let mut streams: Vec<Option<mpsc::Receiver<StreamChunk>>> =
-                inputs.into_iter().map(Some).collect();
-            let mut alive = streams.len();
-            while alive > 0 {
-                for slot in streams.iter_mut() {
-                    let Some(ref mut s) = slot else { continue };
+            // Buffer all inputs fully
+            let mut bufs: Vec<Vec<u8>> = Vec::with_capacity(inputs.len());
+            for mut s in inputs {
+                let mut buf = Vec::new();
+                loop {
                     match s.recv().await {
-                        Some(StreamChunk::Data(c)) => {
-                            if tx.send(StreamChunk::Data(c)).await.is_err() {
-                                return;
-                            }
-                        }
-                        Some(StreamChunk::End) | None => {
-                            *slot = None;
-                            alive -= 1;
-                        }
+                        Some(StreamChunk::Data(c)) => buf.extend_from_slice(&c),
+                        Some(StreamChunk::End) | None => break,
                         Some(StreamChunk::Error(e)) => {
                             let _ = tx.send(StreamChunk::Error(e)).await;
                             return;
                         }
                     }
                 }
+                bufs.push(buf);
             }
+            // Interleave by block_size (same as batch)
+            let mut offsets = vec![0usize; bufs.len()];
+            let mut out = Vec::new();
+            loop {
+                let mut progress = false;
+                for (i, buf) in bufs.iter().enumerate() {
+                    let start = offsets[i];
+                    if start < buf.len() {
+                        let end = (start + bs).min(buf.len());
+                        out.extend_from_slice(&buf[start..end]);
+                        offsets[i] = end;
+                        progress = true;
+                    }
+                }
+                if !progress { break; }
+            }
+            let _ = tx.send(StreamChunk::Data(Bytes::from(out))).await;
             let _ = tx.send(StreamChunk::End).await;
         });
         rx
     }
 }
 
-/// 15. Pair-wise concatenate chunks from exactly 2 inputs.
+/// 15. Line-by-line zip of exactly 2 inputs (matches batch ZipConcatFn).
 pub struct StreamingZipConcat;
 
 #[async_trait]
@@ -472,47 +483,36 @@ impl StreamingComputeFunction for StreamingZipConcat {
         let (tx, rx) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
 
         tokio::spawn(async move {
+            // Buffer both inputs
+            let mut buf_a = Vec::new();
+            let mut buf_b = Vec::new();
             loop {
-                let a = rx_a.recv().await;
-                let b = rx_b.recv().await;
-                match (a, b) {
-                    (Some(StreamChunk::Data(da)), Some(StreamChunk::Data(db))) => {
-                        let mut buf = BytesMut::with_capacity(da.len() + db.len());
-                        buf.extend_from_slice(&da);
-                        buf.extend_from_slice(&db);
-                        if tx.send(StreamChunk::Data(buf.freeze())).await.is_err() {
-                            return;
-                        }
-                    }
-                    (Some(StreamChunk::Error(e)), _) | (_, Some(StreamChunk::Error(e))) => {
-                        let _ = tx.send(StreamChunk::Error(e)).await;
-                        return;
-                    }
-                    // Either or both ended — drain the other and finish
-                    (Some(StreamChunk::Data(d)), _) | (_, Some(StreamChunk::Data(d))) => {
-                        let _ = tx.send(StreamChunk::Data(d)).await;
-                        break;
-                    }
-                    _ => break,
+                match rx_a.recv().await {
+                    Some(StreamChunk::Data(c)) => buf_a.extend_from_slice(&c),
+                    Some(StreamChunk::End) | None => break,
+                    Some(StreamChunk::Error(e)) => { let _ = tx.send(StreamChunk::Error(e)).await; return; }
                 }
             }
-            // Drain remaining from both
-            for rx_rem in [&mut rx_a, &mut rx_b] {
-                loop {
-                    match rx_rem.recv().await {
-                        Some(StreamChunk::Data(c)) => {
-                            if tx.send(StreamChunk::Data(c)).await.is_err() {
-                                return;
-                            }
-                        }
-                        Some(StreamChunk::End) | None => break,
-                        Some(StreamChunk::Error(e)) => {
-                            let _ = tx.send(StreamChunk::Error(e)).await;
-                            return;
-                        }
-                    }
+            loop {
+                match rx_b.recv().await {
+                    Some(StreamChunk::Data(c)) => buf_b.extend_from_slice(&c),
+                    Some(StreamChunk::End) | None => break,
+                    Some(StreamChunk::Error(e)) => { let _ = tx.send(StreamChunk::Error(e)).await; return; }
                 }
             }
+            // Zip lines (same as batch)
+            let a_str = String::from_utf8_lossy(&buf_a);
+            let b_str = String::from_utf8_lossy(&buf_b);
+            let a_lines: Vec<&str> = a_str.lines().collect();
+            let b_lines: Vec<&str> = b_str.lines().collect();
+            let max_len = a_lines.len().max(b_lines.len());
+            let mut out = String::new();
+            for i in 0..max_len {
+                if i > 0 { out.push('\n'); }
+                if let Some(a) = a_lines.get(i) { out.push_str(a); }
+                if let Some(b) = b_lines.get(i) { out.push_str(b); }
+            }
+            let _ = tx.send(StreamChunk::Data(Bytes::from(out))).await;
             let _ = tx.send(StreamChunk::End).await;
         });
         rx

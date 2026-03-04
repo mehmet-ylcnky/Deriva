@@ -26,27 +26,19 @@ pub struct StreamingCAddrEmbed;
 #[async_trait]
 impl StreamingComputeFunction for StreamingCAddrEmbed {
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, _params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
-        let mut rx = take_one(&mut inputs, "StreamingCAddrEmbed");
-        let (tx, out) = mpsc::channel(2);
-        tokio::spawn(async move {
-            let mut hasher = Sha256::new();
-            loop {
-                match rx.recv().await {
-                    Some(StreamChunk::Data(chunk)) => {
-                        hasher.update(&chunk);
-                        if tx.send(StreamChunk::Data(chunk)).await.is_err() { return; }
-                    }
-                    Some(StreamChunk::End) | None => {
-                        let hash = hasher.finalize();
-                        let _ = tx.send(StreamChunk::Data(Bytes::copy_from_slice(&hash))).await;
-                        let _ = tx.send(StreamChunk::End).await;
-                        return;
-                    }
-                    Some(StreamChunk::Error(e)) => { let _ = tx.send(StreamChunk::Error(e)).await; return; }
-                }
-            }
-        });
-        out
+        let rx = take_one(&mut inputs, "StreamingCAddrEmbed");
+        spawn_accumulate(
+            rx,
+            Vec::new(),
+            |buf, chunk| buf.extend_from_slice(chunk),
+            |buf| {
+                let addr = deriva_core::CAddr::from_bytes(&buf);
+                let mut out = Vec::with_capacity(buf.len() + 32);
+                out.extend_from_slice(&buf);
+                out.extend_from_slice(addr.as_bytes());
+                Bytes::from(out)
+            },
+        )
     }
 }
 

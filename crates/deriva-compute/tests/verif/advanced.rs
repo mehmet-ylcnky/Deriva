@@ -7,7 +7,6 @@ use deriva_compute::leaf_store::AsyncLeafStore;
 use deriva_compute::registry::FunctionRegistry;
 use deriva_core::address::{CAddr, FunctionId, Recipe, Value};
 use deriva_core::cache::EvictableCache;
-use deriva_core::error::DerivaError;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

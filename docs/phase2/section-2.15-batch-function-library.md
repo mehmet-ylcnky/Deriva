@@ -4582,7 +4582,7 @@ topk(10, sum(rate(deriva_batch_fn_input_bytes_sum[5m])) by (function))
 
 - [x] Unit tests — 579 tests across 14 modules in `tests/batch/`
 - [x] Roundtrip tests — 13 encode/decode pairs (§5.2)
-- [ ] Streaming parity tests — 20 batch-vs-streaming comparisons (§5.3)
+- [x] Streaming parity tests — 20 batch-vs-streaming comparisons (§5.3)
 - [x] Pipeline composition tests — 5 multi-function chains (§5.4)
 
 ### 12.4 Quality
@@ -4605,6 +4605,6 @@ topk(10, sum(rate(deriva_batch_fn_input_bytes_sum[5m])) by (function))
 
 ### 12.7 Final
 
-- [ ] `git add -A && git -c commit.gpgsign=false commit`
-- [ ] Verify no TODO stubs remain in this spec
+- [x] `git add -A && git -c commit.gpgsign=false commit`
+- [x] Verify no TODO stubs remain in this spec
 

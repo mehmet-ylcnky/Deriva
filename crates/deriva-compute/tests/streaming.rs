@@ -407,8 +407,9 @@ async fn test_streaming_interleave() {
     let rx_b = make_stream(vec![b"b1", b"b2"]).await;
     let out = StreamingInterleave.stream_execute(vec![rx_a, rx_b], &HashMap::new()).await;
     let result = collect_stream(out).await.unwrap();
-    // Round-robin: a1, b1, a2, b2, a3
-    assert_eq!(result, Bytes::from("a1b1a2b2a3"));
+    // Byte-level interleave (block_size=1 default): "a1a2a3" vs "b1b2"
+    // a[0]='a', b[0]='b', a[1]='1', b[1]='1', a[2]='a', b[2]='b', a[3]='2', b[3]='2', a[4]='a', a[5]='3'
+    assert_eq!(result, Bytes::from("ab11ab22a3"));
 }
 
 #[tokio::test]
@@ -420,22 +421,22 @@ async fn test_streaming_interleave_single() {
 
 #[tokio::test]
 async fn test_streaming_zip_concat() {
-    let rx_a = make_stream(vec![b"aa", b"bb"]).await;
-    let rx_b = make_stream(vec![b"11", b"22"]).await;
+    let rx_a = make_stream(vec![b"aa\n", b"bb"]).await;
+    let rx_b = make_stream(vec![b"11\n", b"22"]).await;
     let out = StreamingZipConcat.stream_execute(vec![rx_a, rx_b], &HashMap::new()).await;
     let result = collect_stream(out).await.unwrap();
-    // Pairs: aa+11, bb+22
-    assert_eq!(result, Bytes::from("aa11bb22"));
+    // Line-by-line zip: "aa"+"11" \n "bb"+"22"
+    assert_eq!(result, Bytes::from("aa11\nbb22"));
 }
 
 #[tokio::test]
 async fn test_streaming_zip_concat_uneven() {
-    let rx_a = make_stream(vec![b"aa", b"bb", b"cc"]).await;
+    let rx_a = make_stream(vec![b"aa\nbb\n", b"cc"]).await;
     let rx_b = make_stream(vec![b"11"]).await;
     let out = StreamingZipConcat.stream_execute(vec![rx_a, rx_b], &HashMap::new()).await;
     let result = collect_stream(out).await.unwrap();
-    // Pair: aa+11, then drain: bb, cc
-    assert_eq!(result, Bytes::from("aa11bbcc"));
+    // Lines: ["aa","bb","cc"] zip ["11"] → "aa11\nbb\ncc"
+    assert_eq!(result, Bytes::from("aa11\nbb\ncc"));
 }
 
 // =========================================================================

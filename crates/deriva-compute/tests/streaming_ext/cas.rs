@@ -3,6 +3,7 @@ use bytes::Bytes;
 use sha2::{Sha256, Digest};
 use tokio::sync::mpsc;
 use deriva_core::streaming::StreamChunk;
+use deriva_core::CAddr;
 use deriva_compute::builtins_streaming::*;
 use deriva_compute::streaming::*;
 
@@ -60,15 +61,15 @@ async fn caddr_embed_appends_hash() {
 #[tokio::test]
 async fn caddr_embed_correct_hash() {
     let out = run_one(&StreamingCAddrEmbed, vec![b"hello"], &hp(&[])).await;
-    let expected = Sha256::digest(b"hello");
-    assert_eq!(&out[5..], expected.as_slice());
+    let expected = CAddr::from_bytes(b"hello");
+    assert_eq!(&out[5..], expected.as_bytes().as_slice());
 }
 
 #[tokio::test]
 async fn caddr_embed_multi_chunk() {
     let out = run_one(&StreamingCAddrEmbed, vec![b"hel", b"lo"], &hp(&[])).await;
-    let expected = Sha256::digest(b"hello");
-    assert_eq!(&out[5..], expected.as_slice());
+    let expected = CAddr::from_bytes(b"hello");
+    assert_eq!(&out[5..], expected.as_bytes().as_slice());
 }
 
 #[tokio::test]
@@ -79,11 +80,9 @@ async fn caddr_embed_empty() {
 
 #[tokio::test]
 async fn caddr_embed_preserves_data() {
-    let chunks = collect_chunks(&StreamingCAddrEmbed, vec![b"abc", b"def"], &hp(&[])).await;
-    // First chunks are data, last is hash
-    assert!(chunks.len() >= 2);
-    let last = &chunks[chunks.len() - 1];
-    assert_eq!(last.len(), 32);
+    let out = run_one(&StreamingCAddrEmbed, vec![b"abc", b"def"], &hp(&[])).await;
+    assert_eq!(&out[..6], b"abcdef");
+    assert_eq!(out.len(), 6 + 32);
 }
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -2706,6 +2706,31 @@ These functions must acquire §2.12 memory budget permits proportional
 to input size. For inputs > memory_budget, the pipeline should use
 §2.9 size-aware mode selection to route to batch execution instead.
 
+#### 7.6.1 Benchmark Results (Measured)
+
+> Full analysis: [`docs/phase2/section-2.14-7.6-buffered-function-benchmark-results.md`](section-2.14-7.6-buffered-function-benchmark-results.md)
+
+10 benchmark scenarios executed via Criterion (`benches/buffered_function_memory.rs`), covering all 9 buffered functions:
+
+| Function | Measured Throughput (MB/s) | Time (64 KB) |
+|----------|---------------------------:|-------------:|
+| CharsetConvert (latin1→utf8) | 495 | 0.126 ms |
+| JsonLines | 67 | 0.932 ms |
+| SchemaValidate | 55 | 1.142 ms |
+| JsonValidate | 52 | 1.195 ms |
+| JsonPrettyPrint | 52 | 1.202 ms |
+| JsonMinify | 52 | 1.208 ms |
+| CsvToJson | 42 | 1.476 ms |
+| Unique (500 chunks) | 4 | 16.879 ms |
+| Sort (500 chunks) | 3 | 17.892 ms |
+
+**Key findings:**
+- JSON functions cluster at 42–67 MB/s — serde_json parsing is the bottleneck
+- Sort/Unique are channel-bound at 3–4 MB/s (~36 µs per chunk recv)
+- JSON Minify peaks at 64 KB, drops at 256 KB due to cache pressure
+- SchemaValidate adds only 4% overhead over JsonValidate (simple schema)
+- All functions confirm O(input) memory — budget enforcement required for large inputs
+
 ### 7.7 Benchmark Specifications
 
 Seven Criterion.rs benchmark groups with full code:

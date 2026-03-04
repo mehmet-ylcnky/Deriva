@@ -65,6 +65,10 @@ name = "flow_control_overhead"
 harness = false
 
 [[bench]]
+name = "buffered_function_memory"
+harness = false
+
+[[bench]]
 name = "hash_algorithm_comparison"
 harness = false
 

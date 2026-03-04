@@ -2661,6 +2661,32 @@ management — negligible relative to the transform itself.
 Flow control functions add minimal overhead. Tee scales linearly with
 output count due to `Bytes::clone` (cheap — reference counted, no copy).
 
+#### 7.5.1 Benchmark Results (Measured)
+
+> Full analysis: [`docs/phase2/section-2.14-7.5-flow-control-benchmark-results.md`](section-2.14-7.5-flow-control-benchmark-results.md)
+
+10 benchmark scenarios executed via Criterion (`benches/flow_control_overhead.rs`), covering all 10 flow functions:
+
+| Function | Measured Throughput (MB/s) | Time (1 MB) |
+|----------|---------------------------:|------------:|
+| Timeout | 16,669 | 60.0 µs |
+| Partition (non_empty) | 16,526 | 60.5 µs |
+| RateLimit (high) | 16,055 | 62.3 µs |
+| Retry | 15,538 | 64.4 µs |
+| Tee (N=2) | 14,717 | 67.9 µs |
+| Debounce (0 ms) | 14,610 | 68.4 µs |
+| Broadcast (N=2) | 8,396 | 119.1 µs |
+| Merge (N=3) | 6,473 | 154.5 µs |
+| Batch (N=4) | 4,740 | 211.0 µs |
+| Delay (0 ms) | 842 | 1,187.3 µs |
+
+**Key findings:**
+- Framework floor is ~57 µs for 1 MB passthrough; 6 of 10 functions within 15% of floor
+- Tee does not scale with N — Bytes::clone is atomic refcount bump, no data copy
+- Broadcast 2× slower than Tee due to backpressure (channel capacity=1)
+- Delay outlier at 1,187 µs — tokio sleep(0) scheduler yield cost
+- Merge scales linearly at ~45 µs per additional input task
+
 ### 7.6 Buffered Function Memory Impact
 
 Functions using `spawn_buffered` collect the entire input before

@@ -61,6 +61,10 @@ name = "text_processing_overhead"
 harness = false
 
 [[bench]]
+name = "flow_control_overhead"
+harness = false
+
+[[bench]]
 name = "hash_algorithm_comparison"
 harness = false
 

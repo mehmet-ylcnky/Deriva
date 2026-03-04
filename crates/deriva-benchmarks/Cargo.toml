@@ -69,6 +69,10 @@ name = "buffered_function_memory"
 harness = false
 
 [[bench]]
+name = "fusible_chain_scaling"
+harness = false
+
+[[bench]]
 name = "hash_algorithm_comparison"
 harness = false
 

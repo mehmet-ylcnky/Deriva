@@ -2993,6 +2993,36 @@ Measures: channel overhead scaling with pipeline depth for fusible
 functions. Even-depth BitwiseNot chains should produce identity output
 (self-inverse), isolating pure overhead.
 
+#### 7.7.1 Benchmark Results (Measured)
+
+> Full analysis: [`docs/phase2/section-2.14-7.7-fusible-chain-benchmark-results.md`](section-2.14-7.7-fusible-chain-benchmark-results.md)
+
+10 benchmark scenarios executed via Criterion (`benches/fusible_chain_scaling.rs`), testing pipeline depth scaling for fusible functions:
+
+| Function (1 MB) | Throughput (MB/s) | Time |
+|------------------|------------------:|-----:|
+| Identity | 12,754 | 78.4 µs |
+| BitwiseNot | 8,048 | 124.2 µs |
+| Uppercase | 7,364 | 135.8 µs |
+| Base64Encode | 1,756 | 569.6 µs |
+| HexEncode | 26 | 38,676 µs |
+
+Pipeline depth scaling (Identity chain, 64 KB):
+
+| Depth | Time (µs) | Per-Stage (µs) |
+|------:|----------:|--------------:|
+| 1 | 69.2 | 69.2 |
+| 4 | 84.2 | 21.0 |
+| 8 | 88.0 | 11.0 |
+| 16 | 89.4 | 5.6 |
+
+**Key findings:**
+- Pipeline depth overhead is sub-linear — depth 16 only 29% slower than depth 1
+- Per-stage overhead converges to ~1–2 µs (tokio processes chain in single poll)
+- HexEncode is 490× slower than Identity (per-byte format! allocation)
+- Base64 is 67× faster than Hex (SIMD-optimized crate)
+- Fusion opportunity: depth-16 Identity chain could save ~23% with §2.11 fusion
+
 ---
 
 ## 8. Files Changed

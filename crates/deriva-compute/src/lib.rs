@@ -5,6 +5,7 @@ pub mod builtins_format_detect;
 pub mod builtins_format_csv;
 pub mod builtins_format_config;
 pub mod builtins_format_archive;
+pub mod builtins_format_log;
 pub mod cache;
 pub mod executor;
 pub mod function;

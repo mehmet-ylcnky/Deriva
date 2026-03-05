@@ -3433,7 +3433,7 @@ WARN function_id="csv_parse@1.0.0" msg="non-UTF-8 input, falling back to Latin-1
 ### 12.1 Phase 1 Implementation
 - [x] Category S: Universal detection — `builtins_format_detect.rs` (9 functions)
 - [x] Category B: CSV/JSON/XML — `builtins_format_csv.rs` (25 functions)
-- [ ] Category H: Config — `builtins_format_config.rs` (16 functions)
+- [x] Category H: Config — `builtins_format_config.rs` (16 functions)
 - [ ] Category D: Archive — `builtins_format_archive.rs` (20 functions)
 - [ ] Category K: Log — `builtins_format_log.rs` (13 functions)
 - [ ] Category L: CAS — `builtins_format_cas.rs` (15 functions)

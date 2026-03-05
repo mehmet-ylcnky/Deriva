@@ -1,0 +1,9 @@
+mod detect;
+mod validate;
+mod metadata;
+mod to_json;
+mod to_text;
+mod convert;
+mod schema_infer;
+mod schema_compare;
+mod mime_map;

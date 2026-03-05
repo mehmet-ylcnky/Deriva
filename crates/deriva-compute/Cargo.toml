@@ -35,6 +35,8 @@ serde = { version = "1", features = ["derive"] }
 jsonschema = "0.28"
 csv = "1"
 serde_yaml = "0.9"
+configparser = "3"
+hcl-rs = "0.19"
 toml = "0.8"
 quick-xml = { version = "0.36", features = ["serialize"] }
 jsonpath-rust = "0.7"

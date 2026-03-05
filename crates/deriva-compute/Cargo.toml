@@ -36,7 +36,8 @@ jsonschema = "0.28"
 csv = "1"
 serde_yaml = "0.9"
 toml = "0.8"
-quick-xml = "0.36"
+quick-xml = { version = "0.36", features = ["serialize"] }
+jsonpath-rust = "0.7"
 sha2 = { workspace = true }
 base64 = { workspace = true }
 flate2 = { workspace = true }

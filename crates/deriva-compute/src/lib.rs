@@ -2,6 +2,7 @@ pub mod async_executor;
 pub mod builtins;
 pub mod builtins_streaming;
 pub mod builtins_format_detect;
+pub mod builtins_format_csv;
 pub mod cache;
 pub mod executor;
 pub mod function;

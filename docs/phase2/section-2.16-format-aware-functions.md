@@ -3440,7 +3440,7 @@ WARN function_id="csv_parse@1.0.0" msg="non-UTF-8 input, falling back to Latin-1
 
 ### 12.2 Phase 2 Implementation
 - [x] Category R: Erasure coding — `builtins_format_erasure.rs` (9 functions)
-- [ ] Category C: Serialization — `builtins_format_serialization.rs` (19 functions)
+- [x] Category C: Serialization — `builtins_format_serialization.rs` (19 functions)
 - [ ] Category A: Columnar — `builtins_format_columnar.rs` (18 functions)
 
 ### 12.3 Phase 3 Implementation

@@ -3436,7 +3436,7 @@ WARN function_id="csv_parse@1.0.0" msg="non-UTF-8 input, falling back to Latin-1
 - [x] Category H: Config — `builtins_format_config.rs` (16 functions)
 - [x] Category D: Archive — `builtins_format_archive.rs` (20 functions)
 - [x] Category K: Log — `builtins_format_log.rs` (13 functions)
-- [ ] Category L: CAS — `builtins_format_cas.rs` (15 functions)
+- [x] Category L: CAS — `builtins_format_cas.rs` (15 functions)
 
 ### 12.2 Phase 2 Implementation
 - [ ] Category R: Erasure coding — `builtins_format_erasure.rs` (9 functions)

@@ -7,6 +7,7 @@ pub mod builtins_format_config;
 pub mod builtins_format_archive;
 pub mod builtins_format_log;
 pub mod builtins_format_cas;
+pub mod builtins_format_erasure;
 pub mod cache;
 pub mod executor;
 pub mod function;

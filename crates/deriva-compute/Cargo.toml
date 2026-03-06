@@ -49,6 +49,7 @@ bzip2 = "0.5"
 xz2 = "0.1"
 sevenz-rust = "0.6"
 crc32fast = { workspace = true }
+libipld = "0.16"
 prometheus = { workspace = true }
 lazy_static = { workspace = true }
 

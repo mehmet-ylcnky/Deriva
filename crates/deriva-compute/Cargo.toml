@@ -11,6 +11,8 @@ extended-streaming = []
 parquet = { version = "57", features = ["arrow"] }
 arrow = { version = "57", features = ["ipc", "json"] }
 orc-rust = "0.7"
+image = { version = "0.25", features = ["png", "jpeg", "gif", "webp", "tiff", "bmp"] }
+resvg = "0.47"
 deriva-core = { path = "../deriva-core" }
 bytes = { workspace = true }
 thiserror = { workspace = true }

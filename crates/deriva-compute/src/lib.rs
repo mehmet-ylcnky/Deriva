@@ -11,6 +11,7 @@ pub mod builtins_format_erasure;
 pub mod builtins_format_serialization;
 pub mod builtins_format_columnar;
 pub mod builtins_format_image;
+pub mod builtins_format_document;
 pub mod cache;
 pub mod executor;
 pub mod function;

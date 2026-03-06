@@ -13,6 +13,10 @@ arrow = { version = "57", features = ["ipc", "json"] }
 orc-rust = "0.7"
 image = { version = "0.25", features = ["png", "jpeg", "gif", "webp", "tiff", "bmp"] }
 resvg = "0.47"
+lopdf = "0.39"
+calamine = "0.33"
+scraper = "0.25"
+comrak = "0.50"
 deriva-core = { path = "../deriva-core" }
 bytes = { workspace = true }
 thiserror = { workspace = true }

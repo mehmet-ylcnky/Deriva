@@ -24,6 +24,7 @@ wkt = "0.14"
 shapefile = "0.7"
 flatgeobuf = "6.0"
 geozero = { version = "0.15", features = ["with-geojson"] }
+ndarray = "0.16"
 deriva-core = { path = "../deriva-core" }
 bytes = { workspace = true }
 thiserror = { workspace = true }

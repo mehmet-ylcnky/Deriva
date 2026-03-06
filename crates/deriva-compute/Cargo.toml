@@ -8,6 +8,9 @@ default = ["extended-streaming"]
 extended-streaming = []
 
 [dependencies]
+parquet = { version = "57", features = ["arrow"] }
+arrow = { version = "57", features = ["ipc", "json"] }
+orc-rust = "0.7"
 deriva-core = { path = "../deriva-core" }
 bytes = { workspace = true }
 thiserror = { workspace = true }

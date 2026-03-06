@@ -9,6 +9,7 @@ pub mod builtins_format_log;
 pub mod builtins_format_cas;
 pub mod builtins_format_erasure;
 pub mod builtins_format_serialization;
+pub mod builtins_format_columnar;
 pub mod cache;
 pub mod executor;
 pub mod function;

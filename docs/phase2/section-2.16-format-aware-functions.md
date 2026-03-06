@@ -3445,7 +3445,7 @@ WARN function_id="csv_parse@1.0.0" msg="non-UTF-8 input, falling back to Latin-1
 
 ### 12.3 Phase 3 Implementation
 - [x] Category E: Image — `builtins_format_image.rs` (18 functions)
-- [ ] Category G: Document — `builtins_format_document.rs` (23 functions)
+- [x] Category G: Document — `builtins_format_document.rs` (23 functions)
 - [ ] Category F: Audio/Video — `builtins_format_audio.rs` (16 functions)
 
 ### 12.4 Phase 4 Implementation

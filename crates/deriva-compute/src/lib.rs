@@ -12,6 +12,7 @@ pub mod builtins_format_serialization;
 pub mod builtins_format_columnar;
 pub mod builtins_format_image;
 pub mod builtins_format_document;
+pub mod builtins_format_audio;
 pub mod cache;
 pub mod executor;
 pub mod function;

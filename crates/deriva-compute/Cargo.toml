@@ -18,6 +18,12 @@ calamine = "0.33"
 scraper = "0.25"
 comrak = "0.50"
 symphonia = { version = "0.5", features = ["mp3", "flac", "wav", "ogg", "aac", "isomp4", "mkv"] }
+geojson = "0.24"
+geo = "0.29"
+wkt = "0.14"
+shapefile = "0.7"
+flatgeobuf = "6.0"
+geozero = { version = "0.15", features = ["with-geojson"] }
 deriva-core = { path = "../deriva-core" }
 bytes = { workspace = true }
 thiserror = { workspace = true }

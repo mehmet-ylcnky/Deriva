@@ -3458,10 +3458,10 @@ WARN function_id="csv_parse@1.0.0" msg="non-UTF-8 input, falling back to Latin-1
 - [x] Category Q: Specialized binary — `builtins_format_binary.rs` (13 functions)
 
 ### 12.5 Infrastructure
-- [ ] `builtins_format.rs` registration dispatcher
-- [ ] `Cargo.toml` feature flags (19 category flags + 4 phase bundles + `format-all`)
-- [ ] `lib.rs` module declarations and conditional registration
-- [ ] Feature flag CI matrix (test each phase independently)
+- [x] `builtins_format.rs` registration dispatcher
+- [x] `Cargo.toml` feature flags (19 category flags + 4 phase bundles + `format-all`)
+- [x] `lib.rs` module declarations and conditional registration
+- [x] Feature flag CI matrix (test each phase independently)
 
 ### 12.6 Testing
 - [ ] 19 per-category test files (~849 tests)

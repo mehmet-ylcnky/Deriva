@@ -12,6 +12,7 @@ parquet = { version = "57", features = ["arrow"] }
 arrow = { version = "57", features = ["ipc", "json"] }
 orc-rust = "0.7"
 image = { version = "0.25", features = ["png", "jpeg", "gif", "webp", "tiff", "bmp"] }
+hex = "0.4"
 resvg = "0.47"
 lopdf = "0.39"
 calamine = "0.33"

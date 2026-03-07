@@ -16,6 +16,7 @@ pub mod builtins_format_audio;
 pub mod builtins_format_geo;
 pub mod builtins_format_scientific;
 pub mod builtins_format_database;
+pub mod builtins_format_ml;
 pub mod cache;
 pub mod executor;
 pub mod function;

@@ -1636,6 +1636,7 @@ dependencies = [
  "geojson",
  "geozero",
  "hcl-rs",
+ "hex",
  "hmac",
  "image",
  "jsonpath-rust",

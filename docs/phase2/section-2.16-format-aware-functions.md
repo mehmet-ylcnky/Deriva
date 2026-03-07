@@ -3468,7 +3468,7 @@ WARN function_id="csv_parse@1.0.0" msg="non-UTF-8 input, falling back to Latin-1
 - [x] Cross-category conversion tests (14 tests) (~15 tests)
 - [x] Format detection integration tests (33 tests) (~33 tests)
 - [x] Streaming equivalence tests (108 tests) (~107 tests)
-- [ ] Criterion benchmark suite (12 groups)
+- [x] Criterion benchmark suite (12 groups) (12 groups)
 
 ### 12.7 Quality Gates
 - [ ] `cargo clippy --workspace --all-features -- -D warnings` clean

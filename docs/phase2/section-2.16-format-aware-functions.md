@@ -3455,7 +3455,7 @@ WARN function_id="csv_parse@1.0.0" msg="non-UTF-8 input, falling back to Latin-1
 - [x] Category N: ML/Tensor — `builtins_format_ml.rs` (12 functions)
 - [x] Category O: Network — `builtins_format_network.rs` (8 functions)
 - [x] Category P: Bioinformatics — `builtins_format_bio.rs` (12 functions)
-- [ ] Category Q: Specialized binary — `builtins_format_binary.rs` (13 functions)
+- [x] Category Q: Specialized binary — `builtins_format_binary.rs` (13 functions)
 
 ### 12.5 Infrastructure
 - [ ] `builtins_format.rs` registration dispatcher

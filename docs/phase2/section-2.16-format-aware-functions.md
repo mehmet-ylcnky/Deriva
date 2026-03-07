@@ -3471,7 +3471,7 @@ WARN function_id="csv_parse@1.0.0" msg="non-UTF-8 input, falling back to Latin-1
 - [x] Criterion benchmark suite (12 groups) (12 groups)
 
 ### 12.7 Quality Gates
-- [ ] `cargo clippy --workspace --all-features -- -D warnings` clean
+- [x] `cargo clippy --workspace --all-features -- -D warnings` clean
 - [ ] `cargo test --workspace --all-features` passes
 - [ ] `cargo test --workspace` passes (default features only)
 - [ ] All existing §2.14/§2.15 tests still pass

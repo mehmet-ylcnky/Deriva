@@ -3465,7 +3465,7 @@ WARN function_id="csv_parse@1.0.0" msg="non-UTF-8 input, falling back to Latin-1
 
 ### 12.6 Testing
 - [x] 19 per-category test files (~1,415 tests) (~849 tests)
-- [ ] Cross-category conversion tests (~15 tests)
+- [x] Cross-category conversion tests (14 tests) (~15 tests)
 - [ ] Format detection integration tests (~33 tests)
 - [ ] Streaming equivalence tests (~107 tests)
 - [ ] Criterion benchmark suite (12 groups)

@@ -3467,7 +3467,7 @@ WARN function_id="csv_parse@1.0.0" msg="non-UTF-8 input, falling back to Latin-1
 - [x] 19 per-category test files (~1,415 tests) (~849 tests)
 - [x] Cross-category conversion tests (14 tests) (~15 tests)
 - [x] Format detection integration tests (33 tests) (~33 tests)
-- [ ] Streaming equivalence tests (~107 tests)
+- [x] Streaming equivalence tests (108 tests) (~107 tests)
 - [ ] Criterion benchmark suite (12 groups)
 
 ### 12.7 Quality Gates

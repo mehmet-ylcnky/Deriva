@@ -19,6 +19,7 @@ pub mod builtins_format_database;
 pub mod builtins_format_ml;
 pub mod builtins_format_network;
 pub mod builtins_format_bio;
+pub mod builtins_format_binary;
 pub mod cache;
 pub mod executor;
 pub mod function;

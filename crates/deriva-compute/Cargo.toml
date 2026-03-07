@@ -109,3 +109,9 @@ lazy_static = { workspace = true }
 
 [dev-dependencies]
 sled = { workspace = true }
+criterion = "0.5"
+
+[[bench]]
+name = "format_benchmarks"
+harness = false
+required-features = ["format-all"]

@@ -1624,6 +1624,7 @@ dependencies = [
  "comrak",
  "configparser",
  "crc32fast",
+ "criterion",
  "csv",
  "ctr",
  "data-encoding",

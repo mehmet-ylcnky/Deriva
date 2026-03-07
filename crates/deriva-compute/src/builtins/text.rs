@@ -3,7 +3,7 @@ use bytes::Bytes;
 use deriva_core::address::{FunctionId, Value};
 use std::collections::BTreeMap;
 use super::spec_cost;
-use super::{get_string_param, parse_usize_param, split_lines};
+use super::{get_string_param, parse_usize_param};
 
 pub struct ReplaceFn;
 

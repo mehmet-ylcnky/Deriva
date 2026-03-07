@@ -3,7 +3,7 @@ use bytes::Bytes;
 use deriva_core::address::{FunctionId, Value};
 use std::collections::BTreeMap;
 use super::spec_cost;
-use super::{parse_usize_param, get_string_param, hex_decode_param};
+use super::{get_string_param, hex_decode_param};
 use deriva_core::address::CAddr;
 
 pub struct CAddrComputeFn;
@@ -75,10 +75,10 @@ impl ComputeFunction for MerkleRootFn {
         if input.is_empty() { return Ok(Bytes::copy_from_slice(&Sha256::digest(b""))); }
         let mut hashes: Vec<[u8; 32]> = input.chunks(bs).map(|c| Sha256::digest(c).into()).collect();
         while hashes.len() > 1 {
-            let mut next = Vec::with_capacity((hashes.len() + 1) / 2);
+            let mut next = Vec::with_capacity(hashes.len().div_ceil(2));
             for pair in hashes.chunks(2) {
                 if pair.len() == 2 {
-                    let mut h = Sha256::new(); h.update(&pair[0]); h.update(&pair[1]);
+                    let mut h = Sha256::new(); h.update(pair[0]); h.update(pair[1]);
                     next.push(h.finalize().into());
                 } else { next.push(pair[0]); }
             }

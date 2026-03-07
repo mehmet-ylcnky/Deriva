@@ -284,13 +284,12 @@ impl StreamingComputeFunction for StreamingPartition {
                         } else if let Some(pat) = pred.strip_prefix("contains:") {
                             chunk.as_ref().windows(pat.len()).any(|w| w == pat.as_bytes())
                         } else if let Some(n) = pred.strip_prefix("min_size:") {
-                            n.parse::<usize>().map_or(false, |n| chunk.len() >= n)
+                            n.parse::<usize>().is_ok_and(|n| chunk.len() >= n)
                         } else {
                             true
                         };
-                        if matches {
-                            if tx.send(StreamChunk::Data(chunk)).await.is_err() { return; }
-                        }
+                        if matches
+                            && tx.send(StreamChunk::Data(chunk)).await.is_err() { return; }
                     }
                     Some(StreamChunk::End) | None => { let _ = tx.send(StreamChunk::End).await; return; }
                     Some(StreamChunk::Error(e)) => { let _ = tx.send(StreamChunk::Error(e)).await; return; }

@@ -3,7 +3,7 @@ use bytes::Bytes;
 use deriva_core::address::{FunctionId, Value};
 use std::collections::BTreeMap;
 use super::spec_cost;
-use super::{parse_usize_param, get_string_param};
+use super::parse_usize_param;
 
 pub struct InterleaveFn;
 

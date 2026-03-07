@@ -4,7 +4,6 @@ use deriva_core::address::{FunctionId, Value};
 use std::collections::BTreeMap;
 use super::spec_cost;
 use super::{parse_byte_param, parse_usize_param};
-use data_encoding::BASE32;
 
 pub struct IdentityFn;
 
@@ -197,7 +196,7 @@ impl ComputeFunction for HexDecodeFn {
             return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
         }
         let input = &inputs[0];
-        if input.len() % 2 != 0 {
+        if !input.len().is_multiple_of(2) {
             return Err(ComputeError::ExecutionFailed("hex input must have even length".into()));
         }
         let bytes: Result<Vec<u8>, _> = (0..input.len())
@@ -247,7 +246,7 @@ impl ComputeFunction for Base32DecodeFn {
         let input = &inputs[0];
         // Validate: Base32 length must be multiple of 8 and must contain proper padding
         if !input.is_empty() {
-            if input.len() % 8 != 0 {
+            if !input.len().is_multiple_of(8) {
                 return Err(ComputeError::ExecutionFailed("invalid base32: input length must be a multiple of 8".into()));
             }
             // Validate padding: non-padding chars after padding are invalid,
@@ -372,7 +371,7 @@ impl ComputeFunction for ByteSwapFn {
             return Err(ComputeError::InvalidParam("word_size must be 2, 4, or 8".into()));
         }
         let input = &inputs[0];
-        if input.len() % ws != 0 {
+        if !input.len().is_multiple_of(ws) {
             return Err(ComputeError::ExecutionFailed(
                 format!("input length {} not a multiple of word_size {}", input.len(), ws),
             ));
@@ -426,7 +425,7 @@ impl ComputeFunction for PadFn {
         let remainder = input.len() % block_size;
         let pad_len = if remainder == 0 { block_size } else { block_size - remainder };
         let mut out = input.to_vec();
-        out.extend(std::iter::repeat(pad_len as u8).take(pad_len));
+        out.extend(std::iter::repeat_n(pad_len as u8, pad_len));
         Ok(Bytes::from(out))
     }
 

@@ -391,12 +391,12 @@ impl ComputeFunction for TiffSplitFn {
     fn id(&self) -> FunctionId { fid("tiff_split") }
     fn execute(&self, inputs: Vec<Bytes>, _p: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
         let b = one(&inputs)?;
-        let mut decoder = image::codecs::tiff::TiffDecoder::new(Cursor::new(b.as_ref()))
+        let decoder = image::codecs::tiff::TiffDecoder::new(Cursor::new(b.as_ref()))
             .map_err(|e| fail(format!("tiff decode: {e}")))?;
         use image::ImageDecoder;
         let mut pages = Vec::new();
-        let mut page_idx = 0u32;
-        loop {
+        #[allow(clippy::never_loop)]
+        for page_idx in 0u32.. {
             let (w, h) = decoder.dimensions();
             let img = image::DynamicImage::from_decoder(decoder)
                 .map_err(|e| fail(format!("tiff page {page_idx}: {e}")))?;
@@ -407,8 +407,6 @@ impl ComputeFunction for TiffSplitFn {
                 "height": h,
                 "data_base64": base64_encode(&page_bytes),
             }));
-            page_idx += 1;
-            // Try next page
             let cursor = Cursor::new(b.as_ref());
             match image::codecs::tiff::TiffDecoder::new(cursor) {
                 Ok(_) => break, // Can't seek to next page easily; single-pass

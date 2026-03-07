@@ -131,8 +131,9 @@ impl ComputeFunction for GeoJsonSimplifyFn {
                         geo::Geometry::MultiPolygon(mp) => geo::Geometry::MultiPolygon(mp.simplify(&tolerance)),
                         other => other, // Points etc. can't be simplified
                     };
-                    if let Ok(gj_geom) = geojson::Geometry::try_from(&simplified) {
-                        *geom = gj_geom;
+                    match geojson::Geometry::try_from(&simplified) {
+                        Ok(gj_geom) => *geom = gj_geom,
+                        Err(_) => {}
                     }
                 }
             }
@@ -268,7 +269,7 @@ fn shape_to_geojson_geom(shape: &shapefile::Shape) -> Result<geojson::Geometry, 
             Ok(geojson::Geometry::new(geojson::Value::Polygon(rings)))
         }
         Shape::NullShape => Err(fail("null shape".into())),
-        _ => Err(fail(format!("unsupported shape type"))),
+        _ => Err(fail("unsupported shape type".to_string())),
     }
 }
 

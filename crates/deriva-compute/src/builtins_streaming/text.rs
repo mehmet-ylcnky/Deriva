@@ -83,9 +83,7 @@ impl StreamingComputeFunction for StreamingPrefix {
                             buf.extend_from_slice(&prefix);
                             buf.extend_from_slice(&chunk);
                             if tx.send(StreamChunk::Data(buf.freeze())).await.is_err() { return; }
-                        } else {
-                            if tx.send(StreamChunk::Data(chunk)).await.is_err() { return; }
-                        }
+                        } else if tx.send(StreamChunk::Data(chunk)).await.is_err() { return; }
                     }
                     Some(StreamChunk::End) | None => { let _ = tx.send(StreamChunk::End).await; return; }
                     Some(StreamChunk::Error(e)) => { let _ = tx.send(StreamChunk::Error(e)).await; return; }
@@ -167,7 +165,7 @@ impl StreamingComputeFunction for StreamingGrep {
             Some(s) => s.clone(),
             None => return error_stream("missing param: pattern".into()),
         };
-        let invert = params.get("invert").map_or(false, |v| v == "true");
+        let invert = params.get("invert").is_some_and(|v| v == "true");
         let re = match regex::Regex::new(&pattern) {
             Ok(r) => r,
             Err(e) => return error_stream(format!("invalid regex: {e}")),

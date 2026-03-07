@@ -4,6 +4,7 @@ use deriva_core::address::{FunctionId, Value};
 use crate::function::{ComputeCost, ComputeError, ComputeFunction};
 
 fn fid(name: &str) -> FunctionId { FunctionId { name: name.into(), version: "1.0.0".into() } }
+#[allow(dead_code)]
 fn param_str(p: &BTreeMap<String, Value>, k: &str) -> Option<String> {
     match p.get(k) { Some(Value::String(s)) => Some(s.clone()), _ => None }
 }

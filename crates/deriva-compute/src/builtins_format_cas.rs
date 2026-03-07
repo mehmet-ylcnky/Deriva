@@ -146,7 +146,8 @@ fn build_car(roots: &[libipld::cid::Cid], blocks: &[(libipld::cid::Cid, Vec<u8>)
 }
 
 /// Parse a CAR archive, returns (roots, blocks)
-fn parse_car(data: &[u8]) -> Result<(Vec<libipld::cid::Cid>, Vec<(libipld::cid::Cid, Vec<u8>)>), ComputeError> {
+type CarResult = Result<(Vec<libipld::cid::Cid>, Vec<(libipld::cid::Cid, Vec<u8>)>), ComputeError>;
+fn parse_car(data: &[u8]) -> CarResult {
     let err = |s: &str| ComputeError::ExecutionFailed(s.into());
     let mut pos = 0;
     // Read header
@@ -255,9 +256,7 @@ impl ComputeFunction for DagPbEncodeFn {
                 });
             }
         }
-        let data = if let Some(s) = v["data"].as_str() {
-            Some(Bytes::from(data_encoding::BASE64.decode(s.as_bytes()).unwrap_or_else(|_| s.as_bytes().to_vec())))
-        } else { None };
+        let data = v["data"].as_str().map(|s| Bytes::from(data_encoding::BASE64.decode(s.as_bytes()).unwrap_or_else(|_| s.as_bytes().to_vec())));
         let node = libipld::pb::PbNode { links, data };
         Ok(Bytes::from(node.into_bytes().to_vec()))
     }

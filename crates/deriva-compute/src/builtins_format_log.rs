@@ -48,16 +48,14 @@ impl ComputeFunction for SyslogParseFn {
                 } else {
                     serde_json::json!({"raw": line, "parse_error": true})
                 }
+            } else if let Some(c) = re3164.captures(line) {
+                let pri: u64 = c[1].parse().unwrap_or(0);
+                serde_json::json!({
+                    "priority": pri, "facility": pri / 8, "severity": pri % 8,
+                    "timestamp": &c[2], "hostname": &c[3], "message": &c[4]
+                })
             } else {
-                if let Some(c) = re3164.captures(line) {
-                    let pri: u64 = c[1].parse().unwrap_or(0);
-                    serde_json::json!({
-                        "priority": pri, "facility": pri / 8, "severity": pri % 8,
-                        "timestamp": &c[2], "hostname": &c[3], "message": &c[4]
-                    })
-                } else {
-                    serde_json::json!({"raw": line, "parse_error": true})
-                }
+                serde_json::json!({"raw": line, "parse_error": true})
             };
             lines.push(serde_json::to_string(&record).unwrap());
         }
@@ -149,7 +147,7 @@ impl ComputeFunction for ElfParseFn {
         let mut lines = Vec::new();
         for line in text.lines() {
             if line.starts_with("#Fields:") {
-                fields = line.trim_start_matches("#Fields:").trim().split_whitespace().map(|s| s.to_string()).collect();
+                fields = line.trim_start_matches("#Fields:").split_whitespace().map(|s| s.to_string()).collect();
                 continue;
             }
             if line.starts_with('#') || line.is_empty() { continue; }

@@ -3,7 +3,6 @@ use bytes::Bytes;
 use deriva_core::address::{FunctionId, Value};
 use std::collections::BTreeMap;
 use super::spec_cost;
-use super::split_lines;
 
 pub struct ByteCountFn;
 

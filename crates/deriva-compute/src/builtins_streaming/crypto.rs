@@ -142,7 +142,7 @@ impl StreamingComputeFunction for StreamingAeadDecrypt {
             chunk_idx += 1;
             cipher.decrypt(&nonce, b)
                 .map(Bytes::from)
-                .map_err(|e| format!("aead: authentication failed at chunk {}", chunk_idx - 1))
+                .map_err(|_e| format!("aead: authentication failed at chunk {}", chunk_idx - 1))
         })
     }
 }
@@ -281,6 +281,7 @@ impl StreamingComputeFunction for StreamingRedact {
     }
 }
 
+#[allow(dead_code)]
 fn spawn_map(
     rx: mpsc::Receiver<StreamChunk>,
     cap: usize,

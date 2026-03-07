@@ -106,6 +106,7 @@ impl ComputeFunction for PdfExtractImagesFn {
 pub struct PdfMergeFn;
 impl ComputeFunction for PdfMergeFn {
     fn id(&self) -> FunctionId { fid("pdf_merge") }
+    #[allow(clippy::collapsible_if)]
     fn execute(&self, inputs: Vec<Bytes>, _p: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
         if inputs.is_empty() { return Err(ComputeError::InvalidParam("at least one input required".into())); }
         if inputs.len() == 1 { return Ok(inputs[0].clone()); }
@@ -124,24 +125,18 @@ impl ComputeFunction for PdfMergeFn {
                         d.set("Parent", lopdf::Object::Reference(pages_ref));
                     }
                     let new_id = base.add_object(page);
-                    if let Ok(pages_obj) = base.get_object_mut(pages_ref) {
-                        if let lopdf::Object::Dictionary(ref mut d) = pages_obj {
-                            if let Ok(kids) = d.get_mut(b"Kids") {
-                                if let lopdf::Object::Array(ref mut arr) = kids {
-                                    arr.push(lopdf::Object::Reference(new_id));
-                                }
-                            }
+                    if let Ok(lopdf::Object::Dictionary(ref mut d)) = base.get_object_mut(pages_ref) {
+                        if let Ok(lopdf::Object::Array(ref mut arr)) = d.get_mut(b"Kids") {
+                            arr.push(lopdf::Object::Reference(new_id));
                         }
                     }
                 }
             }
         }
         // Update Count
-        if let Ok(pages_obj) = base.get_object_mut(pages_ref) {
-            if let lopdf::Object::Dictionary(ref mut d) = pages_obj {
-                if let Ok(lopdf::Object::Array(arr)) = d.get(b"Kids") {
-                    d.set("Count", lopdf::Object::Integer(arr.len() as i64));
-                }
+        if let Ok(lopdf::Object::Dictionary(ref mut d)) = base.get_object_mut(pages_ref) {
+            if let Ok(lopdf::Object::Array(arr)) = d.get(b"Kids") {
+                d.set("Count", lopdf::Object::Integer(arr.len() as i64));
             }
         }
         let mut buf = Vec::new();
@@ -241,6 +236,7 @@ impl ComputeFunction for DocxMetadataFn {
 fn extract_xml_text(xml: &str) -> String {
     // Simple: extract text between > and < that's inside <w:t> or similar text tags
     let mut result = String::new();
+    #[allow(clippy::explicit_counter_loop)]
     let mut in_text = false;
     let mut depth = 0;
     for part in xml.split('<') {

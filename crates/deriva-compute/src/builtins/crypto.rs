@@ -4,7 +4,6 @@ use deriva_core::address::{FunctionId, Value};
 use std::collections::BTreeMap;
 use super::spec_cost;
 use super::{get_string_param, hex_decode_param};
-use deriva_core::address::CAddr;
 
 pub struct Sha256Fn;
 

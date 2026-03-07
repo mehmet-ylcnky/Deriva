@@ -159,7 +159,7 @@ impl StreamingComputeFunction for StreamingMerkleTree {
                 }
                 let mut level = leaves;
                 while level.len() > 1 {
-                    let mut next = Vec::with_capacity((level.len() + 1) / 2);
+                    let mut next = Vec::with_capacity(level.len().div_ceil(2));
                     for pair in level.chunks(2) {
                         let mut h = Sha256::new();
                         h.update(pair[0]);

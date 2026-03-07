@@ -99,7 +99,7 @@ impl ComputeFunction for JsonLinesFn {
         if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
         let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("json_lines requires UTF-8".into()))?;
         let array: Vec<serde_json::Value> = serde_json::from_str(text).map_err(|e| ComputeError::ExecutionFailed(format!("expected JSON array: {}", e)))?;
-        let lines: Vec<String> = array.iter().map(|v| serde_json::to_string(v)).collect::<Result<_, _>>().map_err(|e| ComputeError::ExecutionFailed(format!("json serialize: {}", e)))?;
+        let lines: Vec<String> = array.iter().map(serde_json::to_string).collect::<Result<_, _>>().map_err(|e| ComputeError::ExecutionFailed(format!("json serialize: {}", e)))?;
         Ok(Bytes::from(lines.join("\n")))
     }
     fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }

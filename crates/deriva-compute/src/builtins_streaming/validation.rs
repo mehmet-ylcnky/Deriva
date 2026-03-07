@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use async_trait::async_trait;
-use bytes::Bytes;
 use tokio::sync::mpsc;
 use deriva_core::streaming::StreamChunk;
 use crate::streaming::StreamingComputeFunction;
@@ -15,7 +14,7 @@ fn error_stream(msg: String) -> mpsc::Receiver<StreamChunk> {
 }
 
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
-    if hex.len() % 2 != 0 { return Err("odd-length hex".into()); }
+    if !hex.len().is_multiple_of(2) { return Err("odd-length hex".into()); }
     (0..hex.len()).step_by(2).map(|i| {
         u8::from_str_radix(&hex[i..i+2], 16).map_err(|_| "invalid hex".to_string())
     }).collect()
@@ -68,7 +67,7 @@ fn validate_schema(val: &serde_json::Value, schema: &serde_json::Value) -> Resul
         }
     }
     if let Some(enm) = schema.get("enum").and_then(|e| e.as_array()) {
-        if !enm.contains(val) { return Err(format!("value not in enum")); }
+        if !enm.contains(val) { return Err("value not in enum".to_string()); }
     }
     Ok(())
 }

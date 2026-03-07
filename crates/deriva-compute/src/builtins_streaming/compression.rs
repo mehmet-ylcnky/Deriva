@@ -148,7 +148,7 @@ impl StreamingComputeFunction for StreamingPad {
             }
             let pad_len = block_size - (chunk.len() % block_size);
             let mut out = chunk.to_vec();
-            out.extend(std::iter::repeat(pad_byte).take(pad_len));
+            out.extend(std::iter::repeat_n(pad_byte, pad_len));
             Ok(Bytes::from(out))
         })
     }

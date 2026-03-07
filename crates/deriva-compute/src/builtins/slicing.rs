@@ -3,7 +3,7 @@ use bytes::Bytes;
 use deriva_core::address::{FunctionId, Value};
 use std::collections::BTreeMap;
 use super::spec_cost;
-use super::{parse_usize_param, parse_u64_param, split_lines};
+use super::{parse_usize_param, parse_u64_param};
 
 pub struct TakeFn;
 

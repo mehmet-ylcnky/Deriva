@@ -1,3 +1,10 @@
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::explicit_counter_loop)]
+#![allow(clippy::single_match)]
+#![allow(clippy::useless_conversion)]
+#![allow(clippy::manual_strip)]
+#![allow(clippy::unnecessary_fallible_conversions)]
+
 pub mod async_executor;
 pub mod builtins;
 pub mod builtins_streaming;

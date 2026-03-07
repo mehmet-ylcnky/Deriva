@@ -117,7 +117,7 @@ pub fn detect_format(input: &[u8]) -> FormatResult {
             };
         }
         // TOML: key = value without section headers
-        if t.contains(" = ") && t.lines().next().map_or(false, |l| l.contains('=')) {
+        if t.contains(" = ") && t.lines().next().is_some_and(|l| l.contains('=')) {
             return FormatResult {
                 format: "toml".into(), mime: "application/toml".into(),
                 category: "config".into(), confidence: 0.65,
@@ -237,10 +237,10 @@ impl ComputeFunction for FormatValidateFn {
         let data = &inputs[0];
         let valid = match expected {
             "json" => serde_json::from_slice::<serde_json::Value>(data).is_ok(),
-            "csv" => csv::Reader::from_reader(&data[..]).records().next().map_or(true, |r| r.is_ok()),
+            "csv" => csv::Reader::from_reader(&data[..]).records().next().is_none_or(|r| r.is_ok()),
             "yaml" => serde_yaml::from_slice::<serde_yaml::Value>(data).is_ok(),
             "toml" => std::str::from_utf8(data).ok().and_then(|s| s.parse::<toml::Value>().ok()).is_some(),
-            "xml" => std::str::from_utf8(data).ok().map_or(false, |s| {
+            "xml" => std::str::from_utf8(data).ok().is_some_and(|s| {
                 quick_xml::Reader::from_str(s).read_event().is_ok()
             }),
             "parquet" => data.len() >= 4 && &data[..4] == b"PAR1",
@@ -358,7 +358,7 @@ impl ComputeFunction for UniversalToJsonFn {
                 let records: Vec<serde_json::Value> = text.lines()
                     .filter(|l| !l.trim().is_empty())
                     .take(max_records)
-                    .map(|l| serde_json::from_str(l))
+                    .map(serde_json::from_str)
                     .collect::<Result<_, _>>()
                     .map_err(|e| ComputeError::ExecutionFailed(format!("ndjson: {}", e)))?;
                 serde_json::to_string(&records)
@@ -488,7 +488,7 @@ impl ComputeFunction for FormatConvertFn {
                     .map_err(|_| ComputeError::ExecutionFailed("ndjson requires UTF-8".into()))?;
                 let records: Vec<serde_json::Value> = text.lines()
                     .filter(|l| !l.trim().is_empty())
-                    .map(|l| serde_json::from_str(l))
+                    .map(serde_json::from_str)
                     .collect::<Result<_, _>>()
                     .map_err(|e| ComputeError::ExecutionFailed(format!("ndjson: {}", e)))?;
                 serde_json::Value::Array(records)
@@ -531,7 +531,7 @@ impl ComputeFunction for FormatConvertFn {
             "ndjson" => {
                 match &intermediate {
                     serde_json::Value::Array(arr) => arr.iter()
-                        .map(|v| serde_json::to_string(v))
+                        .map(serde_json::to_string)
                         .collect::<Result<Vec<_>, _>>()
                         .map_err(|e| ComputeError::ExecutionFailed(format!("ndjson: {}", e)))?
                         .join("\n"),

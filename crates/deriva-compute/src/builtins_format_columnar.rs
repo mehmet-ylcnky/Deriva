@@ -136,7 +136,7 @@ impl ComputeFunction for ParquetProjectionFn {
         let reader = builder.with_projection(mask).build().map_err(|e| fail(format!("parquet: {e}")))?;
         let batches: Result<Vec<_>, _> = reader.collect();
         let batches = batches.map_err(|e| fail(format!("parquet: {e}")))?;
-        if batches.first().map_or(true, |b| b.num_columns() == 0) && !batches.is_empty() {
+        if batches.first().is_none_or(|b| b.num_columns() == 0) && !batches.is_empty() {
             return Err(ComputeError::InvalidParam("no matching columns found".into()));
         }
         let out_schema = if let Some(b) = batches.first() { b.schema() } else { schema };
@@ -169,7 +169,7 @@ impl ComputeFunction for ParquetFilterFn {
 
 fn apply_filter(col: &arrow::array::ArrayRef, op: &str, value: Option<&str>) -> Result<arrow::array::BooleanArray, ComputeError> {
     use arrow::array::*;
-    use arrow::compute::kernels::cmp;
+    
     match op {
         "is_null" => return arrow::compute::is_null(col.as_ref()).map_err(|e| fail(format!("filter: {e}"))),
         "is_not_null" => return arrow::compute::is_not_null(col.as_ref()).map_err(|e| fail(format!("filter: {e}"))),

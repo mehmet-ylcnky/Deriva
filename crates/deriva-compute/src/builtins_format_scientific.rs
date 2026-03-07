@@ -140,7 +140,7 @@ fn parse_npy_header(header: &str) -> Result<(String, Vec<usize>), ComputeError> 
 
 fn npy_dtype_size(dtype: &str) -> Result<usize, ComputeError> {
     // Strip endian prefix
-    let d = dtype.trim_start_matches(|c| c == '<' || c == '>' || c == '=' || c == '|');
+    let d = dtype.trim_start_matches(['<', '>', '=', '|']);
     match d {
         "f4" => Ok(4), "f8" => Ok(8),
         "i4" => Ok(4), "i8" => Ok(8),
@@ -166,7 +166,7 @@ fn make_npy(dtype: &str, shape: &[usize], data: &[u8]) -> Vec<u8> {
     buf.push(1); buf.push(0); // version 1.0
     buf.extend_from_slice(&header_len.to_le_bytes());
     buf.extend_from_slice(header.as_bytes());
-    buf.extend(std::iter::repeat(b' ').take(padding));
+    buf.extend(std::iter::repeat_n(b' ', padding));
     buf.push(b'\n');
     buf.extend_from_slice(data);
     buf
@@ -197,7 +197,7 @@ fn npy_data_to_arrow(data: &[u8], dtype: &str, shape: &[usize]) -> Result<arrow:
     use arrow::array::*;
     use arrow::datatypes::*;
     let total_elements: usize = shape.iter().product();
-    let d = dtype.trim_start_matches(|c| c == '<' || c == '>' || c == '=' || c == '|');
+    let d = dtype.trim_start_matches(['<', '>', '=', '|']);
     let elem_size = npy_dtype_size(dtype)?;
     if data.len() < total_elements * elem_size {
         return Err(fail("npy data too short".into()));
@@ -274,7 +274,7 @@ impl ComputeFunction for ZarrReadFn {
         // Read chunk files and assemble data (1D case for simplicity)
         let mut raw_data = vec![0u8; total_elements * elem_size];
         let chunk_elements: usize = chunks.iter().product();
-        let num_chunks = (total_elements + chunk_elements - 1) / chunk_elements;
+        let num_chunks = total_elements.div_ceil(chunk_elements);
         let prefix = if array_path.is_empty() { String::new() }
             else { format!("{}/", array_path.trim_matches('/')) };
         for i in 0..num_chunks {
@@ -365,7 +365,7 @@ impl ComputeFunction for ArrowToNumpyFn {
         let num_rows = col.len();
         use arrow::array::*;
         use arrow::datatypes::DataType;
-        let d = dtype.trim_start_matches(|c| c == '<' || c == '>' || c == '=' || c == '|');
+        let d = dtype.trim_start_matches(['<', '>', '=', '|']);
         let raw: Vec<u8> = match d {
             "f4" => {
                 let arr = arrow::compute::cast(col, &DataType::Float32).map_err(|e| fail(format!("cast: {e}")))?;

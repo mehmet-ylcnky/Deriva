@@ -23,7 +23,7 @@ use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptio
 use symphonia::core::probe::Hint;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::DecoderOptions;
 
 struct CursorSource(Cursor<Vec<u8>>);
 impl std::io::Read for CursorSource {
@@ -464,7 +464,7 @@ impl ComputeFunction for WavToRawPcmFn {
                 return Ok(Bytes::from(out));
             }
             pos += 8 + chunk_size;
-            if chunk_size % 2 != 0 { pos += 1; } // padding
+            if !chunk_size.is_multiple_of(2) { pos += 1; } // padding
         }
         Err(fail("no data chunk in WAV".into()))
     }
@@ -514,6 +514,7 @@ impl ComputeFunction for MediaDetectFormatFn {
     fn id(&self) -> FunctionId { fid("media_detect_format") }
     fn execute(&self, inputs: Vec<Bytes>, _p: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
         let b = one(&inputs)?;
+        #[allow(clippy::if_same_then_else)]
         let (format, mime) = if b.len() >= 4 && &b[0..4] == b"RIFF" && b.len() >= 12 && &b[8..12] == b"WAVE" {
             ("wav", "audio/wav")
         } else if b.len() >= 4 && &b[0..4] == b"fLaC" {
@@ -526,7 +527,7 @@ impl ComputeFunction for MediaDetectFormatFn {
             ("ogg", "audio/ogg")
         } else if b.len() >= 8 && &b[4..8] == b"ftyp" {
             ("mp4", "video/mp4")
-        } else if b.len() >= 4 && &b[0..4] == [0x1A, 0x45, 0xDF, 0xA3] {
+        } else if b.len() >= 4 && b[0..4] == [0x1A, 0x45, 0xDF, 0xA3] {
             ("mkv", "video/x-matroska")
         } else {
             ("unknown", "application/octet-stream")

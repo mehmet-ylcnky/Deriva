@@ -481,7 +481,7 @@ impl ComputeFunction for NdjsonParseFn {
         let text = require_utf8(data)?;
         let arr: Vec<serde_json::Value> = text.lines()
             .filter(|l| !l.trim().is_empty())
-            .map(|l| serde_json::from_str(l))
+            .map(serde_json::from_str)
             .collect::<Result<_, _>>().map_err(json_err)?;
         Ok(Bytes::from(serde_json::to_string(&arr).map_err(json_err)?))
     }
@@ -498,7 +498,7 @@ impl ComputeFunction for NdjsonWriteFn {
         let data = one_input(&inputs)?;
         let arr: Vec<serde_json::Value> = serde_json::from_slice(data).map_err(json_err)?;
         let lines: Vec<String> = arr.iter()
-            .map(|v| serde_json::to_string(v))
+            .map(serde_json::to_string)
             .collect::<Result<_, _>>().map_err(json_err)?;
         Ok(Bytes::from(lines.join("\n")))
     }
@@ -539,7 +539,7 @@ impl ComputeFunction for NdjsonFilterFn {
     fn estimated_cost(&self, s: &[u64]) -> ComputeCost { cost(15, s, 2) }
 }
 
-fn extract_path<'a>(val: &'a serde_json::Value, path: &str) -> serde_json::Value {
+fn extract_path(val: &serde_json::Value, path: &str) -> serde_json::Value {
     let mut current = val;
     for key in path.split('.') {
         match current.get(key) {
@@ -806,7 +806,7 @@ fn json_to_xml(val: &serde_json::Value, tag: &str, out: &mut String, indent: usi
             if children.is_empty() && text.is_none() {
                 out.push_str("/>\n");
             } else {
-                out.push_str(">");
+                out.push('>');
                 if let Some(t) = text {
                     out.push_str(t);
                     if children.is_empty() {

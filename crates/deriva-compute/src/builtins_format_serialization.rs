@@ -148,7 +148,7 @@ impl ComputeFunction for ProtobufDecodeFn {
         let pool = prost_reflect::DescriptorPool::decode(desc_bytes.as_slice()).map_err(|e| fail(format!("descriptor: {e}")))?;
         let md = pool.get_message_by_name(&msg_type).ok_or_else(|| fail(format!("message type not found: {msg_type}")))?;
         let msg = prost_reflect::DynamicMessage::decode(md, &b[..]).map_err(|e| fail(format!("protobuf: {e}")))?;
-        let opts = prost_reflect::SerializeOptions::new().stringify_64_bit_integers(false);
+        let _opts = prost_reflect::SerializeOptions::new().stringify_64_bit_integers(false);
         let json = serde_json::to_value(&msg).map_err(|e| fail(format!("json: {e}")))?;
         Ok(Bytes::from(serde_json::to_string(&json).unwrap()))
     }

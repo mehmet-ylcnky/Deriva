@@ -22,8 +22,7 @@ pub use format_conversion::*;
 pub use cas::*;
 pub use batch_only::*;
 
-use crate::function::{ComputeCost, ComputeError, ComputeFunction};
-use bytes::Bytes;
+use crate::function::{ComputeCost, ComputeError};
 use deriva_core::address::Value;
 use std::collections::BTreeMap;
 
@@ -51,6 +50,7 @@ pub(crate) fn parse_u64_param(params: &BTreeMap<String, Value>, name: &str) -> R
 }
 
 /// Split on \n, preserving empty trailing segment.
+#[allow(dead_code)]
 pub(crate) fn split_lines(input: &[u8]) -> Vec<&[u8]> {
     if input.is_empty() { return vec![b""]; }
     input.split(|&b| b == b'\n').collect()
@@ -64,7 +64,7 @@ pub(crate) fn get_string_param<'a>(params: &'a BTreeMap<String, Value>, name: &s
 }
 
 pub(crate) fn hex_decode_param(hex: &str, name: &str) -> Result<Vec<u8>, ComputeError> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err(ComputeError::InvalidParam(format!("odd-length hex in {}", name)));
     }
     (0..hex.len())

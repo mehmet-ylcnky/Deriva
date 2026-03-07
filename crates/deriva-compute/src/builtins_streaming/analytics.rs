@@ -5,7 +5,7 @@ use bytes::Bytes;
 use tokio::sync::mpsc;
 use deriva_core::streaming::StreamChunk;
 use crate::streaming::StreamingComputeFunction;
-use super::core::{take_one, spawn_accumulate, spawn_buffered};
+use super::core::{take_one, spawn_accumulate};
 
 // ── helpers ──────────────────────────────────────────────────────────
 
@@ -55,7 +55,7 @@ impl StreamingComputeFunction for StreamingFilter {
             } else if let Some(pat) = pred.strip_prefix("contains:") {
                 chunk.windows(pat.len()).any(|w| w == pat.as_bytes())
             } else if let Some(n) = pred.strip_prefix("min_size:") {
-                n.parse::<usize>().map_or(false, |n| chunk.len() >= n)
+                n.parse::<usize>().is_ok_and(|n| chunk.len() >= n)
             } else {
                 true
             };
@@ -151,7 +151,7 @@ impl StreamingComputeFunction for StreamingSample {
         if rate == 0 { return error_stream("rate must be > 0".into()); }
         let mut counter = 0usize;
         spawn_filter_map(rx, move |chunk| {
-            let emit = counter % rate == 0;
+            let emit = counter.is_multiple_of(rate);
             counter += 1;
             if emit { Some(Bytes::copy_from_slice(chunk)) } else { None }
         })

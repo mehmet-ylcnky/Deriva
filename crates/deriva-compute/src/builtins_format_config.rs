@@ -289,7 +289,7 @@ impl ComputeFunction for PropertiesParseFn {
             if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('!') { continue; }
             if !continuation.is_empty() {
                 if trimmed.ends_with('\\') {
-                    continuation.push_str(trimmed[..trimmed.len()-1].trim());
+                    continuation.push_str(trimmed.strip_suffix('\\').unwrap_or(trimmed).trim());
                 } else {
                     continuation.push_str(trimmed);
                     map.insert(cont_key.clone(), serde_json::Value::String(continuation.clone()));
@@ -297,12 +297,12 @@ impl ComputeFunction for PropertiesParseFn {
                 }
                 continue;
             }
-            let sep = trimmed.find(|c: char| c == '=' || c == ':').unwrap_or(trimmed.len());
+            let sep = trimmed.find(['=', ':']).unwrap_or(trimmed.len());
             let key = trimmed[..sep].trim().to_string();
             let val = if sep < trimmed.len() { trimmed[sep+1..].trim() } else { "" };
             if val.ends_with('\\') {
                 cont_key = key;
-                continuation = val[..val.len()-1].trim().to_string();
+                continuation = val.strip_suffix('\\').unwrap_or(val).trim().to_string();
             } else {
                 map.insert(key, serde_json::Value::String(val.to_string()));
             }

@@ -41,7 +41,7 @@ impl ComputeFunction for ReedSolomonEncodeFn {
         let r = reed_solomon_erasure::ReedSolomon::<RsField>::new(d, par)
             .map_err(|e| ComputeError::ExecutionFailed(format!("rs init: {e}")))?;
         let total_data = 4 + b.len();
-        let ss = (total_data + d - 1) / d;
+        let ss = total_data.div_ceil(d);
         let mut padded = Vec::with_capacity(ss * d);
         padded.extend_from_slice(&(b.len() as u32).to_le_bytes());
         padded.extend_from_slice(b);
@@ -124,7 +124,7 @@ impl ComputeFunction for XorParityFn {
         let sc = param_usize(p, "shard_count", 3)?;
         if sc == 0 { return Err(ComputeError::InvalidParam("shard_count must be ≥ 1".into())); }
         let total_data = 4 + b.len();
-        let ss = (total_data + sc - 1) / sc;
+        let ss = total_data.div_ceil(sc);
         let mut padded = Vec::with_capacity(ss * sc);
         padded.extend_from_slice(&(b.len() as u32).to_le_bytes());
         padded.extend_from_slice(b);
@@ -163,9 +163,9 @@ impl ComputeFunction for XorReconstructFn {
             for (j, &byte) in shard.iter().enumerate() { reconstructed[j] ^= byte; }
         }
         let mut data = Vec::with_capacity(ss * sc);
-        for i in 0..sc {
+        for (i, shard) in shards.iter().enumerate().take(sc) {
             if i == missing { data.extend_from_slice(&reconstructed); }
-            else { data.extend_from_slice(shards[i]); }
+            else { data.extend_from_slice(shard); }
         }
         let original_len = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
         if 4 + original_len > data.len() {
@@ -220,7 +220,7 @@ impl ComputeFunction for StripeSplitFn {
         let sc = param_usize(p, "stripe_count", 4)?;
         let ss = param_usize(p, "stripe_size", 65536)?;
         if sc == 0 { return Err(ComputeError::InvalidParam("stripe_count must be ≥ 1".into())); }
-        let padded_len = ((b.len() + ss - 1) / ss) * ss;
+        let padded_len = b.len().div_ceil(ss) * ss;
         let mut padded = b.to_vec();
         padded.resize(padded_len, 0u8);
         let mut shards: Vec<Vec<u8>> = (0..sc).map(|_| Vec::new()).collect();
@@ -253,7 +253,7 @@ impl ComputeFunction for StripeAssembleFn {
         }
         let shard_size = payload.len() / sc;
         let shards: Vec<&[u8]> = payload.chunks(shard_size).collect();
-        let stripes_per_shard = (shard_size + ss - 1) / ss;
+        let stripes_per_shard = shard_size.div_ceil(ss);
         let mut result = Vec::with_capacity(original_len);
         for si in 0..stripes_per_shard {
             for shard in &shards {

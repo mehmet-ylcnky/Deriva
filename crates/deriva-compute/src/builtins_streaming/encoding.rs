@@ -6,8 +6,9 @@ use bytes::Bytes;
 use tokio::sync::mpsc;
 use deriva_core::streaming::StreamChunk;
 use crate::streaming::{StreamingComputeFunction, DEFAULT_CHANNEL_CAPACITY, DEFAULT_CHUNK_SIZE};
-use super::core::{spawn_map, spawn_map_stateful, spawn_boundary_map, spawn_buffered, take_one};
+use super::core::{spawn_map, spawn_buffered, take_one};
 
+#[allow(dead_code)]
 async fn error_stream(msg: String) -> mpsc::Receiver<StreamChunk> {
     let (tx, rx) = mpsc::channel(1);
     let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg))).await;
@@ -86,9 +87,8 @@ impl StreamingComputeFunction for StreamingUtf8Validate {
                             return;
                         }
                         pending = buf[valid_end..].to_vec();
-                        if valid_end > 0 {
-                            if tx.send(StreamChunk::Data(Bytes::copy_from_slice(&buf[..valid_end]))).await.is_err() { return; }
-                        }
+                        if valid_end > 0
+                            && tx.send(StreamChunk::Data(Bytes::copy_from_slice(&buf[..valid_end]))).await.is_err() { return; }
                     }
                     Some(StreamChunk::End) => {
                         if !pending.is_empty() {

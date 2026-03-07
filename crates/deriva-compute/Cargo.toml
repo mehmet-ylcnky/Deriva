@@ -7,6 +7,34 @@ edition = "2021"
 default = ["extended-streaming"]
 extended-streaming = []
 
+# Phase bundles
+format-phase1 = ["format-detect", "format-csv", "format-config", "format-archive", "format-log", "format-cas"]
+format-phase2 = ["format-erasure", "format-serialization", "format-columnar"]
+format-phase3 = ["format-image", "format-document", "format-audio", "format-geo"]
+format-phase4 = ["format-scientific", "format-database", "format-ml", "format-network", "format-bio", "format-binary"]
+format-all = ["format-phase1", "format-phase2", "format-phase3", "format-phase4"]
+
+# Category flags
+format-detect = []
+format-csv = []
+format-config = []
+format-archive = []
+format-log = []
+format-cas = []
+format-erasure = []
+format-serialization = []
+format-columnar = []
+format-image = []
+format-document = []
+format-audio = []
+format-geo = []
+format-scientific = []
+format-database = []
+format-ml = []
+format-network = []
+format-bio = []
+format-binary = []
+
 [dependencies]
 parquet = { version = "57", features = ["arrow"] }
 arrow = { version = "57", features = ["ipc", "json"] }

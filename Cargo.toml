@@ -54,5 +54,8 @@ base64 = "0.22"
 flate2 = "1"
 crc32fast = "1"
 
+# Caching
+lru = "0.12"
+
 # Testing
 proptest = "1"

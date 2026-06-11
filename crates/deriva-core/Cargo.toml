@@ -10,6 +10,7 @@ bincode = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 sled = { workspace = true }
+lru = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

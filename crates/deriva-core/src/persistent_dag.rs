@@ -1,19 +1,45 @@
 use crate::address::{CAddr, Recipe};
 use crate::dag::DagAccess;
 use crate::error::{DerivaError, Result};
+use lru::LruCache;
 use sled::{Db, Tree, Transactional};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex};
 
-/// Sled-backed DAG with persistent adjacency lists.
+/// Configuration for PersistentDag cache sizes.
+pub struct PersistentDagConfig {
+    /// Max entries in forward adjacency cache (default: 10,000)
+    pub forward_cache_size: NonZeroUsize,
+    /// Max entries in reverse adjacency cache (default: 10,000)
+    pub reverse_cache_size: NonZeroUsize,
+}
+
+impl Default for PersistentDagConfig {
+    fn default() -> Self {
+        Self {
+            forward_cache_size: NonZeroUsize::new(10_000).unwrap(),
+            reverse_cache_size: NonZeroUsize::new(10_000).unwrap(),
+        }
+    }
+}
+
+/// Sled-backed DAG with persistent adjacency lists and LRU cache acceleration.
 #[derive(Clone)]
 pub struct PersistentDag {
     forward: Tree,   // addr → Vec<CAddr> (inputs)
     reverse: Tree,   // addr → Vec<CAddr> (dependents)
     db: Db,
+    forward_cache: Arc<Mutex<LruCache<CAddr, Vec<CAddr>>>>,
+    reverse_cache: Arc<Mutex<LruCache<CAddr, Vec<CAddr>>>>,
 }
 
 impl PersistentDag {
     pub fn open(db: &Db) -> Result<Self> {
+        Self::open_with_config(db, PersistentDagConfig::default())
+    }
+
+    pub fn open_with_config(db: &Db, config: PersistentDagConfig) -> Result<Self> {
         let forward = db.open_tree("dag_forward")
             .map_err(|e| DerivaError::Storage(e.to_string()))?;
         let reverse = db.open_tree("dag_reverse")
@@ -22,6 +48,8 @@ impl PersistentDag {
             forward,
             reverse,
             db: db.clone(),
+            forward_cache: Arc::new(Mutex::new(LruCache::new(config.forward_cache_size))),
+            reverse_cache: Arc::new(Mutex::new(LruCache::new(config.reverse_cache_size))),
         })
     }
 

@@ -107,6 +107,19 @@ impl PersistentDag {
         self.db.flush()
             .map_err(|e| DerivaError::Storage(e.to_string()))?;
 
+        // Update caches after successful insert
+        {
+            let mut cache = self.forward_cache.lock().unwrap();
+            cache.put(addr, recipe.inputs.clone());
+        }
+        // Invalidate reverse cache for each input (their dependents list changed)
+        {
+            let mut cache = self.reverse_cache.lock().unwrap();
+            for input in &recipe.inputs {
+                cache.pop(input);
+            }
+        }
+
         Ok(addr)
     }
 

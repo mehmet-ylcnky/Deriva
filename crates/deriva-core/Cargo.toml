@@ -15,3 +15,5 @@ lru = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = "3"
+tokio = { workspace = true, features = ["full", "test-util"] }
+deriva-compute = { path = "../deriva-compute" }

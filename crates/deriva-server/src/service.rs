@@ -300,8 +300,10 @@ impl Deriva for DerivaService {
         ).await;
 
         CASCADE_TOTAL.with_label_values(&[policy_label]).inc();
-        CASCADE_EVICTED.observe(result.evicted_count as f64);
-        CASCADE_DEPTH.observe(result.max_depth as f64);
+        if !matches!(policy, CascadePolicy::None) {
+            CASCADE_EVICTED.observe(result.evicted_count as f64);
+            CASCADE_DEPTH.observe(result.max_depth as f64);
+        }
         CASCADE_DURATION.observe(result.duration.as_secs_f64());
 
         let resp = Ok(Response::new(CascadeInvalidateResponse {

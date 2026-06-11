@@ -4,6 +4,7 @@ use bytes::Bytes;
 use tokio::sync::mpsc;
 use deriva_core::{CAddr, DerivaError, Value};
 use deriva_core::streaming::StreamChunk;
+use crate::adaptive::{AdaptiveChunkConfig, spawn_adaptive_resizer};
 use crate::streaming::{
     StreamingComputeFunction, batch_to_stream, value_to_stream,
     collect_stream, DEFAULT_CHUNK_SIZE, DEFAULT_CHANNEL_CAPACITY,
@@ -27,6 +28,13 @@ pub struct PipelineConfig {
     /// Set to 0 to always prefer streaming (§2.7 behaviour).
     /// Set to usize::MAX to always prefer batch.
     pub streaming_threshold: usize,
+    /// Enable adaptive chunk sizing for the pipeline (§2.10).
+    /// When true, AdaptiveResizer nodes are inserted between adjacent streaming stages.
+    pub adaptive_chunking: bool,
+    /// Minimum chunk size the AdaptiveResizer can produce (absolute floor: 1024 bytes).
+    pub min_chunk_size: usize,
+    /// Maximum chunk size the AdaptiveResizer can produce (default: 1 MB).
+    pub max_chunk_size: usize,
 }
 
 impl Default for PipelineConfig {
@@ -37,8 +45,50 @@ impl Default for PipelineConfig {
             cache_intermediates: true,
             memory_budget: 0,
             streaming_threshold: DEFAULT_STREAMING_THRESHOLD,
+            adaptive_chunking: false,
+            min_chunk_size: 1024,
+            max_chunk_size: 1_048_576,
         }
     }
+}
+
+impl PipelineConfig {
+    /// Validate that adaptive chunking configuration fields are consistent.
+    ///
+    /// Checks:
+    /// - `min_chunk_size >= 1024` (absolute floor)
+    /// - `min_chunk_size <= chunk_size`
+    /// - `chunk_size <= max_chunk_size`
+    pub fn validate(&self) -> Result<(), String> {
+        if self.min_chunk_size < 1024 {
+            return Err(format!(
+                "min_chunk_size must be >= 1024, got {}",
+                self.min_chunk_size
+            ));
+        }
+        if self.min_chunk_size > self.chunk_size {
+            return Err(format!(
+                "min_chunk_size ({}) must be <= chunk_size ({})",
+                self.min_chunk_size, self.chunk_size
+            ));
+        }
+        if self.chunk_size > self.max_chunk_size {
+            return Err(format!(
+                "chunk_size ({}) must be <= max_chunk_size ({})",
+                self.chunk_size, self.max_chunk_size
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Lightweight classification of pipeline nodes for adaptive chunking decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeType {
+    Source,
+    Cached,
+    Streaming,
+    Batch,
 }
 
 enum PipelineNode {
@@ -135,6 +185,14 @@ impl StreamPipeline {
         let start = std::time::Instant::now();
         metrics::STREAM_PIPELINES_TOTAL.inc();
 
+        // Pre-compute node types for adaptive chunking decisions.
+        let node_types: Vec<NodeType> = self.nodes.iter().map(|node| match node {
+            PipelineNode::Source { .. } => NodeType::Source,
+            PipelineNode::Cached { .. } => NodeType::Cached,
+            PipelineNode::StreamingStage { .. } => NodeType::Streaming,
+            PipelineNode::BatchStage { .. } => NodeType::Batch,
+        }).collect();
+
         let mut outputs: Vec<Option<mpsc::Receiver<StreamChunk>>> =
             Vec::with_capacity(self.nodes.len());
 
@@ -155,9 +213,24 @@ impl StreamPipeline {
                 } => {
                     let inputs: Vec<mpsc::Receiver<StreamChunk>> =
                         input_indices.iter().map(|&i| {
-                            outputs[i].take().expect(
+                            let mut rx = outputs[i].take().expect(
                                 "input already consumed — DAG has fan-out on streaming node"
-                            )
+                            );
+                            // Adaptive chunking: insert resizer between adjacent streaming stages
+                            if self.config.adaptive_chunking && node_types[i] == NodeType::Streaming {
+                                let initial_target = function.preferred_chunk_size()
+                                    .clamp(self.config.min_chunk_size, self.config.max_chunk_size);
+                                rx = spawn_adaptive_resizer(
+                                    rx,
+                                    initial_target,
+                                    self.config.min_chunk_size,
+                                    self.config.max_chunk_size,
+                                    self.config.channel_capacity,
+                                    AdaptiveChunkConfig::default(),
+                                    function.metric_name(),
+                                );
+                            }
+                            rx
                         }).collect();
                     let fn_name = function.metric_name();
                     crate::metrics::STREAMING_FN_CALLS.with_label_values(&[fn_name]).inc();

@@ -1,8 +1,8 @@
 use lazy_static::lazy_static;
 use prometheus::{
-    register_counter_vec, register_gauge, register_histogram, register_histogram_vec,
-    register_int_counter, register_int_counter_vec,
-    CounterVec, Gauge, Histogram, HistogramVec, IntCounter, IntCounterVec,
+    register_counter_vec, register_gauge, register_gauge_vec, register_histogram,
+    register_histogram_vec, register_int_counter, register_int_counter_vec,
+    CounterVec, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterVec,
 };
 
 lazy_static! {
@@ -99,5 +99,19 @@ lazy_static! {
     pub static ref STREAMING_THRESHOLD_GAUGE: prometheus::IntGauge = prometheus::register_int_gauge!(
         "deriva_streaming_threshold_bytes",
         "Configured streaming threshold in bytes"
+    ).unwrap();
+}
+
+// §2.10 Adaptive chunk sizing metrics
+lazy_static! {
+    pub static ref ADAPTIVE_CHUNK_SIZE_BYTES: GaugeVec = register_gauge_vec!(
+        "deriva_adaptive_chunk_size_bytes",
+        "Current target chunk size per adaptive resizer",
+        &["stage"]
+    ).unwrap();
+    pub static ref ADAPTIVE_RESIZE_EVENTS_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "deriva_adaptive_resize_events_total",
+        "Resize event count by stage and direction",
+        &["stage", "direction"]
     ).unwrap();
 }

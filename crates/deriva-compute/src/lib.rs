@@ -71,6 +71,7 @@ pub mod builtins_format_binary;
 ))]
 pub mod builtins_format;
 
+pub mod adaptive;
 pub mod cache;
 pub mod executor;
 pub mod function;

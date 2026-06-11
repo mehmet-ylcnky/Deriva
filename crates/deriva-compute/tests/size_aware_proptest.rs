@@ -58,6 +58,9 @@ fn make_config(threshold: usize) -> PipelineConfig {
         cache_intermediates: false,
         memory_budget: 0,
         streaming_threshold: threshold,
+        adaptive_chunking: false,
+        min_chunk_size: 1024,
+        max_chunk_size: 1_048_576,
     }
 }
 

@@ -23,6 +23,32 @@ impl StorageBackend {
         let recipes = SledRecipeStore::open_with_db(&db)?;
         let blobs = BlobStore::open(root.join("blobs"))?;
         let dag = PersistentDag::open(&db)?;
+
+        // One-time migration: if DAG trees are empty but recipes exist, populate DAG
+        if dag.is_empty() && !recipes.is_empty() {
+            tracing::info!("migrating {} recipes to PersistentDag...", recipes.len());
+            let mut migrated = 0u64;
+            let mut failed = 0u64;
+            for result in recipes.iter_all() {
+                match result {
+                    Ok((_addr, recipe)) => {
+                        if let Err(e) = dag.insert(&recipe) {
+                            tracing::warn!("migration: skipping recipe {}: {}", recipe.addr(), e);
+                            failed += 1;
+                        } else {
+                            migrated += 1;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("migration: skipping unreadable recipe: {}", e);
+                        failed += 1;
+                    }
+                }
+            }
+            dag.flush()?;
+            tracing::info!("migration complete: {} recipes migrated, {} failed", migrated, failed);
+        }
+
         Ok(Self { recipes, blobs, dag })
     }
 

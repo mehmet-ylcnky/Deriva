@@ -1652,6 +1652,7 @@ dependencies = [
  "orc-rust",
  "parquet",
  "prometheus",
+ "proptest",
  "prost 0.14.3",
  "prost-reflect",
  "prost-types 0.14.3",
@@ -1689,11 +1690,14 @@ dependencies = [
  "bincode",
  "blake3",
  "bytes",
+ "deriva-compute",
+ "lru 0.12.5",
  "proptest",
  "serde",
  "sled",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -1717,7 +1721,9 @@ dependencies = [
  "futures",
  "lazy_static",
  "prometheus",
+ "proptest",
  "prost 0.13.5",
+ "regex",
  "serde_json",
  "sled",
  "tempfile",
@@ -1741,6 +1747,7 @@ dependencies = [
  "sled",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -3605,6 +3612,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
+dependencies = [
+ "hashbrown 0.15.5",
+]
+
+[[package]]
 name = "lz4_flex"
 version = "0.11.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5066,7 +5082,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7263373d500d4d4f505d43a2a662d475a894aa94503a1ee28e9188b5f3960d4f"
 dependencies = [
  "libm",
- "lru",
+ "lru 0.7.8",
  "parking_lot 0.11.2",
  "smallvec",
  "spin",

@@ -29,3 +29,7 @@ tonic-build = { workspace = true }
 tempfile = "3"
 futures = "0.3"
 sled = { workspace = true }
+regex = "1"
+proptest = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+bytes = { workspace = true }

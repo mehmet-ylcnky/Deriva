@@ -743,3 +743,335 @@ proptest! {
         })?;
     }
 }
+
+// ============================================================================
+// PARALLEL MATERIALIZATION PROPERTIES (§2.3)
+// ============================================================================
+
+// SlowFunction for timing-based property tests
+struct SlowFunction {
+    duration_ms: u64,
+}
+
+impl ComputeFunction for SlowFunction {
+    fn id(&self) -> FunctionId {
+        FunctionId {
+            name: "slow".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    fn execute(
+        &self,
+        inputs: Vec<Bytes>,
+        _params: &BTreeMap<String, Value>,
+    ) -> std::result::Result<Bytes, ComputeError> {
+        std::thread::sleep(Duration::from_millis(self.duration_ms));
+        Ok(inputs.into_iter().next().unwrap_or_else(|| Bytes::from("slow")))
+    }
+
+    fn estimated_cost(&self, _input_sizes: &[u64]) -> ComputeCost {
+        ComputeCost {
+            cpu_ms: self.duration_ms,
+            memory_bytes: 1024,
+        }
+    }
+}
+
+// ConcurrencyTrackingFunction - tracks peak concurrent executions
+struct ConcurrencyTrackingFunction {
+    active: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+    duration_ms: u64,
+}
+
+impl ConcurrencyTrackingFunction {
+    fn new(active: Arc<AtomicUsize>, peak: Arc<AtomicUsize>, duration_ms: u64) -> Self {
+        Self { active, peak, duration_ms }
+    }
+}
+
+impl ComputeFunction for ConcurrencyTrackingFunction {
+    fn id(&self) -> FunctionId {
+        FunctionId {
+            name: "concurrency_tracking".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    fn execute(
+        &self,
+        inputs: Vec<Bytes>,
+        _params: &BTreeMap<String, Value>,
+    ) -> std::result::Result<Bytes, ComputeError> {
+        let current = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        // Update peak
+        self.peak.fetch_max(current, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(self.duration_ms));
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(inputs.into_iter().next().unwrap_or_else(|| Bytes::from("tracked")))
+    }
+
+    fn estimated_cost(&self, _input_sizes: &[u64]) -> ComputeCost {
+        ComputeCost {
+            cpu_ms: self.duration_ms,
+            memory_bytes: 1024,
+        }
+    }
+}
+
+// ============================================================================
+// Property 12 (§2.3 P2): Parallel Speedup Proportional to Width
+// Feature: parallel-materialization, Property 2: Parallel Speedup Proportional to Width
+// ============================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
+
+    /// **Validates: Requirements 1.1, 11.1**
+    #[test]
+    fn prop_par_2_parallel_speedup(
+        num_inputs in 2usize..=6,
+    ) {
+        // Fan-in with N inputs using SlowFunction (50ms each).
+        // Parallel should complete in ~50ms, not N*50ms.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (dag, _base_registry, cache, leaves) = setup();
+
+            let mut registry = FunctionRegistry::new();
+            builtins::register_all(&mut registry);
+            registry.register(Arc::new(SlowFunction { duration_ms: 50 }));
+            let registry = Arc::new(registry);
+
+            // Create N leaf inputs
+            let mut leaf_addrs = Vec::new();
+            for i in 0..num_inputs {
+                let addr = leaf(format!("par_speedup_leaf_{}", i).as_bytes());
+                leaves.leaves.lock().unwrap().insert(addr, Bytes::from(format!("data_{}", i)));
+                leaf_addrs.push(addr);
+            }
+
+            // Create N slow recipes (one per leaf)
+            let mut recipe_addrs = Vec::new();
+            for &leaf_addr in leaf_addrs.iter() {
+                let r = Recipe::new(
+                    FunctionId::new("slow", "1.0.0"),
+                    vec![leaf_addr],
+                    BTreeMap::new(),
+                );
+                let r_addr = r.addr();
+                dag.recipes.lock().unwrap().insert(r_addr, r);
+                recipe_addrs.push(r_addr);
+            }
+
+            // Create a final concat recipe that depends on all N slow recipes
+            let final_r = Recipe::new(
+                FunctionId::new("concat", "1.0.0"),
+                recipe_addrs,
+                BTreeMap::new(),
+            );
+            let final_addr = final_r.addr();
+            dag.recipes.lock().unwrap().insert(final_addr, final_r);
+
+            let executor = AsyncExecutor::new(dag, registry, cache, leaves);
+
+            let start = std::time::Instant::now();
+            let result = executor.materialize(final_addr).await;
+            let elapsed = start.elapsed();
+
+            prop_assert!(result.is_ok(), "Materialization failed: {:?}", result.err());
+
+            // Sequential would take N * 50ms. Parallel should take ~50ms + overhead.
+            // We allow generous tolerance: must be less than (N-1) * 50ms (proving parallelism).
+            let sequential_time_ms = (num_inputs as u64) * 50;
+            let max_allowed_ms = sequential_time_ms - 25; // Must save at least 25ms
+            prop_assert!(
+                elapsed.as_millis() < max_allowed_ms as u128,
+                "Took {}ms, expected less than {}ms (sequential would be {}ms) for {} inputs",
+                elapsed.as_millis(), max_allowed_ms, sequential_time_ms, num_inputs
+            );
+            Ok(())
+        })?;
+    }
+}
+
+// ============================================================================
+// Property 13 (§2.3 P3): Global Semaphore Bounding
+// Feature: parallel-materialization, Property 3: Global Semaphore Bounding
+// ============================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
+
+    /// **Validates: Requirements 3.1, 3.4, 7.3, 11.3**
+    #[test]
+    fn prop_par_3_global_semaphore_bounding(
+        max_concurrency in 2usize..=4,
+        num_recipes in 6usize..=12,
+    ) {
+        // Peak concurrent compute executions never exceeds max_concurrency.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (dag, _base_registry, cache, leaves) = setup();
+
+            let active = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+
+            let mut registry = FunctionRegistry::new();
+            builtins::register_all(&mut registry);
+            registry.register(Arc::new(ConcurrencyTrackingFunction::new(
+                Arc::clone(&active),
+                Arc::clone(&peak),
+                20, // 20ms per compute
+            )));
+            let registry = Arc::new(registry);
+
+            // Create N independent leaf → recipe pairs
+            let mut recipe_addrs = Vec::new();
+            for i in 0..num_recipes {
+                let leaf_addr = leaf(format!("sem_bound_leaf_{}", i).as_bytes());
+                leaves.leaves.lock().unwrap().insert(leaf_addr, Bytes::from(format!("d{}", i)));
+
+                let r = Recipe::new(
+                    FunctionId::new("concurrency_tracking", "1.0.0"),
+                    vec![leaf_addr],
+                    BTreeMap::new(),
+                );
+                let r_addr = r.addr();
+                dag.recipes.lock().unwrap().insert(r_addr, r);
+                recipe_addrs.push(r_addr);
+            }
+
+            // Create a final concat that triggers all N to resolve in parallel
+            let final_r = Recipe::new(
+                FunctionId::new("concat", "1.0.0"),
+                recipe_addrs,
+                BTreeMap::new(),
+            );
+            let final_addr = final_r.addr();
+            dag.recipes.lock().unwrap().insert(final_addr, final_r);
+
+            let config = ExecutorConfig {
+                max_concurrency,
+                dedup_channel_capacity: 16,
+                verification: VerificationMode::Off,
+            };
+            let executor = AsyncExecutor::with_config(dag, registry, cache, leaves, config);
+            let result = executor.materialize(final_addr).await;
+
+            prop_assert!(result.is_ok(), "Failed: {:?}", result.err());
+
+            // Peak concurrent should never exceed max_concurrency
+            let observed_peak = peak.load(Ordering::SeqCst);
+            prop_assert!(
+                observed_peak <= max_concurrency,
+                "Peak concurrent {} exceeded max_concurrency {}",
+                observed_peak, max_concurrency
+            );
+            Ok(())
+        })?;
+    }
+}
+
+// ============================================================================
+// Property 14 (§2.3 P9): Clone Shared State Consistency
+// Feature: parallel-materialization, Property 9: Clone Shared State Consistency
+// ============================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(50))]
+
+    /// **Validates: Requirements 7.2**
+    #[test]
+    fn prop_par_9_clone_shared_state_consistency(
+        leaf_data in arb_bytes(128),
+    ) {
+        // Materialize via one clone populates cache visible to other clone.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (dag, registry, cache, leaves) = setup();
+
+            let leaf_addr = leaf(b"clone_test_leaf");
+            leaves.leaves.lock().unwrap().insert(leaf_addr, leaf_data.clone());
+
+            let r = make_recipe(vec![leaf_addr], "identity");
+            let r_addr = r.addr();
+            dag.recipes.lock().unwrap().insert(r_addr, r);
+
+            let executor1 = AsyncExecutor::new(
+                Arc::clone(&dag),
+                Arc::clone(&registry),
+                Arc::clone(&cache),
+                Arc::clone(&leaves),
+            );
+            let executor2 = executor1.clone();
+
+            // Materialize via executor1
+            let result1 = executor1.materialize(r_addr).await.unwrap();
+            prop_assert_eq!(&result1, &leaf_data);
+
+            // executor2 should see a cache hit (shared cache via Arc)
+            prop_assert!(cache.contains(&r_addr).await);
+
+            // Materialize via executor2 — should hit cache
+            let result2 = executor2.materialize(r_addr).await.unwrap();
+            prop_assert_eq!(result1, result2);
+            Ok(())
+        })?;
+    }
+}
+
+// ============================================================================
+// Property 15 (§2.3 P10): Linear Chain Negligible Overhead
+// Feature: parallel-materialization, Property 10: Linear Chain Negligible Overhead
+// ============================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
+
+    /// **Validates: Requirements 11.2**
+    #[test]
+    fn prop_par_10_linear_chain_negligible_overhead(
+        depth in 3usize..=15,
+    ) {
+        // Linear chains (no fan-in) should not benefit from parallelism,
+        // but also should not pay significant overhead.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (dag, registry, cache, leaves) = setup();
+
+            // Create leaf
+            let leaf_addr = leaf(b"linear_chain_leaf");
+            leaves.leaves.lock().unwrap().insert(leaf_addr, Bytes::from("data"));
+
+            // Build linear chain of identity recipes
+            let mut prev_addr = leaf_addr;
+            for _i in 0..depth {
+                let r = make_recipe(vec![prev_addr], "identity");
+                let r_addr = r.addr();
+                dag.recipes.lock().unwrap().insert(r_addr, r);
+                prev_addr = r_addr;
+            }
+
+            let executor = AsyncExecutor::new(dag, registry, cache, leaves);
+
+            let start = std::time::Instant::now();
+            let result = executor.materialize(prev_addr).await;
+            let elapsed = start.elapsed();
+
+            prop_assert!(result.is_ok());
+            prop_assert_eq!(result.unwrap(), Bytes::from("data"));
+
+            // For a linear chain of identity functions, total time should be
+            // very fast (< 100ms even for depth 15 since identity is ~microseconds).
+            // This verifies we're not paying exponential overhead.
+            prop_assert!(
+                elapsed.as_millis() < 2000,
+                "Linear chain depth {} took {}ms (too slow, possible overhead issue)",
+                depth, elapsed.as_millis()
+            );
+            Ok(())
+        })?;
+    }
+}

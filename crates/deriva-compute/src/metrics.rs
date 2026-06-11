@@ -88,3 +88,16 @@ lazy_static! {
         vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 30.0, 60.0]
     ).unwrap();
 }
+
+// §2.9 Size-aware mode selection metrics
+lazy_static! {
+    pub static ref MODE_SELECTION: IntCounterVec = register_int_counter_vec!(
+        "deriva_mode_selection_total",
+        "Execution mode selections by mode and reason",
+        &["mode", "reason"]
+    ).unwrap();
+    pub static ref STREAMING_THRESHOLD_GAUGE: prometheus::IntGauge = prometheus::register_int_gauge!(
+        "deriva_streaming_threshold_bytes",
+        "Configured streaming threshold in bytes"
+    ).unwrap();
+}

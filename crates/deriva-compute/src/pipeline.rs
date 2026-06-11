@@ -11,6 +11,10 @@ use crate::streaming::{
 use crate::ComputeFunction;
 use crate::metrics;
 
+/// Default streaming threshold: 3 MB.
+/// Below this, batch execution is preferred for functions that support both modes.
+pub const DEFAULT_STREAMING_THRESHOLD: usize = 3 * 1024 * 1024;
+
 /// Configuration for a streaming pipeline.
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
@@ -18,6 +22,11 @@ pub struct PipelineConfig {
     pub channel_capacity: usize,
     pub cache_intermediates: bool,
     pub memory_budget: usize,
+    /// Input size threshold in bytes. Nodes whose total input size
+    /// is below this value prefer batch execution when available.
+    /// Set to 0 to always prefer streaming (§2.7 behaviour).
+    /// Set to usize::MAX to always prefer batch.
+    pub streaming_threshold: usize,
 }
 
 impl Default for PipelineConfig {
@@ -27,6 +36,7 @@ impl Default for PipelineConfig {
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
             cache_intermediates: true,
             memory_budget: 0,
+            streaming_threshold: DEFAULT_STREAMING_THRESHOLD,
         }
     }
 }
@@ -97,6 +107,27 @@ impl StreamPipeline {
             _addr: addr, function, params, input_indices,
         });
         idx
+    }
+
+    /// Returns the known data size for a pipeline node, or `None` for computed nodes.
+    pub fn node_data_size(&self, idx: usize) -> Option<usize> {
+        match &self.nodes[idx] {
+            PipelineNode::Source { data, .. } => Some(data.len()),
+            PipelineNode::Cached { data, .. } => Some(data.len()),
+            PipelineNode::StreamingStage { .. } => None,
+            PipelineNode::BatchStage { .. } => None,
+        }
+    }
+
+    /// Returns the total known input size for a set of input node indices.
+    /// Returns `None` if any input has unknown size.
+    pub fn total_input_size(&self, input_indices: &[usize]) -> Option<usize> {
+        let mut total: usize = 0;
+        for &idx in input_indices {
+            let size = self.node_data_size(idx)?;
+            total = total.checked_add(size)?;
+        }
+        Some(total)
     }
 
     /// Execute the pipeline, returning the output stream of the last node.

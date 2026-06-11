@@ -17,6 +17,7 @@ pub struct StreamingExecutor {
 
 impl StreamingExecutor {
     pub fn new(config: PipelineConfig) -> Self {
+        crate::metrics::STREAMING_THRESHOLD_GAUGE.set(config.streaming_threshold as i64);
         Self { config }
     }
 
@@ -96,22 +97,54 @@ impl StreamingExecutor {
 
             let func_id = &recipe.function_id;
 
-            if let Some(streaming_fn) = registry.get_streaming(func_id) {
-                let params = recipe.params.iter()
-                    .map(|(k, v)| (k.clone(), format!("{}", v)))
-                    .collect();
-                let idx = pipeline.add_streaming_stage(
-                    *topo_addr, streaming_fn, params, input_indices,
-                );
-                addr_to_idx.insert(*topo_addr, idx);
-            } else if let Some(batch_fn) = registry.get(func_id) {
-                let idx = pipeline.add_batch_stage(
-                    *topo_addr, batch_fn, recipe.params.clone(), input_indices,
-                );
-                addr_to_idx.insert(*topo_addr, idx);
+            // §2.9 Size-aware mode selection
+            let input_size = pipeline.total_input_size(&input_indices);
+            let prefer_streaming = match input_size {
+                None => true,        // unknown → streaming (safe default)
+                Some(0) => true,     // empty → streaming
+                Some(s) => s >= self.config.streaming_threshold,
+            };
+
+            let has_streaming = registry.has_streaming(func_id);
+            let has_batch = registry.get(func_id).is_some();
+
+            let idx = if prefer_streaming {
+                if has_streaming {
+                    crate::metrics::MODE_SELECTION.with_label_values(&["streaming", "above_threshold"]).inc();
+                    let params = recipe.params.iter()
+                        .map(|(k, v)| (k.clone(), format!("{}", v)))
+                        .collect();
+                    pipeline.add_streaming_stage(
+                        *topo_addr, registry.get_streaming(func_id).unwrap(), params, input_indices,
+                    )
+                } else if has_batch {
+                    crate::metrics::MODE_SELECTION.with_label_values(&["batch", "no_streaming_impl"]).inc();
+                    pipeline.add_batch_stage(
+                        *topo_addr, registry.get(func_id).unwrap(), recipe.params.clone(), input_indices,
+                    )
+                } else {
+                    return Err(DerivaError::FunctionNotFound(format!("{}", func_id)));
+                }
             } else {
-                return Err(DerivaError::FunctionNotFound(format!("{}", func_id)));
-            }
+                // prefer batch for small inputs
+                if has_batch {
+                    crate::metrics::MODE_SELECTION.with_label_values(&["batch", "below_threshold"]).inc();
+                    pipeline.add_batch_stage(
+                        *topo_addr, registry.get(func_id).unwrap(), recipe.params.clone(), input_indices,
+                    )
+                } else if has_streaming {
+                    crate::metrics::MODE_SELECTION.with_label_values(&["streaming", "no_batch_impl"]).inc();
+                    let params = recipe.params.iter()
+                        .map(|(k, v)| (k.clone(), format!("{}", v)))
+                        .collect();
+                    pipeline.add_streaming_stage(
+                        *topo_addr, registry.get_streaming(func_id).unwrap(), params, input_indices,
+                    )
+                } else {
+                    return Err(DerivaError::FunctionNotFound(format!("{}", func_id)));
+                }
+            };
+            addr_to_idx.insert(*topo_addr, idx);
         }
 
         pipeline.execute().await

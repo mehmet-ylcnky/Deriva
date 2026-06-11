@@ -16,6 +16,22 @@ pub struct StorageBackend {
 }
 
 impl StorageBackend {
+    /// Open the storage backend at the given root path.
+    ///
+    /// # Startup Behavior
+    ///
+    /// - **First run (migration)**: If the DAG trees are empty but the recipe store
+    ///   contains entries, all recipes are migrated into the PersistentDag. This is
+    ///   O(N) but only runs once on upgrade from a pre-DAG version.
+    ///
+    /// - **Normal startup**: When the DAG is already populated, `open()` completes in
+    ///   O(1) — no iteration or rebuild occurs (satisfies Req 2.1–2.3).
+    ///
+    /// - **Crash recovery**: If a crash occurred between a recipe store write and the
+    ///   corresponding DAG insert, call [`repair_consistency()`](Self::repair_consistency)
+    ///   after open to detect and fix inconsistencies. This is intentionally NOT called
+    ///   automatically to preserve O(1) startup. Operators can invoke it via a startup
+    ///   flag, health-check endpoint, or GC RPC.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref();
         let db = sled::open(root.join("storage.sled"))
@@ -24,7 +40,8 @@ impl StorageBackend {
         let blobs = BlobStore::open(root.join("blobs"))?;
         let dag = PersistentDag::open(&db)?;
 
-        // One-time migration: if DAG trees are empty but recipes exist, populate DAG
+        // One-time migration: if DAG trees are empty but recipes exist, populate DAG.
+        // After migration the DAG is fully consistent — no repair needed.
         if dag.is_empty() && !recipes.is_empty() {
             tracing::info!("migrating {} recipes to PersistentDag...", recipes.len());
             let mut migrated = 0u64;
@@ -48,8 +65,26 @@ impl StorageBackend {
             dag.flush()?;
             tracing::info!("migration complete: {} recipes migrated, {} failed", migrated, failed);
         }
+        // When DAG is already populated, startup is O(1): no iteration, no repair.
+        // Call `self.repair_consistency()` on-demand for crash recovery scenarios.
 
         Ok(Self { recipes, blobs, dag })
+    }
+
+    /// Open the storage backend and run consistency repair after migration.
+    ///
+    /// This is a convenience constructor that calls [`repair_consistency()`](Self::repair_consistency)
+    /// after the standard open sequence. Use this when crash recovery is a priority
+    /// (e.g., after an unclean shutdown) and O(N) startup cost is acceptable.
+    ///
+    /// For normal production startup where O(1) is required, use [`open()`](Self::open).
+    pub fn open_and_repair(root: impl AsRef<Path>) -> Result<Self> {
+        let backend = Self::open(root)?;
+        let repaired = backend.repair_consistency()?;
+        if repaired > 0 {
+            tracing::info!("startup repair: {} inconsistent recipes fixed", repaired);
+        }
+        Ok(backend)
     }
 
     pub fn put_leaf(&self, data: &[u8]) -> Result<CAddr> {

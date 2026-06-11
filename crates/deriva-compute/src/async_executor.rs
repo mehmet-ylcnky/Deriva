@@ -87,7 +87,7 @@ impl DagReader for DagStore {
     }
 
     fn get_recipe(&self, addr: &CAddr) -> Result<Option<Recipe>> {
-        Ok(self.get_recipe(addr).cloned())
+        Ok(self.get_recipe(addr))
     }
 }
 

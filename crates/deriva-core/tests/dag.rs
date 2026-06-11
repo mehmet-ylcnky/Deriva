@@ -14,15 +14,15 @@ fn recipe(name: &str, ver: &str, inputs: Vec<CAddr>, params: BTreeMap<String, Va
 
 #[test]
 fn insert_and_retrieve() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let r = recipe("compress", "1.0.0", vec![leaf("data")], BTreeMap::new());
     let addr = dag.insert(r.clone()).unwrap();
-    assert_eq!(dag.get_recipe(&addr), Some(&r));
+    assert_eq!(dag.get_recipe(&addr), Some(r));
 }
 
 #[test]
 fn insert_idempotent() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let r = recipe("compress", "1.0.0", vec![leaf("data")], BTreeMap::new());
     let a1 = dag.insert(r.clone()).unwrap();
     let a2 = dag.insert(r).unwrap();
@@ -32,7 +32,7 @@ fn insert_idempotent() {
 
 #[test]
 fn contains_and_len() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let r = recipe("fn", "1.0.0", vec![leaf("x")], BTreeMap::new());
     let addr = dag.insert(r).unwrap();
     assert!(dag.contains(&addr));
@@ -59,7 +59,7 @@ fn get_recipe_missing() {
 
 #[test]
 fn reject_direct_self_reference() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let r = recipe("fn", "1.0.0", vec![leaf("a")], BTreeMap::new());
     let addr = r.addr();
     // Insert a recipe whose input is addr of another recipe — should succeed
@@ -71,28 +71,28 @@ fn reject_direct_self_reference() {
 
 #[test]
 fn remove_recipe() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let r = recipe("fn", "1.0.0", vec![leaf("x")], BTreeMap::new());
     let addr = dag.insert(r.clone()).unwrap();
-    assert_eq!(dag.remove(&addr), Some(r));
+    assert_eq!(dag.remove(&addr).unwrap(), true);
     assert!(!dag.contains(&addr));
     assert_eq!(dag.len(), 0);
 }
 
 #[test]
 fn remove_nonexistent() {
-    let mut dag = DagStore::new();
-    assert_eq!(dag.remove(&leaf("nope")), None);
+    let dag = DagStore::new();
+    assert_eq!(dag.remove(&leaf("nope")).unwrap(), false);
 }
 
 #[test]
 fn remove_cleans_reverse_index() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let input = leaf("data");
     let r = recipe("fn", "1.0.0", vec![input], BTreeMap::new());
     let addr = dag.insert(r).unwrap();
     assert!(dag.direct_dependents(&input).contains(&addr));
-    dag.remove(&addr);
+    dag.remove(&addr).unwrap();
     assert!(dag.direct_dependents(&input).is_empty());
 }
 
@@ -100,7 +100,7 @@ fn remove_cleans_reverse_index() {
 
 #[test]
 fn direct_dependents_single() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let input = leaf("raw");
     let r = recipe("compress", "1.0.0", vec![input], BTreeMap::new());
     let addr = dag.insert(r).unwrap();
@@ -109,7 +109,7 @@ fn direct_dependents_single() {
 
 #[test]
 fn direct_dependents_multiple() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let input = leaf("shared");
     let a1 = dag.insert(recipe("fn_a", "1.0.0", vec![input], BTreeMap::new())).unwrap();
     let a2 = dag.insert(recipe("fn_b", "1.0.0", vec![input], BTreeMap::new())).unwrap();
@@ -128,7 +128,7 @@ fn direct_dependents_none() {
 
 #[test]
 fn transitive_dependents_chain() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let a = leaf("A");
     let b = dag.insert(recipe("b", "1.0.0", vec![a], BTreeMap::new())).unwrap();
     let c = dag.insert(recipe("c", "1.0.0", vec![b], BTreeMap::new())).unwrap();
@@ -138,7 +138,7 @@ fn transitive_dependents_chain() {
 
 #[test]
 fn transitive_dependents_diamond() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let a = leaf("A");
     let b = dag.insert(recipe("b", "1.0.0", vec![a], BTreeMap::new())).unwrap();
     let c = dag.insert(recipe("c", "1.0.0", vec![a], BTreeMap::new())).unwrap();
@@ -152,7 +152,7 @@ fn transitive_dependents_diamond() {
 
 #[test]
 fn transitive_dependents_no_duplicates() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let a = leaf("A");
     let b = dag.insert(recipe("b", "1.0.0", vec![a], BTreeMap::new())).unwrap();
     let c = dag.insert(recipe("c", "1.0.0", vec![b], BTreeMap::new())).unwrap();
@@ -168,7 +168,7 @@ fn transitive_dependents_no_duplicates() {
 
 #[test]
 fn resolve_order_single_recipe() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let r = recipe("fn", "1.0.0", vec![leaf("x")], BTreeMap::new());
     let addr = dag.insert(r).unwrap();
     assert_eq!(dag.resolve_order(&addr), vec![addr]);
@@ -176,7 +176,7 @@ fn resolve_order_single_recipe() {
 
 #[test]
 fn resolve_order_chain() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let a = leaf("A");
     let b = dag.insert(recipe("b", "1.0.0", vec![a], BTreeMap::new())).unwrap();
     let c = dag.insert(recipe("c", "1.0.0", vec![b], BTreeMap::new())).unwrap();
@@ -185,7 +185,7 @@ fn resolve_order_chain() {
 
 #[test]
 fn resolve_order_diamond() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let a = leaf("A");
     let b = dag.insert(recipe("b", "1.0.0", vec![a], BTreeMap::new())).unwrap();
     let c = dag.insert(recipe("c", "1.0.0", vec![a], BTreeMap::new())).unwrap();
@@ -201,7 +201,7 @@ fn resolve_order_diamond() {
 
 #[test]
 fn resolve_order_excludes_leaves() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let a = leaf("A");
     let b = dag.insert(recipe("b", "1.0.0", vec![a], BTreeMap::new())).unwrap();
     let order = dag.resolve_order(&b);
@@ -217,7 +217,7 @@ fn resolve_order_leaf_returns_empty() {
 
 #[test]
 fn resolve_order_deep_chain() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let mut prev = leaf("start");
     let mut addrs = Vec::new();
     for i in 0..5 {
@@ -238,14 +238,14 @@ fn depth_leaf() {
 
 #[test]
 fn depth_single_recipe() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let addr = dag.insert(recipe("fn", "1.0.0", vec![leaf("x")], BTreeMap::new())).unwrap();
     assert_eq!(dag.depth(&addr), 1);
 }
 
 #[test]
 fn depth_chain() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let a = leaf("A");
     let b = dag.insert(recipe("b", "1.0.0", vec![a], BTreeMap::new())).unwrap();
     let c = dag.insert(recipe("c", "1.0.0", vec![b], BTreeMap::new())).unwrap();
@@ -258,7 +258,7 @@ fn depth_chain() {
 
 #[test]
 fn depth_diamond() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let a = leaf("A");
     let b = dag.insert(recipe("b", "1.0.0", vec![a], BTreeMap::new())).unwrap();
     let c = dag.insert(recipe("c", "1.0.0", vec![a], BTreeMap::new())).unwrap();
@@ -268,7 +268,7 @@ fn depth_diamond() {
 
 #[test]
 fn depth_asymmetric() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let a = leaf("A");
     let b = leaf("B");
     let c = dag.insert(recipe("c", "1.0.0", vec![a], BTreeMap::new())).unwrap();
@@ -283,7 +283,7 @@ fn depth_asymmetric() {
 
 #[test]
 fn depth_recipe_no_inputs() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let addr = dag.insert(recipe("generate", "1.0.0", vec![], BTreeMap::new())).unwrap();
     assert_eq!(dag.depth(&addr), 1);
 }
@@ -292,7 +292,7 @@ fn depth_recipe_no_inputs() {
 
 #[test]
 fn all_addrs_returns_all_recipes() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let a1 = dag.insert(recipe("a", "1.0.0", vec![leaf("x")], BTreeMap::new())).unwrap();
     let a2 = dag.insert(recipe("b", "1.0.0", vec![leaf("y")], BTreeMap::new())).unwrap();
     let mut addrs = dag.all_addrs();
@@ -306,7 +306,7 @@ fn all_addrs_returns_all_recipes() {
 
 #[test]
 fn many_dependents_on_single_input() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let shared = leaf("shared");
     let mut addrs = Vec::new();
     for i in 0..100 {
@@ -321,7 +321,7 @@ fn many_dependents_on_single_input() {
 
 #[test]
 fn wide_fan_in() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let inputs: Vec<CAddr> = (0..50).map(|i| leaf(&format!("input_{i}"))).collect();
     let addr = dag.insert(recipe("merge", "1.0.0", inputs.clone(), BTreeMap::new())).unwrap();
     assert_eq!(dag.depth(&addr), 1);
@@ -333,11 +333,11 @@ fn wide_fan_in() {
 
 #[test]
 fn remove_middle_of_chain_breaks_traversal() {
-    let mut dag = DagStore::new();
+    let dag = DagStore::new();
     let a = leaf("A");
     let b = dag.insert(recipe("b", "1.0.0", vec![a], BTreeMap::new())).unwrap();
     let c = dag.insert(recipe("c", "1.0.0", vec![b], BTreeMap::new())).unwrap();
-    dag.remove(&b);
+    dag.remove(&b).unwrap();
     assert!(dag.contains(&c));
     assert!(!dag.contains(&b));
     assert_eq!(dag.resolve_order(&c), vec![c]);

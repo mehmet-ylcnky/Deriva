@@ -97,7 +97,7 @@ impl SledRecipeStore {
     }
 
     pub fn rebuild_dag(&self) -> Result<DagStore> {
-        let mut dag = DagStore::new();
+        let dag = DagStore::new();
         for result in self.iter_all() {
             let (_addr, recipe) = result?;
             dag.insert(recipe)?;

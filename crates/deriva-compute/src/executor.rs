@@ -33,8 +33,7 @@ impl<'a, C: MaterializationCache, L: LeafStore> Executor<'a, C, L> {
         }
 
         let recipe = self.dag.get_recipe(addr)
-            .ok_or_else(|| DerivaError::NotFound(addr.to_string()))?
-            .clone();
+            .ok_or_else(|| DerivaError::NotFound(addr.to_string()))?;
 
         let mut input_bytes = Vec::with_capacity(recipe.inputs.len());
         for input_addr in &recipe.inputs {

@@ -64,4 +64,41 @@ impl StorageBackend {
         self.dag.insert(recipe)?;
         Ok(addr)
     }
+
+    /// Scan all recipes and re-insert any that are missing from the DAG forward index.
+    /// Returns the number of recipes repaired.
+    pub fn repair_consistency(&self) -> Result<u64> {
+        let mut repaired = 0u64;
+
+        for result in self.recipes.iter_all() {
+            let (addr, recipe) = match result {
+                Ok(pair) => pair,
+                Err(e) => {
+                    tracing::warn!("repair_consistency: skipping unreadable recipe: {}", e);
+                    continue;
+                }
+            };
+
+            if self.dag.contains(&addr) {
+                continue;
+            }
+
+            match self.dag.insert(&recipe) {
+                Ok(_) => {
+                    repaired += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("repair_consistency: failed to insert recipe {}: {}", addr, e);
+                    continue;
+                }
+            }
+        }
+
+        if repaired > 0 {
+            self.dag.flush()?;
+            tracing::info!("repair_consistency: repaired {} recipes", repaired);
+        }
+
+        Ok(repaired)
+    }
 }

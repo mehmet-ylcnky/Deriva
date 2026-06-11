@@ -4,6 +4,8 @@ use deriva_core::cache::EvictableCache;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
+use crate::metrics::{CACHE_EVICTION_TOTAL, CACHE_SIZE, CACHE_ENTRIES, CACHE_HIT_RATE};
+
 pub trait MaterializationCache {
     fn get(&mut self, addr: &CAddr) -> Option<Bytes>;
     fn put(&mut self, addr: CAddr, data: Bytes) -> u64;
@@ -66,11 +68,31 @@ impl SharedCache {
 #[async_trait]
 impl AsyncMaterializationCache for SharedCache {
     async fn get(&self, addr: &CAddr) -> Option<Bytes> {
-        self.inner.write().await.get(addr)
+        let mut inner = self.inner.write().await;
+        let result = inner.get(addr);
+        let hit_rate = inner.hit_rate();
+        CACHE_HIT_RATE.set(hit_rate);
+        result
     }
 
     async fn put(&self, addr: CAddr, data: Bytes) -> u64 {
-        self.inner.write().await.put_simple(addr, data)
+        let mut inner = self.inner.write().await;
+        let before_count = inner.entry_count();
+        let size = inner.put_simple(addr, data);
+        let after_count = inner.entry_count();
+
+        // Detect evictions: we added 1 entry, so if count didn't increase
+        // accordingly, entries were evicted.
+        if before_count >= after_count {
+            let evicted = (before_count + 1).saturating_sub(after_count);
+            CACHE_EVICTION_TOTAL.inc_by(evicted as u64);
+        }
+
+        // Update gauges to reflect current cache state
+        CACHE_SIZE.set(inner.current_size() as f64);
+        CACHE_ENTRIES.set(inner.entry_count() as f64);
+
+        size
     }
 
     async fn contains(&self, addr: &CAddr) -> bool {

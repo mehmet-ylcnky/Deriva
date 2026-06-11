@@ -34,6 +34,18 @@ lazy_static! {
         &["function"],
         vec![64.0, 256.0, 1024.0, 4096.0, 16384.0, 65536.0, 262144.0, 1048576.0]
     ).unwrap();
+    pub static ref CACHE_EVICTION_TOTAL: IntCounter = register_int_counter!(
+        "deriva_cache_eviction_total", "Total cache evictions"
+    ).unwrap();
+    pub static ref CACHE_SIZE: Gauge = register_gauge!(
+        "deriva_cache_size_bytes", "Current cache size in bytes"
+    ).unwrap();
+    pub static ref CACHE_ENTRIES: Gauge = register_gauge!(
+        "deriva_cache_entries", "Current number of cache entries"
+    ).unwrap();
+    pub static ref CACHE_HIT_RATE: Gauge = register_gauge!(
+        "deriva_cache_hit_rate", "Rolling cache hit rate"
+    ).unwrap();
 }
 
 // Streaming pipeline metrics (§2.7 §11)

@@ -83,14 +83,18 @@ impl Deriva for DerivaService {
     ) -> Result<Response<PutLeafResponse>, Status> {
         let (start, span) = begin_rpc("put_leaf");
         let _enter = span.enter();
+        let data = &request.get_ref().data;
+        let data_len = data.len();
         let result = self
             .state
             .storage
-            .put_leaf(&request.get_ref().data)
+            .put_leaf(data)
             .map_err(|e| Status::internal(e.to_string()));
         let ok = result.is_ok();
         let resp = result.map(|addr| {
             DAG_RECIPES.set(self.state.dag.len() as f64);
+            STORAGE_BLOBS.inc();
+            STORAGE_BLOB_BYTES.add(data_len as f64);
             Response::new(PutLeafResponse { addr: addr.as_bytes().to_vec() })
         });
         record_rpc("put_leaf", start, ok);
@@ -461,9 +465,12 @@ impl Deriva for DerivaService {
         &self,
         request: Request<proto::PinRequest>,
     ) -> Result<Response<proto::PinResponse>, Status> {
+        let (start, span) = begin_rpc("pin");
+        let _enter = span.enter();
         let addr = parse_addr(&request.get_ref().addr)?;
         let mut pins = self.state.pins.write().await;
         let was_new = pins.pin(addr);
+        record_rpc("pin", start, true);
         Ok(Response::new(proto::PinResponse { was_new }))
     }
 
@@ -471,9 +478,12 @@ impl Deriva for DerivaService {
         &self,
         request: Request<proto::UnpinRequest>,
     ) -> Result<Response<proto::UnpinResponse>, Status> {
+        let (start, span) = begin_rpc("unpin");
+        let _enter = span.enter();
         let addr = parse_addr(&request.get_ref().addr)?;
         let mut pins = self.state.pins.write().await;
         let was_pinned = pins.unpin(&addr);
+        record_rpc("unpin", start, true);
         Ok(Response::new(proto::UnpinResponse { was_pinned }))
     }
 
@@ -481,9 +491,12 @@ impl Deriva for DerivaService {
         &self,
         _request: Request<proto::ListPinsRequest>,
     ) -> Result<Response<proto::ListPinsResponse>, Status> {
+        let (start, span) = begin_rpc("list_pins");
+        let _enter = span.enter();
         let pins = self.state.pins.read().await;
         let addrs: Vec<Vec<u8>> = pins.list().iter().map(|a| a.as_bytes().to_vec()).collect();
         let count = addrs.len() as u64;
+        record_rpc("list_pins", start, true);
         Ok(Response::new(proto::ListPinsResponse { addrs, count }))
     }
 }

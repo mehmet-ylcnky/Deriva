@@ -35,6 +35,12 @@ pub async fn start_metrics_server(port: u16, state: Arc<ServerState>) {
         .with_state(state);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("Metrics server listening on {}", addr);
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("Failed to bind metrics server on port {}: {}. Ensure the port is not already in use.", port, e);
+            std::process::exit(1);
+        }
+    };
     axum::serve(listener, app).await.unwrap();
 }

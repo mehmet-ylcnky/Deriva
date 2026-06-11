@@ -8,7 +8,7 @@ use prometheus::{
 // Re-export compute-level metrics so service.rs can use them via `crate::metrics::*`
 pub use deriva_compute::metrics::{
     CACHE_TOTAL, COMPUTE_DURATION, COMPUTE_INPUT_BYTES, COMPUTE_OUTPUT_BYTES,
-    MAT_ACTIVE, MAT_DURATION, MAT_TOTAL,
+    MAT_ACTIVE, MAT_DURATION, MAT_TOTAL, CACHE_EVICTION_TOTAL, CACHE_HIT_RATE,
 };
 
 lazy_static! {
@@ -31,9 +31,6 @@ lazy_static! {
     ).unwrap();
     pub static ref CACHE_ENTRIES: Gauge = register_gauge!(
         "deriva_cache_entries", "Current cache entries"
-    ).unwrap();
-    pub static ref CACHE_HIT_RATE: Gauge = register_gauge!(
-        "deriva_cache_hit_rate", "Rolling cache hit rate"
     ).unwrap();
 
     // Materialization depth

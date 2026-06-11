@@ -123,11 +123,23 @@ impl PersistentDag {
     }
 
     pub fn inputs(&self, addr: &CAddr) -> Result<Option<Vec<CAddr>>> {
+        // Check forward_cache first
+        {
+            let mut cache = self.forward_cache.lock().unwrap();
+            if let Some(cached) = cache.get(addr) {
+                return Ok(Some(cached.clone()));
+            }
+        }
+
+        // Cache miss: read from sled
         match self.forward.get(addr.as_bytes())
             .map_err(|e| DerivaError::Storage(e.to_string()))? {
             Some(bytes) => {
                 let inputs: Vec<CAddr> = bincode::deserialize(&bytes)
                     .map_err(|e| DerivaError::Serialization(e.to_string()))?;
+                // Populate cache
+                let mut cache = self.forward_cache.lock().unwrap();
+                cache.put(*addr, inputs.clone());
                 Ok(Some(inputs))
             }
             None => Ok(None),
@@ -135,9 +147,22 @@ impl PersistentDag {
     }
 
     pub fn direct_dependents(&self, addr: &CAddr) -> Vec<CAddr> {
+        // Check reverse_cache first
+        {
+            let mut cache = self.reverse_cache.lock().unwrap();
+            if let Some(cached) = cache.get(addr) {
+                return cached.clone();
+            }
+        }
+
+        // Cache miss: read from sled
         match self.reverse.get(addr.as_bytes()) {
             Ok(Some(bytes)) => {
-                bincode::deserialize(&bytes).unwrap_or_default()
+                let deps: Vec<CAddr> = bincode::deserialize(&bytes).unwrap_or_default();
+                // Populate cache
+                let mut cache = self.reverse_cache.lock().unwrap();
+                cache.put(*addr, deps.clone());
+                deps
             }
             _ => Vec::new(),
         }
@@ -237,6 +262,12 @@ impl PersistentDag {
         self.forward.remove(addr.as_bytes())
             .map_err(|e| DerivaError::Storage(e.to_string()))?;
 
+        // Invalidate forward cache for removed address
+        {
+            let mut cache = self.forward_cache.lock().unwrap();
+            cache.pop(addr);
+        }
+
         for input in &inputs {
             self.remove_reverse_edge(input, addr)?;
         }
@@ -260,6 +291,9 @@ impl PersistentDag {
                 self.reverse.insert(key, bytes)
                     .map_err(|e| DerivaError::Storage(e.to_string()))?;
             }
+            // Invalidate reverse cache for this entry
+            let mut cache = self.reverse_cache.lock().unwrap();
+            cache.pop(from);
         }
         Ok(())
     }

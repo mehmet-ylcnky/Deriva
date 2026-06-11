@@ -74,9 +74,15 @@
         <p class="subtitle">Technical White Papers & Documentation</p>
         <p class="description">
             Deriva is a computation-addressed distributed file system written in Rust. Instead of naming files by path or content hash,
-            every piece of derived data is addressed by the <strong>computation that produces it</strong> — the function, its inputs, and its parameters.
-            The system stores recipes, materializes results lazily on read, caches intelligently, and evicts under storage pressure — knowing it can always recompute.
+            every piece of derived data is addressed by the <strong>computation that produces it</strong>: the function, its inputs, and its parameters.
+            The system stores recipes, materializes results lazily on read, caches intelligently, and evicts under storage pressure, knowing it can always recompute.
             This approach collapses storage, lineage tracking, and caching into a single unified layer.
+        </p>
+        <p class="description">
+            This is a research and development project, not a production-ready system. Its purpose is to explore the design space of
+            computation-addressed storage, investigate how streaming pipelines, adaptive scheduling, and content-integrity mechanisms
+            behave under this addressing model, and produce formal correctness properties validated through property-based testing.
+            The accompanying white papers document the design decisions, trade-offs, and empirical findings from each phase.
         </p>
 
         <div class="papers">

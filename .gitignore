@@ -4,6 +4,9 @@
 # Kiro IDE
 .kiro/
 
+# VSCode
+.vscode/
+
 # OS
 .DS_Store
 Thumbs.db

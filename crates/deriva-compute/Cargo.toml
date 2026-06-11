@@ -110,6 +110,8 @@ lazy_static = { workspace = true }
 [dev-dependencies]
 sled = { workspace = true }
 criterion = "0.5"
+proptest = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
 
 [[bench]]
 name = "format_benchmarks"

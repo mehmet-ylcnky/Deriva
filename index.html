@@ -60,6 +60,14 @@
         }
         .articles a:hover { background: #e8f5e9; transform: translateX(4px); }
         .articles a::before { content: "📄"; margin-right: 0.75rem; font-size: 1.1rem; }
+        .articles .article-planned {
+            display: flex; align-items: center;
+            padding: 0.75rem 1rem; background: #f5f5f5;
+            border-radius: 8px; color: #999; cursor: default;
+        }
+        .articles .article-planned::before { content: "📝"; margin-right: 0.75rem; font-size: 1.1rem; }
+        .articles .article-planned .article-title { font-weight: 500; color: #999; }
+        .articles .article-planned .article-desc { font-size: 0.85rem; color: #bbb; margin-left: auto; padding-left: 1rem; }
         .articles .article-title { font-weight: 500; }
         .articles .article-desc {
             font-size: 0.85rem; color: #666; margin-left: auto; padding-left: 1rem;
@@ -106,43 +114,81 @@
             <div class="paper">
                 <h2>Materialization Pipeline</h2>
                 <p>
-                    How Deriva materializes computed data — from error handling and fault tolerance
+                    How Deriva materializes computed data, from error handling and fault tolerance
                     to bounded-memory streaming execution. Covers structured error types, retry policies,
                     the StreamChunk protocol, 20 built-in streaming functions, auto-wrapping of batch functions,
                     pipeline construction, CAS invariant preservation, and empirical evaluation.
                 </p>
                 <ul class="articles">
                     <li>
-                        <a href="robust-materialization/">
-                            <span class="article-title">Robust Materialization in a Computation-Addressed Store</span>
-                            <span class="article-desc">Error Handling & Fault Tolerance · June 2025</span>
-                        </a>
+                        <span class="article-planned">
+                            <span class="article-title">Async DAG Execution: Concurrent Materialization in a Computation-Addressed Store</span>
+                            <span class="article-desc">Parallelism & Observability · Planned</span>
+                        </span>
                     </li>
                     <li>
-                        <a href="streaming-materialization/">
+                        <span class="article-planned">
+                            <span class="article-title">Robust Materialization in a Computation-Addressed Store</span>
+                            <span class="article-desc">Error Handling & Fault Tolerance · Planned</span>
+                        </span>
+                    </li>
+                    <li>
+                        <span class="article-planned">
                             <span class="article-title">Streaming Materialization in a Computation-Addressed Store</span>
-                            <span class="article-desc">Streaming Pipeline Design · June 2025</span>
-                        </a>
+                            <span class="article-desc">Streaming Pipeline Design · Planned</span>
+                        </span>
                     </li>
                 </ul>
             </div>
 
-            <div class="paper placeholder">
+            <div class="paper">
                 <h2>Distribution & Replication</h2>
                 <p>
                     Gossip-based node discovery, recipe replication, locality-aware compute routing,
                     and cache placement strategies for multi-node Deriva clusters.
                 </p>
-                <p class="no-articles">No articles yet</p>
+                <ul class="articles">
+                    <li>
+                        <span class="article-planned">
+                            <span class="article-title">Distributed Computation-Addressed Storage: Gossip, Replication & Locality-Aware Compute Routing</span>
+                            <span class="article-desc">Distribution & Consistency · Planned</span>
+                        </span>
+                    </li>
+                </ul>
             </div>
 
-            <div class="paper placeholder">
+            <div class="paper">
                 <h2>WASM Compute Sandbox</h2>
                 <p>
                     Deterministic execution of user-defined functions via WebAssembly.
-                    Trust boundaries, resource limits, and the native/sandboxed execution tiers.
+                    Trust boundaries, resource limits, FUSE mount, chunk-level partial reads,
+                    and the native/sandboxed execution tiers.
                 </p>
-                <p class="no-articles">No articles yet</p>
+                <ul class="articles">
+                    <li>
+                        <span class="article-planned">
+                            <span class="article-title">The Programmable Filesystem: WASM Functions, FUSE Mount & Sandboxed Computation in Storage</span>
+                            <span class="article-desc">Plugins & Filesystem Interface · Planned</span>
+                        </span>
+                    </li>
+                </ul>
+            </div>
+
+            <div class="paper">
+                <h2>Empirical Evaluation</h2>
+                <p>
+                    Comprehensive benchmarks comparing Deriva against S3+Airflow, DVC, Bazel, and Redis
+                    across diamond DAGs, deep chains, wide fan-out, repeated computations, and real-world ML pipelines.
+                    Honest evaluation of where Deriva wins and where it loses.
+                </p>
+                <ul class="articles">
+                    <li>
+                        <span class="article-planned">
+                            <span class="article-title">Computation-Addressed Storage in Practice: An Empirical Evaluation of Deriva</span>
+                            <span class="article-desc">Benchmarks & Analysis · Planned</span>
+                        </span>
+                    </li>
+                </ul>
             </div>
         </div>
     </div>

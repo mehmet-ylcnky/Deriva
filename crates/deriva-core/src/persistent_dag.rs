@@ -1,4 +1,5 @@
 use crate::address::{CAddr, Recipe};
+use crate::dag::DagAccess;
 use crate::error::{DerivaError, Result};
 use sled::{Db, Tree, Transactional};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -262,5 +263,47 @@ impl PersistentDag {
             }
         }
         live
+    }
+}
+
+impl DagAccess for PersistentDag {
+    fn insert(&self, recipe: &Recipe) -> Result<CAddr> {
+        PersistentDag::insert(self, recipe)
+    }
+
+    fn contains(&self, addr: &CAddr) -> bool {
+        PersistentDag::contains(self, addr)
+    }
+
+    fn inputs(&self, addr: &CAddr) -> Result<Option<Vec<CAddr>>> {
+        PersistentDag::inputs(self, addr)
+    }
+
+    fn direct_dependents(&self, addr: &CAddr) -> Vec<CAddr> {
+        PersistentDag::direct_dependents(self, addr)
+    }
+
+    fn transitive_dependents(&self, addr: &CAddr) -> Vec<CAddr> {
+        PersistentDag::transitive_dependents(self, addr)
+    }
+
+    fn resolve_order(&self, addr: &CAddr) -> Vec<CAddr> {
+        PersistentDag::resolve_order(self, addr)
+    }
+
+    fn depth(&self, addr: &CAddr) -> u32 {
+        PersistentDag::depth(self, addr)
+    }
+
+    fn len(&self) -> usize {
+        PersistentDag::len(self)
+    }
+
+    fn is_empty(&self) -> bool {
+        PersistentDag::is_empty(self)
+    }
+
+    fn remove(&self, addr: &CAddr) -> Result<bool> {
+        PersistentDag::remove(self, addr)
     }
 }

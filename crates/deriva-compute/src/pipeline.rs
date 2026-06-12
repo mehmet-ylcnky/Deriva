@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use deriva_core::{CAddr, DerivaError, Value};
 use deriva_core::streaming::StreamChunk;
 use crate::adaptive::{AdaptiveChunkConfig, spawn_adaptive_resizer};
+use crate::fusion::fuse_pipeline;
 use crate::streaming::{
     StreamingComputeFunction, batch_to_stream, value_to_stream,
     collect_stream, DEFAULT_CHUNK_SIZE, DEFAULT_CHANNEL_CAPACITY,
@@ -190,8 +191,28 @@ impl StreamPipeline {
         let start = std::time::Instant::now();
         metrics::STREAM_PIPELINES_TOTAL.inc();
 
+        // §2.11 Pipeline fusion: conditionally fuse adjacent fusible stages.
+        // Fusion is skipped when adaptive_chunking is enabled because fusion
+        // eliminates inter-stage channels where adaptive resizers are inserted.
+        let nodes = if self.config.enable_fusion && !self.config.adaptive_chunking {
+            let (fused_nodes, stats) = fuse_pipeline(self.nodes);
+            if stats.stages_eliminated > 0 {
+                metrics::record_fusion(stats.stages_eliminated);
+                tracing::debug!(
+                    original_count = stats.original_count,
+                    fused_count = stats.fused_count,
+                    stages_eliminated = stats.stages_eliminated,
+                    fused_groups = stats.fused_groups,
+                    "pipeline fusion applied"
+                );
+            }
+            fused_nodes
+        } else {
+            self.nodes
+        };
+
         // Pre-compute node types for adaptive chunking decisions.
-        let node_types: Vec<NodeType> = self.nodes.iter().map(|node| match node {
+        let node_types: Vec<NodeType> = nodes.iter().map(|node| match node {
             PipelineNode::Source { .. } => NodeType::Source,
             PipelineNode::Cached { .. } => NodeType::Cached,
             PipelineNode::StreamingStage { .. } => NodeType::Streaming,
@@ -199,9 +220,9 @@ impl StreamPipeline {
         }).collect();
 
         let mut outputs: Vec<Option<mpsc::Receiver<StreamChunk>>> =
-            Vec::with_capacity(self.nodes.len());
+            Vec::with_capacity(nodes.len());
 
-        for node in self.nodes {
+        for node in nodes {
             match node {
                 PipelineNode::Source { data, .. }
                 | PipelineNode::Cached { data, .. } => {

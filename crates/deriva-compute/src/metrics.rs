@@ -89,6 +89,30 @@ lazy_static! {
     ).unwrap();
 }
 
+// §2.11 Pipeline fusion metrics
+lazy_static! {
+    pub static ref FUSION_PASSES_TOTAL: IntCounter = register_int_counter!(
+        "deriva_fusion_passes_total",
+        "Total fusion optimizer passes applied"
+    ).unwrap();
+    pub static ref FUSION_STAGES_ELIMINATED: IntCounter = register_int_counter!(
+        "deriva_fusion_stages_eliminated_total",
+        "Total pipeline stages eliminated by fusion"
+    ).unwrap();
+    pub static ref FUSION_CHAINS_TOTAL: IntCounter = register_int_counter!(
+        "deriva_fusion_chains_total",
+        "Total fused groups (chains) created"
+    ).unwrap();
+}
+
+/// Record fusion metrics when stages are eliminated.
+/// Increments the fusion pass counter and accumulates the number of stages eliminated.
+pub fn record_fusion(stages_eliminated: usize) {
+    FUSION_PASSES_TOTAL.inc();
+    FUSION_STAGES_ELIMINATED.inc_by(stages_eliminated as u64);
+    FUSION_CHAINS_TOTAL.inc();
+}
+
 // §2.9 Size-aware mode selection metrics
 lazy_static! {
     pub static ref MODE_SELECTION: IntCounterVec = register_int_counter_vec!(

@@ -61,6 +61,7 @@ fn make_config(threshold: usize) -> PipelineConfig {
         adaptive_chunking: false,
         min_chunk_size: 1024,
         max_chunk_size: 1_048_576,
+        enable_fusion: true,
     }
 }
 

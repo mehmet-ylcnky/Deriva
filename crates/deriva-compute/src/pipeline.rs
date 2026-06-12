@@ -35,6 +35,10 @@ pub struct PipelineConfig {
     pub min_chunk_size: usize,
     /// Maximum chunk size the AdaptiveResizer can produce (default: 1 MB).
     pub max_chunk_size: usize,
+    /// Enable pipeline fusion (§2.11).
+    /// When true, adjacent fusible streaming stages are merged into a single
+    /// FusedMapStage to eliminate inter-stage channel hops.
+    pub enable_fusion: bool,
 }
 
 impl Default for PipelineConfig {
@@ -48,6 +52,7 @@ impl Default for PipelineConfig {
             adaptive_chunking: false,
             min_chunk_size: 1024,
             max_chunk_size: 1_048_576,
+            enable_fusion: true,
         }
     }
 }
@@ -91,7 +96,7 @@ pub(crate) enum NodeType {
     Batch,
 }
 
-enum PipelineNode {
+pub(crate) enum PipelineNode {
     Source { _addr: CAddr, data: Bytes },
     Cached { _addr: CAddr, data: Bytes },
     StreamingStage {

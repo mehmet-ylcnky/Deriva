@@ -131,6 +131,7 @@ proptest! {
                 adaptive_chunking: false,
                 min_chunk_size,
                 max_chunk_size,
+                enable_fusion: true,
             };
             let output_off = execute_pipeline(&input_data, &stages, config_off).await;
 
@@ -144,6 +145,7 @@ proptest! {
                 adaptive_chunking: true,
                 min_chunk_size,
                 max_chunk_size,
+                enable_fusion: true,
             };
             let output_on = execute_pipeline(&input_data, &stages, config_on).await;
 

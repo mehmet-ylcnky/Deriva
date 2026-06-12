@@ -113,6 +113,94 @@ criterion = "0.5"
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 
+[[test]]
+name = "format_archive_tests"
+required-features = ["format-archive"]
+
+[[test]]
+name = "format_audio_tests"
+required-features = ["format-audio"]
+
+[[test]]
+name = "format_binary_tests"
+required-features = ["format-binary"]
+
+[[test]]
+name = "format_bio_tests"
+required-features = ["format-bio"]
+
+[[test]]
+name = "format_cas_tests"
+required-features = ["format-cas"]
+
+[[test]]
+name = "format_columnar_tests"
+required-features = ["format-columnar"]
+
+[[test]]
+name = "format_config_tests"
+required-features = ["format-config"]
+
+[[test]]
+name = "format_csv_tests"
+required-features = ["format-csv"]
+
+[[test]]
+name = "format_database_tests"
+required-features = ["format-database"]
+
+[[test]]
+name = "format_detect_tests"
+required-features = ["format-detect"]
+
+[[test]]
+name = "format_document_tests"
+required-features = ["format-document"]
+
+[[test]]
+name = "format_erasure_tests"
+required-features = ["format-erasure"]
+
+[[test]]
+name = "format_geo_tests"
+required-features = ["format-geo"]
+
+[[test]]
+name = "format_image_tests"
+required-features = ["format-image"]
+
+[[test]]
+name = "format_log_tests"
+required-features = ["format-log"]
+
+[[test]]
+name = "format_ml_tests"
+required-features = ["format-ml"]
+
+[[test]]
+name = "format_network_tests"
+required-features = ["format-network"]
+
+[[test]]
+name = "format_scientific_tests"
+required-features = ["format-scientific"]
+
+[[test]]
+name = "format_serialization_tests"
+required-features = ["format-serialization"]
+
+[[test]]
+name = "format_detection_integration"
+required-features = ["format-detect"]
+
+[[test]]
+name = "cross_category_conversion"
+required-features = ["format-csv", "format-serialization", "format-detect"]
+
+[[test]]
+name = "streaming_equivalence"
+required-features = ["format-phase1", "format-phase2", "format-document", "format-geo"]
+
 [[bench]]
 name = "format_benchmarks"
 harness = false

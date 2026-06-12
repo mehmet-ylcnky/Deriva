@@ -77,7 +77,7 @@ impl ComputeFunction for SlowCountingFunction {
     fn id(&self) -> FunctionId {
         FunctionId {
             name: "slow_counting".to_string(),
-            version: "1".to_string(),
+            version: "1.0.0".to_string(),
         }
     }
 
@@ -106,7 +106,7 @@ impl ComputeFunction for OrderRecordingFunction {
     fn id(&self) -> FunctionId {
         FunctionId {
             name: "order_recording".to_string(),
-            version: "1".to_string(),
+            version: "1.0.0".to_string(),
         }
     }
 
@@ -146,7 +146,7 @@ impl ComputeFunction for DeterministicFunction {
     fn id(&self) -> FunctionId {
         FunctionId {
             name: "deterministic".to_string(),
-            version: "1".to_string(),
+            version: "1.0.0".to_string(),
         }
     }
 
@@ -757,7 +757,7 @@ impl ComputeFunction for SlowFunction {
     fn id(&self) -> FunctionId {
         FunctionId {
             name: "slow".to_string(),
-            version: "1".to_string(),
+            version: "1.0.0".to_string(),
         }
     }
 
@@ -795,7 +795,7 @@ impl ComputeFunction for ConcurrencyTrackingFunction {
     fn id(&self) -> FunctionId {
         FunctionId {
             name: "concurrency_tracking".to_string(),
-            version: "1".to_string(),
+            version: "1.0.0".to_string(),
         }
     }
 

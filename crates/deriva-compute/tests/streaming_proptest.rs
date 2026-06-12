@@ -227,6 +227,7 @@ proptest! {
                 channel_capacity: DEFAULT_CHANNEL_CAPACITY,
                 cache_intermediates: false,
                 memory_budget: 0,
+                ..Default::default()
             };
 
             let mut pipeline = StreamPipeline::new(config);

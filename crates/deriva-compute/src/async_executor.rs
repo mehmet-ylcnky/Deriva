@@ -439,10 +439,12 @@ where
             }
 
             // 3. Deduplication check - if already computing, subscribe to result
+            // 4. Register as producer (combined in single lock to avoid TOCTOU race)
+            let (tx, _rx) = broadcast::channel(self.config.dedup_channel_capacity);
             {
-                let in_flight = self.in_flight.lock().await;
-                if let Some(tx) = in_flight.get(&addr) {
-                    let mut rx = tx.subscribe();
+                let mut in_flight = self.in_flight.lock().await;
+                if let Some(existing_tx) = in_flight.get(&addr) {
+                    let mut rx = existing_tx.subscribe();
                     drop(in_flight);
                     let result = match rx.recv().await {
                         Ok(result) => result,
@@ -454,12 +456,6 @@ where
                     MAT_DURATION.observe(start.elapsed().as_secs_f64());
                     return result;
                 }
-            }
-
-            // 4. Register as producer
-            let (tx, _rx) = broadcast::channel(self.config.dedup_channel_capacity);
-            {
-                let mut in_flight = self.in_flight.lock().await;
                 in_flight.insert(addr, tx.clone());
             }
 

@@ -75,6 +75,7 @@ pub mod adaptive;
 pub mod cache;
 pub mod executor;
 pub mod function;
+pub mod fusion;
 pub mod gc;
 pub mod invalidation;
 pub mod leaf_store;

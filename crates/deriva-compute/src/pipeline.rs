@@ -47,6 +47,9 @@ pub struct PipelineConfig {
     /// `per_pipeline_max / chunk_size` permits to limit total in-flight data.
     /// When 0 (default), no per-pipeline memory limit is enforced.
     pub per_pipeline_max: usize,
+    /// Size threshold for chunk-level caching (§2.13). Values at or above this
+    /// size use ChunkCacheWriter; values below use monolithic cache. Default: 1MB.
+    pub chunk_cache_threshold: usize,
 }
 
 impl Default for PipelineConfig {
@@ -62,6 +65,7 @@ impl Default for PipelineConfig {
             max_chunk_size: 1_048_576,
             enable_fusion: true,
             per_pipeline_max: 0,
+            chunk_cache_threshold: 1_048_576,
         }
     }
 }
@@ -625,6 +629,7 @@ mod tests {
             max_chunk_size: 1_048_576,
             enable_fusion: false,
             per_pipeline_max,
+            chunk_cache_threshold: 1_048_576,
         };
         let mut pipeline = StreamPipeline::new(config);
         let addr = deriva_core::CAddr::from_bytes(&[0u8; 32]);
@@ -867,6 +872,7 @@ mod tests {
             max_chunk_size: 1_048_576,
             enable_fusion: false,
             per_pipeline_max,
+            chunk_cache_threshold: 1_048_576,
         };
         let mut pipeline = StreamPipeline::new(config);
         let addr = deriva_core::CAddr::from_bytes(&[1u8; 32]);
@@ -947,6 +953,7 @@ mod tests {
             enable_fusion: false,
             // Set per_pipeline_max = chunk_size → exactly 1 permit
             per_pipeline_max: chunk_size,
+            chunk_cache_threshold: 1_048_576,
         };
 
         // Verify clamping: MemoryController with budget == chunk_size → 1 permit

@@ -1,9 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use deriva_core::{CAddr, DerivaError};
 use deriva_core::streaming::StreamChunk;
 use crate::async_executor::DagReader;
 use crate::cache::AsyncMaterializationCache;
+use crate::chunk_cache::{ChunkBlobStore, ChunkCacheWriter};
 use crate::leaf_store::AsyncLeafStore;
 use crate::memory_budget::GlobalMemoryController;
 use crate::pipeline::{StreamPipeline, PipelineConfig};
@@ -16,10 +18,32 @@ pub struct StreamingExecutor {
     pub config: PipelineConfig,
 }
 
+/// Determines which caching strategy to use for a pipeline output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CachePathSelection {
+    /// Use monolithic cache-after-collect (small known values).
+    Monolithic,
+    /// Use ChunkCacheWriter for chunk-level caching (large or unknown size).
+    ChunkLevel,
+}
+
 impl StreamingExecutor {
     pub fn new(config: PipelineConfig) -> Self {
         crate::metrics::STREAMING_THRESHOLD_GAUGE.set(config.streaming_threshold as i64);
         Self { config }
+    }
+
+    /// Select the caching path based on output size and the configured threshold.
+    ///
+    /// - Unknown size → ChunkLevel (safe default for streaming)
+    /// - Known size < chunk_cache_threshold → Monolithic
+    /// - Known size >= chunk_cache_threshold → ChunkLevel
+    pub fn select_cache_path(&self, output_size: Option<usize>) -> CachePathSelection {
+        match output_size {
+            None => CachePathSelection::ChunkLevel,
+            Some(s) if s < self.config.chunk_cache_threshold => CachePathSelection::Monolithic,
+            Some(_) => CachePathSelection::ChunkLevel,
+        }
     }
 
     /// Topological sort using DagReader (works with any backend).
@@ -51,6 +75,11 @@ impl StreamingExecutor {
     }
 
     /// Build and execute a streaming pipeline for the given recipe DAG.
+    ///
+    /// When a `blob_store` is provided and the output's cache path is `ChunkLevel`,
+    /// the returned receiver is wrapped with `ChunkCacheWriter` so chunks are
+    /// incrementally persisted as they flow through. The returned `CachePathSelection`
+    /// tells the caller whether monolithic caching is still needed.
     pub async fn materialize_streaming(
         &self,
         addr: &CAddr,
@@ -59,7 +88,13 @@ impl StreamingExecutor {
         leaf_store: &dyn AsyncLeafStore,
         registry: &FunctionRegistry,
         global_controller: Option<&GlobalMemoryController>,
-    ) -> Result<mpsc::Receiver<StreamChunk>, DerivaError> {
+        blob_store: Option<&Arc<dyn ChunkBlobStore>>,
+    ) -> Result<(mpsc::Receiver<StreamChunk>, CachePathSelection), DerivaError> {
+        // Fast path: if the target address has a chunk manifest, stream from cache directly
+        if let Some(stream_rx) = cache.get_stream(addr, self.config.channel_capacity).await {
+            return Ok((stream_rx, CachePathSelection::Monolithic));
+        }
+
         let topo_order = Self::resolve_order(dag, addr)?;
 
         let mut pipeline = StreamPipeline::new(self.config.clone());
@@ -149,6 +184,32 @@ impl StreamingExecutor {
             addr_to_idx.insert(*topo_addr, idx);
         }
 
-        pipeline.execute(global_controller).await
+        // Determine cache path for the final output before consuming the pipeline.
+        // node_data_size returns Some only for Source/Cached nodes; for computed
+        // (function stage) nodes it returns None → defaults to ChunkLevel.
+        let final_node_size = addr_to_idx.get(addr)
+            .and_then(|&idx| pipeline.node_data_size(idx));
+        let cache_path = self.select_cache_path(final_node_size);
+
+        let rx = pipeline.execute(global_controller).await?;
+
+        // If chunk-level caching is selected and a blob store is available,
+        // wrap the output receiver with ChunkCacheWriter for incremental caching.
+        let rx = if cache_path == CachePathSelection::ChunkLevel {
+            if let Some(bs) = blob_store {
+                let writer = ChunkCacheWriter::new(
+                    *addr,
+                    self.config.chunk_size as u32,
+                    Arc::clone(bs),
+                );
+                writer.wrap(rx, self.config.channel_capacity)
+            } else {
+                rx
+            }
+        } else {
+            rx
+        };
+
+        Ok((rx, cache_path))
     }
 }

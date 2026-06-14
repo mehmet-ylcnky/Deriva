@@ -133,6 +133,7 @@ proptest! {
                 max_chunk_size,
                 enable_fusion: true,
                 per_pipeline_max: 0,
+                chunk_cache_threshold: 1_048_576,
             };
             let output_off = execute_pipeline(&input_data, &stages, config_off).await;
 
@@ -148,6 +149,7 @@ proptest! {
                 max_chunk_size,
                 enable_fusion: true,
                 per_pipeline_max: 0,
+                chunk_cache_threshold: 1_048_576,
             };
             let output_on = execute_pipeline(&input_data, &stages, config_on).await;
 

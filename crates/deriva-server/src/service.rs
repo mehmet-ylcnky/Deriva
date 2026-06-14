@@ -7,9 +7,10 @@ use deriva_core::streaming::StreamChunk;
 use deriva_compute::async_executor::CombinedDagReader;
 use deriva_compute::cache::AsyncMaterializationCache;
 use deriva_compute::invalidation::CascadeInvalidator;
+use deriva_compute::chunk_cache::ChunkBlobStore;
 use deriva_compute::pipeline::PipelineConfig;
 use deriva_compute::streaming::{collect_stream, tee_stream};
-use deriva_compute::streaming_executor::StreamingExecutor;
+use deriva_compute::streaming_executor::{StreamingExecutor, CachePathSelection};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -158,13 +159,15 @@ impl Deriva for DerivaService {
             };
             let global_ctrl: Option<&deriva_compute::memory_budget::GlobalMemoryController> =
                 (*state.global_memory_controller).as_ref();
-            let compute_rx = streaming_executor.materialize_streaming(
+            let blob_store: Arc<dyn ChunkBlobStore> = Arc::clone(&state.blobs) as Arc<dyn ChunkBlobStore>;
+            let (compute_rx, cache_path) = streaming_executor.materialize_streaming(
                 &addr, &dag_reader,
                 state.cache.as_ref(), state.blobs.as_ref(), &state.registry,
                 global_ctrl,
+                Some(&blob_store),
             ).await.map_err(|e| Status::internal(e.to_string()))?;
 
-            // Tee: client stream + background cache collector
+            // Tee: client stream + background cache collector (only for monolithic path)
             let (client_rx, cache_rx) = tee_stream(compute_rx, 8);
             let cache = Arc::clone(&state.cache);
             let cache_addr = addr;
@@ -191,8 +194,17 @@ impl Deriva for DerivaService {
             }.instrument(span));
 
             tokio::spawn(async move {
-                if let Ok(full_data) = collect_stream(cache_rx).await {
-                    cache.put(cache_addr, full_data).await;
+                // Only collect and cache monolithically if the executor didn't
+                // already handle caching via ChunkCacheWriter (chunk-level path).
+                if cache_path == CachePathSelection::Monolithic {
+                    if let Ok(full_data) = collect_stream(cache_rx).await {
+                        cache.put(cache_addr, full_data).await;
+                    }
+                } else {
+                    // ChunkLevel: caching is handled in-band by ChunkCacheWriter.
+                    // Just drain the tee'd receiver so it doesn't block.
+                    let mut rx = cache_rx;
+                    while rx.recv().await.is_some() {}
                 }
             });
 

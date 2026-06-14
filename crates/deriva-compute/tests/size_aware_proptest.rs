@@ -63,6 +63,7 @@ fn make_config(threshold: usize) -> PipelineConfig {
         max_chunk_size: 1_048_576,
         enable_fusion: true,
         per_pipeline_max: 0,
+        chunk_cache_threshold: 1_048_576,
     }
 }
 

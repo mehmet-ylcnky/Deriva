@@ -477,6 +477,87 @@ pub fn stream_from_cache(
     rx
 }
 
+// --- Range Read (partial byte-range read from cache) ---
+
+/// Read a byte range from cached chunks without loading the entire value.
+///
+/// Identifies the minimal set of chunks overlapping `[offset, offset+length)`,
+/// reads only those chunks from blob storage, trims leading/trailing bytes as
+/// needed, and returns exactly the requested bytes.
+///
+/// If `offset >= total_size` or `length == 0`, returns empty `Bytes`.
+/// If `offset + length > total_size`, the range is clamped to `total_size`.
+///
+/// Memory: pre-allocates a buffer of clamped range size, plus at most two
+/// chunk-sized temporaries for the first and last overlapping chunks.
+///
+/// On partial cache miss (any referenced chunk blob missing), cleans up the
+/// manifest and all chunk blobs, then returns an error.
+pub async fn range_read(
+    manifest: &ChunkManifest,
+    blob_store: &Arc<dyn ChunkBlobStore>,
+    offset: u64,
+    length: u64,
+) -> std::result::Result<Bytes, DerivaError> {
+    // Early return for empty reads
+    if length == 0 || offset >= manifest.total_size {
+        return Ok(Bytes::new());
+    }
+
+    // Clamp the requested range to total_size
+    let clamped_length = length.min(manifest.total_size - offset);
+    let range_end = offset + clamped_length;
+
+    // Identify overlapping chunks
+    let overlapping = manifest.chunks_for_range(offset, clamped_length);
+    if overlapping.is_empty() {
+        return Ok(Bytes::new());
+    }
+
+    // Pre-allocate output buffer
+    let mut result = Vec::with_capacity(clamped_length as usize);
+
+    for (i, entry) in overlapping.iter().enumerate() {
+        // Read chunk from blob store
+        let chunk_data = match blob_store.get_chunk(&entry.blob_key).await? {
+            Some(data) => data,
+            None => {
+                // Partial cache miss — clean up and return error
+                tracing::warn!(
+                    caddr = %manifest.caddr,
+                    blob_key = %entry.blob_key,
+                    "partial cache miss during range read, cleaning up"
+                );
+                cleanup_partial_cache_miss(blob_store, manifest).await;
+                return Err(DerivaError::NotFound(format!(
+                    "cache miss: chunk blob '{}' missing for CAddr {} during range read",
+                    entry.blob_key, manifest.caddr
+                )));
+            }
+        };
+
+        let chunk_start = entry.offset;
+        let chunk_end = entry.offset + entry.length as u64;
+
+        // Determine the slice of this chunk that falls within [offset, range_end)
+        let slice_start = if i == 0 && offset > chunk_start {
+            (offset - chunk_start) as usize
+        } else {
+            0
+        };
+
+        let slice_end = if i == overlapping.len() - 1 && range_end < chunk_end {
+            (range_end - chunk_start) as usize
+        } else {
+            chunk_data.len()
+        };
+
+        result.extend_from_slice(&chunk_data[slice_start..slice_end]);
+    }
+
+    Ok(Bytes::from(result))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1235,5 +1316,193 @@ mod tests {
             "all blobs should be removed after cleanup, but found: {:?}",
             remaining_keys
         );
+    }
+
+    // --- range_read tests ---
+
+    #[tokio::test]
+    async fn test_range_read_full_range() {
+        let caddr = test_caddr();
+        let store = Arc::new(MockBlobStore::new());
+
+        let chunk_data: Vec<Vec<u8>> = vec![
+            vec![1u8; 100],
+            vec![2u8; 100],
+            vec![3u8; 100],
+        ];
+        let manifest = setup_cached_chunks(
+            &store,
+            caddr,
+            &chunk_data.iter().map(|v| v.as_slice()).collect::<Vec<_>>(),
+        );
+
+        let bs: Arc<dyn ChunkBlobStore> = store;
+        let result = range_read(&manifest, &bs, 0, 300).await.unwrap();
+        assert_eq!(result.len(), 300);
+        assert!(result[..100].iter().all(|&b| b == 1));
+        assert!(result[100..200].iter().all(|&b| b == 2));
+        assert!(result[200..300].iter().all(|&b| b == 3));
+    }
+
+    #[tokio::test]
+    async fn test_range_read_partial_single_chunk() {
+        let caddr = test_caddr();
+        let store = Arc::new(MockBlobStore::new());
+
+        let chunk_data: Vec<Vec<u8>> = vec![
+            (0..100).map(|i| i as u8).collect(),
+        ];
+        let manifest = setup_cached_chunks(
+            &store,
+            caddr,
+            &chunk_data.iter().map(|v| v.as_slice()).collect::<Vec<_>>(),
+        );
+
+        let bs: Arc<dyn ChunkBlobStore> = store;
+        // Read bytes [10, 20)
+        let result = range_read(&manifest, &bs, 10, 10).await.unwrap();
+        assert_eq!(result.len(), 10);
+        for i in 0..10 {
+            assert_eq!(result[i], (10 + i) as u8);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_range_read_spanning_chunks_with_trim() {
+        let caddr = test_caddr();
+        let store = Arc::new(MockBlobStore::new());
+
+        let chunk_data: Vec<Vec<u8>> = vec![
+            vec![1u8; 100],
+            vec![2u8; 100],
+            vec![3u8; 100],
+        ];
+        let manifest = setup_cached_chunks(
+            &store,
+            caddr,
+            &chunk_data.iter().map(|v| v.as_slice()).collect::<Vec<_>>(),
+        );
+
+        let bs: Arc<dyn ChunkBlobStore> = store;
+        // Read bytes [50, 250) — trims first chunk's leading 50 and last chunk's trailing 50
+        let result = range_read(&manifest, &bs, 50, 200).await.unwrap();
+        assert_eq!(result.len(), 200);
+        // First 50 bytes from chunk 0 (bytes 50..100)
+        assert!(result[..50].iter().all(|&b| b == 1));
+        // Next 100 bytes from chunk 1 (all)
+        assert!(result[50..150].iter().all(|&b| b == 2));
+        // Last 50 bytes from chunk 2 (bytes 0..50)
+        assert!(result[150..200].iter().all(|&b| b == 3));
+    }
+
+    #[tokio::test]
+    async fn test_range_read_clamps_beyond_total_size() {
+        let caddr = test_caddr();
+        let store = Arc::new(MockBlobStore::new());
+
+        let chunk_data: Vec<Vec<u8>> = vec![
+            vec![7u8; 100],
+        ];
+        let manifest = setup_cached_chunks(
+            &store,
+            caddr,
+            &chunk_data.iter().map(|v| v.as_slice()).collect::<Vec<_>>(),
+        );
+
+        let bs: Arc<dyn ChunkBlobStore> = store;
+        // Request 200 bytes but only 100 are available
+        let result = range_read(&manifest, &bs, 0, 200).await.unwrap();
+        assert_eq!(result.len(), 100);
+        assert!(result.iter().all(|&b| b == 7));
+    }
+
+    #[tokio::test]
+    async fn test_range_read_offset_beyond_total_size() {
+        let caddr = test_caddr();
+        let store = Arc::new(MockBlobStore::new());
+
+        let chunk_data: Vec<Vec<u8>> = vec![
+            vec![1u8; 100],
+        ];
+        let manifest = setup_cached_chunks(
+            &store,
+            caddr,
+            &chunk_data.iter().map(|v| v.as_slice()).collect::<Vec<_>>(),
+        );
+
+        let bs: Arc<dyn ChunkBlobStore> = store;
+        // Offset past end
+        let result = range_read(&manifest, &bs, 200, 50).await.unwrap();
+        assert_eq!(result.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_range_read_zero_length() {
+        let caddr = test_caddr();
+        let store = Arc::new(MockBlobStore::new());
+
+        let chunk_data: Vec<Vec<u8>> = vec![
+            vec![1u8; 100],
+        ];
+        let manifest = setup_cached_chunks(
+            &store,
+            caddr,
+            &chunk_data.iter().map(|v| v.as_slice()).collect::<Vec<_>>(),
+        );
+
+        let bs: Arc<dyn ChunkBlobStore> = store;
+        let result = range_read(&manifest, &bs, 0, 0).await.unwrap();
+        assert_eq!(result.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_range_read_cache_miss_triggers_cleanup() {
+        let caddr = test_caddr();
+        let store = Arc::new(MockBlobStore::new());
+
+        // Build a manifest but don't store the chunk blobs
+        let mut builder = ChunkManifestBuilder::new(caddr, 100);
+        builder.add_chunk(100, format!("{}_chunk_0", caddr.to_hex()));
+        builder.add_chunk(100, format!("{}_chunk_100", caddr.to_hex()));
+        let manifest = builder.build();
+
+        // Store the manifest key so cleanup can remove it
+        let mkey = manifest_key(&caddr);
+        let manifest_bytes = manifest.to_bytes().unwrap();
+        store
+            .blobs
+            .lock()
+            .unwrap()
+            .insert(mkey.clone(), manifest_bytes);
+
+        let bs: Arc<dyn ChunkBlobStore> = store.clone();
+        let result = range_read(&manifest, &bs, 0, 50).await;
+        assert!(result.is_err());
+
+        // Manifest should have been cleaned up
+        assert!(store.get_blob(&mkey).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_range_read_partial_last_chunk() {
+        let caddr = test_caddr();
+        let store = Arc::new(MockBlobStore::new());
+
+        let chunk_data: Vec<Vec<u8>> = vec![
+            vec![1u8; 100],
+            vec![2u8; 100],
+        ];
+        let manifest = setup_cached_chunks(
+            &store,
+            caddr,
+            &chunk_data.iter().map(|v| v.as_slice()).collect::<Vec<_>>(),
+        );
+
+        let bs: Arc<dyn ChunkBlobStore> = store;
+        // Read [0, 150) — full first chunk, partial second chunk
+        let result = range_read(&manifest, &bs, 0, 150).await.unwrap();
+        assert_eq!(result.len(), 150);
+        assert!(result[..100].iter().all(|&b| b == 1));
+        assert!(result[100..150].iter().all(|&b| b == 2));
     }
 }

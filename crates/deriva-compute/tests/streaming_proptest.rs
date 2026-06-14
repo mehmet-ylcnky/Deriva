@@ -241,7 +241,7 @@ proptest! {
                 vec![src_idx],
             );
 
-            let out_rx = pipeline.execute().await.unwrap();
+            let out_rx = pipeline.execute(None).await.unwrap();
             let result = collect_stream(out_rx).await.unwrap();
             assert_eq!(result.as_ref(), data.as_slice());
         });

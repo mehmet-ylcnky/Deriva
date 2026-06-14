@@ -53,7 +53,7 @@ async fn test_fusion_enabled_vs_disabled_byte_identical() {
             HashMap::new(),
             vec![idx_lower],
         );
-        let rx = pipeline.execute().await.unwrap();
+        let rx = pipeline.execute(None).await.unwrap();
         collect_stream(rx).await.unwrap()
     };
 
@@ -83,7 +83,7 @@ async fn test_fusion_enabled_vs_disabled_byte_identical() {
             HashMap::new(),
             vec![idx_lower],
         );
-        let rx = pipeline.execute().await.unwrap();
+        let rx = pipeline.execute(None).await.unwrap();
         collect_stream(rx).await.unwrap()
     };
 
@@ -120,7 +120,7 @@ async fn test_fusion_xor_roundtrip_enabled_vs_disabled() {
             xor_params.clone(),
             vec![idx_enc],
         );
-        let rx = pipeline.execute().await.unwrap();
+        let rx = pipeline.execute(None).await.unwrap();
         collect_stream(rx).await.unwrap()
     };
 
@@ -144,7 +144,7 @@ async fn test_fusion_xor_roundtrip_enabled_vs_disabled() {
             xor_params.clone(),
             vec![idx_enc],
         );
-        let rx = pipeline.execute().await.unwrap();
+        let rx = pipeline.execute(None).await.unwrap();
         collect_stream(rx).await.unwrap()
     };
 
@@ -199,7 +199,7 @@ async fn test_mixed_pipeline_fusible_accumulator_fusible() {
             HashMap::new(),
             vec![idx_count],
         );
-        let rx = pipeline.execute().await.unwrap();
+        let rx = pipeline.execute(None).await.unwrap();
         collect_stream(rx).await.unwrap()
     };
 
@@ -252,7 +252,7 @@ async fn test_mixed_pipeline_two_fused_groups_around_accumulator() {
             HashMap::new(),
             vec![idx_id1],
         );
-        let rx = pipeline.execute().await.unwrap();
+        let rx = pipeline.execute(None).await.unwrap();
         collect_stream(rx).await.unwrap()
     };
 
@@ -293,7 +293,7 @@ async fn test_mixed_pipeline_two_fused_groups_around_accumulator() {
             HashMap::new(),
             vec![idx_id1],
         );
-        let rx = pipeline.execute().await.unwrap();
+        let rx = pipeline.execute(None).await.unwrap();
         collect_stream(rx).await.unwrap()
     };
 
@@ -339,7 +339,7 @@ async fn test_cancellation_drop_receiver_mid_stream() {
         vec![idx_lower],
     );
 
-    let mut rx = pipeline.execute().await.unwrap();
+    let mut rx = pipeline.execute(None).await.unwrap();
 
     // Receive a few chunks then drop
     let _chunk1 = rx.recv().await;
@@ -388,7 +388,7 @@ async fn test_large_pipeline_20_plus_stages() {
                 vec![prev],
             );
         }
-        let rx = pipeline.execute().await.unwrap();
+        let rx = pipeline.execute(None).await.unwrap();
         collect_stream(rx).await.unwrap()
     };
 
@@ -413,7 +413,7 @@ async fn test_large_pipeline_20_plus_stages() {
                 vec![prev],
             );
         }
-        let rx = pipeline.execute().await.unwrap();
+        let rx = pipeline.execute(None).await.unwrap();
         collect_stream(rx).await.unwrap()
     };
 
@@ -486,7 +486,7 @@ async fn test_large_pipeline_with_multiple_fused_groups() {
             );
         }
 
-        let rx = pipeline.execute().await.unwrap();
+        let rx = pipeline.execute(None).await.unwrap();
         collect_stream(rx).await.unwrap()
     };
 
@@ -540,7 +540,7 @@ async fn test_large_pipeline_with_multiple_fused_groups() {
             );
         }
 
-        let rx = pipeline.execute().await.unwrap();
+        let rx = pipeline.execute(None).await.unwrap();
         collect_stream(rx).await.unwrap()
     };
 
@@ -594,7 +594,7 @@ async fn test_enable_fusion_false_skips_optimizer() {
         vec![idx_upper2],
     );
 
-    let rx = pipeline.execute().await.unwrap();
+    let rx = pipeline.execute(None).await.unwrap();
     let result = collect_stream(rx).await.unwrap();
 
     // upper -> lower -> upper -> identity = uppercase
@@ -650,7 +650,7 @@ async fn test_enable_fusion_false_matches_enabled_output() {
                 params,
                 vec![idx_id],
             );
-            let rx = pipeline.execute().await.unwrap();
+            let rx = pipeline.execute(None).await.unwrap();
             collect_stream(rx).await.unwrap()
         }
     };

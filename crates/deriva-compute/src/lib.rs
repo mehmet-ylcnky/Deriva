@@ -79,6 +79,7 @@ pub mod fusion;
 pub mod gc;
 pub mod invalidation;
 pub mod leaf_store;
+pub mod memory_budget;
 pub mod metrics;
 pub mod pipeline;
 pub mod registry;
@@ -88,4 +89,7 @@ pub mod streaming_executor;
 pub use async_executor::AsyncExecutor;
 pub use executor::Executor;
 pub use function::{ComputeCost, ComputeError, ComputeFunction};
+pub use memory_budget::{
+    BudgetedReceiver, BudgetedSender, ChunkGuard, GlobalMemoryController, MemoryController,
+};
 pub use registry::FunctionRegistry;

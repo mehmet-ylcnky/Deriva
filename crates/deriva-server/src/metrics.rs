@@ -9,6 +9,7 @@ use prometheus::{
 pub use deriva_compute::metrics::{
     CACHE_TOTAL, COMPUTE_DURATION, COMPUTE_INPUT_BYTES, COMPUTE_OUTPUT_BYTES,
     MAT_ACTIVE, MAT_DURATION, MAT_TOTAL, CACHE_EVICTION_TOTAL, CACHE_HIT_RATE,
+    CACHE_SIZE, CACHE_ENTRIES,
 };
 
 lazy_static! {
@@ -23,14 +24,6 @@ lazy_static! {
     ).unwrap();
     pub static ref RPC_ACTIVE: GaugeVec = register_gauge_vec!(
         "deriva_rpc_active", "In-flight RPCs", &["method"]
-    ).unwrap();
-
-    // Cache gauges (set by status RPC)
-    pub static ref CACHE_SIZE: Gauge = register_gauge!(
-        "deriva_cache_size_bytes", "Current cache size"
-    ).unwrap();
-    pub static ref CACHE_ENTRIES: Gauge = register_gauge!(
-        "deriva_cache_entries", "Current cache entries"
     ).unwrap();
 
     // Materialization depth

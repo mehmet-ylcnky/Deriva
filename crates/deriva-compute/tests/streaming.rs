@@ -253,7 +253,7 @@ async fn test_pipeline_streaming_concat_then_uppercase() {
     let _idx_upper = pipeline.add_streaming_stage(
         test_addr("upper"), Arc::new(StreamingUppercase), HashMap::new(), vec![idx_concat],
     );
-    let out = pipeline.execute().await.unwrap();
+    let out = pipeline.execute(None).await.unwrap();
     assert_eq!(collect_stream(out).await.unwrap(), Bytes::from("HELLO WORLD"));
 }
 
@@ -269,7 +269,7 @@ async fn test_pipeline_large_data_backpressure() {
     let _idx_id = pipeline.add_streaming_stage(
         test_addr("id"), Arc::new(StreamingIdentity), HashMap::new(), vec![idx_a],
     );
-    let out = pipeline.execute().await.unwrap();
+    let out = pipeline.execute(None).await.unwrap();
     let result = collect_stream(out).await.unwrap();
     assert_eq!(result.len(), 1_000_000);
     assert_eq!(result, data);
@@ -555,7 +555,7 @@ async fn test_pipeline_compress_then_decompress() {
     let _idx_dec = pipeline.add_streaming_stage(
         test_addr("dec"), Arc::new(StreamingDecompress), HashMap::new(), vec![idx_comp],
     );
-    let out = pipeline.execute().await.unwrap();
+    let out = pipeline.execute(None).await.unwrap();
     assert_eq!(collect_stream(out).await.unwrap(), Bytes::from("hello world"));
 }
 
@@ -575,6 +575,6 @@ async fn test_pipeline_take_skip_compose() {
     let _idx_take = pipeline.add_streaming_stage(
         test_addr("take"), Arc::new(StreamingTake), take_params, vec![idx_skip],
     );
-    let out = pipeline.execute().await.unwrap();
+    let out = pipeline.execute(None).await.unwrap();
     assert_eq!(collect_stream(out).await.unwrap(), Bytes::from("lo wo"));
 }

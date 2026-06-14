@@ -5,6 +5,7 @@ use deriva_core::streaming::StreamChunk;
 use crate::async_executor::DagReader;
 use crate::cache::AsyncMaterializationCache;
 use crate::leaf_store::AsyncLeafStore;
+use crate::memory_budget::GlobalMemoryController;
 use crate::pipeline::{StreamPipeline, PipelineConfig};
 use crate::registry::FunctionRegistry;
 
@@ -57,6 +58,7 @@ impl StreamingExecutor {
         cache: &dyn AsyncMaterializationCache,
         leaf_store: &dyn AsyncLeafStore,
         registry: &FunctionRegistry,
+        global_controller: Option<&GlobalMemoryController>,
     ) -> Result<mpsc::Receiver<StreamChunk>, DerivaError> {
         let topo_order = Self::resolve_order(dag, addr)?;
 
@@ -147,6 +149,6 @@ impl StreamingExecutor {
             addr_to_idx.insert(*topo_addr, idx);
         }
 
-        pipeline.execute().await
+        pipeline.execute(global_controller).await
     }
 }

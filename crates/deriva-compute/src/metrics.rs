@@ -138,4 +138,27 @@ lazy_static! {
         "Resize event count by stage and direction",
         &["stage", "direction"]
     ).unwrap();
+    /// §2.12 Tracks how often memory budget pressure suppresses or forces
+    /// adaptive resize decisions (growth suppressed or forced shrink).
+    pub static ref ADAPTIVE_BUDGET_SUPPRESS_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "deriva_adaptive_budget_suppress_total",
+        "Adaptive resize decisions overridden by memory budget pressure",
+        &["stage", "action"]
+    ).unwrap();
+}
+
+// §2.12 Memory budget enforcement metrics
+lazy_static! {
+    pub static ref MEMORY_BUDGET_BYTES: Gauge = register_gauge!(
+        "deriva_memory_budget_bytes",
+        "Configured global memory budget limit in bytes"
+    ).unwrap();
+    pub static ref MEMORY_BUDGET_UTILIZATION: Gauge = register_gauge!(
+        "deriva_memory_budget_utilization",
+        "Ratio of held permits to total permits (0.0-1.0)"
+    ).unwrap();
+    pub static ref MEMORY_BUDGET_WAIT_TOTAL: IntCounter = register_int_counter!(
+        "deriva_memory_budget_wait_total",
+        "Total backpressure events where a producer blocked waiting for a permit"
+    ).unwrap();
 }

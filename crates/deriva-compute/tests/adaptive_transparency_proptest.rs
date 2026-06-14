@@ -81,7 +81,7 @@ async fn execute_pipeline(
         );
     }
 
-    let rx = pipeline.execute().await.unwrap();
+    let rx = pipeline.execute(None).await.unwrap();
     collect_stream(rx).await.unwrap()
 }
 
@@ -132,6 +132,7 @@ proptest! {
                 min_chunk_size,
                 max_chunk_size,
                 enable_fusion: true,
+                per_pipeline_max: 0,
             };
             let output_off = execute_pipeline(&input_data, &stages, config_off).await;
 
@@ -146,6 +147,7 @@ proptest! {
                 min_chunk_size,
                 max_chunk_size,
                 enable_fusion: true,
+                per_pipeline_max: 0,
             };
             let output_on = execute_pipeline(&input_data, &stages, config_on).await;
 

@@ -11,7 +11,8 @@ use std::time::Instant;
 use bytes::BytesMut;
 use tokio::sync::mpsc;
 
-use crate::metrics::{ADAPTIVE_CHUNK_SIZE_BYTES, ADAPTIVE_RESIZE_EVENTS_TOTAL};
+use crate::memory_budget::MemoryController;
+use crate::metrics::{ADAPTIVE_BUDGET_SUPPRESS_TOTAL, ADAPTIVE_CHUNK_SIZE_BYTES, ADAPTIVE_RESIZE_EVENTS_TOTAL};
 use deriva_core::streaming::StreamChunk;
 
 /// Minimum chunk size the AdaptiveResizer can shrink to (1 KB).
@@ -283,6 +284,9 @@ pub(crate) fn compute_target_chunk_size(
 /// - `capacity` — channel capacity for the output receiver
 /// - `config` — per-stage adaptive chunking configuration
 /// - `stage_name` — label for observability (currently unused, reserved for metrics)
+/// - `memory_controller` — optional per-pipeline `MemoryController` for budget-aware
+///   resize decisions (§2.12). When present, growth is suppressed under memory pressure
+///   and shrink is forced when permits are exhausted.
 ///
 /// # Behavior
 ///
@@ -290,6 +294,10 @@ pub(crate) fn compute_target_chunk_size(
 ///   at `target_chunk_size`.
 /// - On each emission cycle: updates the `ThroughputProbe` and invokes
 ///   `compute_target_chunk_size` to adjust the target (after at least 3 chunks).
+/// - §2.12 budget integration: after computing the new target, if a `MemoryController`
+///   is present:
+///   - If available permits < 25% of total: suppress growth (keep current size)
+///   - If available permits = 0: force shrink (apply shrink_factor)
 /// - On `End` or channel closure: flushes remaining buffer as a partial chunk,
 ///   emits `End`.
 /// - On `Error`: forwards the error immediately without flushing.
@@ -303,6 +311,7 @@ pub(crate) fn spawn_adaptive_resizer(
     capacity: usize,
     config: AdaptiveChunkConfig,
     stage_name: &str,
+    memory_controller: Option<MemoryController>,
 ) -> mpsc::Receiver<StreamChunk> {
     let (tx, out_rx) = mpsc::channel(capacity);
     let stage_name = stage_name.to_owned();
@@ -346,7 +355,7 @@ pub(crate) fn spawn_adaptive_resizer(
                         if chunks_emitted >= 3 {
                             let ratio = probe.ratio();
                             let old_target = target_chunk_size;
-                            target_chunk_size = compute_target_chunk_size(
+                            let mut new_target = compute_target_chunk_size(
                                 ratio,
                                 target_chunk_size,
                                 min,
@@ -356,6 +365,36 @@ pub(crate) fn spawn_adaptive_resizer(
                                 config.grow_ratio,
                                 config.shrink_ratio,
                             );
+
+                            // §2.12 Budget-aware override: check memory pressure
+                            // BEFORE accepting the computed target.
+                            if let Some(ref ctrl) = memory_controller {
+                                let available = ctrl.available();
+                                let total = ctrl.total_permits();
+
+                                if available == 0 {
+                                    // Zero permits available: force shrink regardless
+                                    // of what compute_target_chunk_size decided.
+                                    let forced_shrink = ((target_chunk_size as f64)
+                                        * config.shrink_factor)
+                                        as usize;
+                                    new_target = forced_shrink.clamp(min, max);
+                                    ADAPTIVE_BUDGET_SUPPRESS_TOTAL
+                                        .with_label_values(&[&stage_name, "force_shrink"])
+                                        .inc();
+                                } else if available < total / 4 {
+                                    // Available < 25% of total: suppress growth.
+                                    // If the computed target is larger, revert to current.
+                                    if new_target > target_chunk_size {
+                                        new_target = target_chunk_size.clamp(min, max);
+                                        ADAPTIVE_BUDGET_SUPPRESS_TOTAL
+                                            .with_label_values(&[&stage_name, "suppress_growth"])
+                                            .inc();
+                                    }
+                                }
+                            }
+
+                            target_chunk_size = new_target;
 
                             // Record metrics on resize events
                             if target_chunk_size != old_target {

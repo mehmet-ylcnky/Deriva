@@ -52,7 +52,7 @@ async fn test_multi_stage_pipeline_adaptive_chunking_correct_output() {
         vec![idx_upper],
     );
 
-    let out = pipeline.execute().await.unwrap();
+    let out = pipeline.execute(None).await.unwrap();
     let result = collect_stream(out).await.unwrap();
 
     // Compute expected: SHA-256 of uppercased input
@@ -98,7 +98,7 @@ async fn test_adaptive_chunking_metrics_are_accessible() {
         vec![idx_upper],
     );
 
-    let out = pipeline.execute().await.unwrap();
+    let out = pipeline.execute(None).await.unwrap();
     let _result = collect_stream(out).await.unwrap();
 
     // Verify that the ADAPTIVE_CHUNK_SIZE_BYTES metric is accessible and
@@ -171,7 +171,7 @@ async fn test_streaming_chunk_resizer_works_with_adaptive_chunking_enabled() {
         params.clone(),
         vec![idx_src],
     );
-    let out = pipeline.execute().await.unwrap();
+    let out = pipeline.execute(None).await.unwrap();
     let result_adaptive = collect_stream(out).await.unwrap();
 
     // With adaptive_chunking = false
@@ -187,7 +187,7 @@ async fn test_streaming_chunk_resizer_works_with_adaptive_chunking_enabled() {
         params,
         vec![idx_src2],
     );
-    let out2 = pipeline2.execute().await.unwrap();
+    let out2 = pipeline2.execute(None).await.unwrap();
     let result_non_adaptive = collect_stream(out2).await.unwrap();
 
     // Both should produce the same correct concatenated output
@@ -232,7 +232,7 @@ async fn test_adaptive_vs_non_adaptive_produces_identical_output() {
         HashMap::new(),
         vec![idx_id],
     );
-    let out_a = pipeline_adaptive.execute().await.unwrap();
+    let out_a = pipeline_adaptive.execute(None).await.unwrap();
     let result_adaptive = collect_stream(out_a).await.unwrap();
 
     // Run with adaptive_chunking = false
@@ -262,7 +262,7 @@ async fn test_adaptive_vs_non_adaptive_produces_identical_output() {
         HashMap::new(),
         vec![idx_id2],
     );
-    let out_b = pipeline_non.execute().await.unwrap();
+    let out_b = pipeline_non.execute(None).await.unwrap();
     let result_non_adaptive = collect_stream(out_b).await.unwrap();
 
     assert_eq!(
@@ -309,7 +309,7 @@ async fn test_large_data_pipeline_with_adaptive_chunking() {
         vec![idx_upper],
     );
 
-    let out = pipeline.execute().await.unwrap();
+    let out = pipeline.execute(None).await.unwrap();
     let result = collect_stream(out).await.unwrap();
 
     // 'x' uppercased is 'X'

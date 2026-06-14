@@ -156,9 +156,12 @@ impl Deriva for DerivaService {
                 dag: Arc::clone(&state.dag),
                 recipes: Arc::clone(&state.recipes),
             };
+            let global_ctrl: Option<&deriva_compute::memory_budget::GlobalMemoryController> =
+                (*state.global_memory_controller).as_ref();
             let compute_rx = streaming_executor.materialize_streaming(
                 &addr, &dag_reader,
                 state.cache.as_ref(), state.blobs.as_ref(), &state.registry,
+                global_ctrl,
             ).await.map_err(|e| Status::internal(e.to_string()))?;
 
             // Tee: client stream + background cache collector

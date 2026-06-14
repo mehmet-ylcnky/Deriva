@@ -62,6 +62,7 @@ fn make_config(threshold: usize) -> PipelineConfig {
         min_chunk_size: 1024,
         max_chunk_size: 1_048_576,
         enable_fusion: true,
+        per_pipeline_max: 0,
     }
 }
 
@@ -287,7 +288,7 @@ proptest! {
                     BTreeMap::new(),
                     vec![src_idx],
                 );
-                let rx = pipeline.execute().await.unwrap();
+                let rx = pipeline.execute(None).await.unwrap();
                 let result = collect_stream(rx).await.unwrap();
                 assert_eq!(result.as_ref(), data.as_slice(),
                     "batch path must produce correct output for data below threshold");
@@ -304,7 +305,7 @@ proptest! {
                     HashMap::new(),
                     vec![src_idx],
                 );
-                let rx = pipeline.execute().await.unwrap();
+                let rx = pipeline.execute(None).await.unwrap();
                 let result = collect_stream(rx).await.unwrap();
                 assert_eq!(result.as_ref(), data.as_slice(),
                     "streaming path must produce correct output for data at/above threshold");
@@ -342,7 +343,7 @@ proptest! {
                 HashMap::new(),
                 vec![src_idx],
             );
-            let rx = pipeline.execute().await.unwrap();
+            let rx = pipeline.execute(None).await.unwrap();
             let result = collect_stream(rx).await.unwrap();
             assert_eq!(result.as_ref(), data.as_slice(),
                 "fallback to streaming must produce correct output");
@@ -359,7 +360,7 @@ proptest! {
                 BTreeMap::new(),
                 vec![src_idx2],
             );
-            let rx2 = pipeline2.execute().await.unwrap();
+            let rx2 = pipeline2.execute(None).await.unwrap();
             let result2 = collect_stream(rx2).await.unwrap();
             assert_eq!(result2.as_ref(), data.as_slice(),
                 "fallback to batch must produce correct output");
@@ -394,7 +395,7 @@ proptest! {
                 HashMap::new(),
                 vec![src_s],
             );
-            let rx_stream = pipeline_stream.execute().await.unwrap();
+            let rx_stream = pipeline_stream.execute(None).await.unwrap();
             let result_stream = collect_stream(rx_stream).await.unwrap();
 
             // Execute via batch path
@@ -407,7 +408,7 @@ proptest! {
                 BTreeMap::new(),
                 vec![src_b],
             );
-            let rx_batch = pipeline_batch.execute().await.unwrap();
+            let rx_batch = pipeline_batch.execute(None).await.unwrap();
             let result_batch = collect_stream(rx_batch).await.unwrap();
 
             // Both must produce identical output
@@ -448,7 +449,7 @@ async fn integration_small_input_batch_path() {
         vec![src],
     );
 
-    let rx = pipeline.execute().await.unwrap();
+    let rx = pipeline.execute(None).await.unwrap();
     let result = collect_stream(rx).await.unwrap();
     assert_eq!(result.as_ref(), data.as_slice());
 }
@@ -478,7 +479,7 @@ async fn integration_large_input_streaming_path() {
         vec![src],
     );
 
-    let rx = pipeline.execute().await.unwrap();
+    let rx = pipeline.execute(None).await.unwrap();
     let result = collect_stream(rx).await.unwrap();
     assert_eq!(result.as_ref(), data.as_slice());
 }
@@ -528,7 +529,7 @@ async fn integration_hybrid_pipeline_mixed_inputs() {
         HashMap::new(),
         vec![s],
     );
-    let rx = p_small.execute().await.unwrap();
+    let rx = p_small.execute(None).await.unwrap();
     let res = collect_stream(rx).await.unwrap();
     assert_eq!(res.as_ref(), small_data.as_slice());
 
@@ -541,7 +542,7 @@ async fn integration_hybrid_pipeline_mixed_inputs() {
         HashMap::new(),
         vec![l],
     );
-    let rx = p_large.execute().await.unwrap();
+    let rx = p_large.execute(None).await.unwrap();
     let res = collect_stream(rx).await.unwrap();
     assert_eq!(res.as_ref(), large_data.as_slice());
 }
@@ -575,7 +576,7 @@ async fn integration_threshold_zero_always_streaming() {
         HashMap::new(),
         vec![src],
     );
-    let rx = pipeline.execute().await.unwrap();
+    let rx = pipeline.execute(None).await.unwrap();
     let result = collect_stream(rx).await.unwrap();
     assert_eq!(result.as_ref(), data.as_slice());
 
@@ -589,7 +590,7 @@ async fn integration_threshold_zero_always_streaming() {
         HashMap::new(),
         vec![src2],
     );
-    let rx2 = pipeline2.execute().await.unwrap();
+    let rx2 = pipeline2.execute(None).await.unwrap();
     let result2 = collect_stream(rx2).await.unwrap();
 
     assert_eq!(result, result2, "threshold=0 must behave identically to always-streaming");

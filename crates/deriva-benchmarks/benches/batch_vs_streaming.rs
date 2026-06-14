@@ -32,7 +32,7 @@ fn run_streaming(
         let mut p = StreamPipeline::new(PipelineConfig::default());
         let s = p.add_source(addr("src"), input);
         p.add_streaming_stage(addr("op"), f, params, vec![s]);
-        collect_stream(p.execute().await.unwrap()).await.unwrap()
+        collect_stream(p.execute(None).await.unwrap()).await.unwrap()
     })
 }
 
@@ -203,7 +203,7 @@ fn s11_pipeline_3stage(c: &mut Criterion) {
                 let s1 = p.add_streaming_stage(addr("up"), Arc::new(StreamingUppercase), HashMap::new(), vec![s]);
                 let s2 = p.add_streaming_stage(addr("lo"), Arc::new(StreamingLowercase), HashMap::new(), vec![s1]);
                 p.add_streaming_stage(addr("sha"), Arc::new(StreamingSha256), HashMap::new(), vec![s2]);
-                collect_stream(p.execute().await.unwrap()).await.unwrap()
+                collect_stream(p.execute(None).await.unwrap()).await.unwrap()
             })
         })
     });
@@ -230,7 +230,7 @@ fn s12_compress_encrypt(c: &mut Criterion) {
                 let s = p.add_source(addr("src"), input.clone());
                 let s1 = p.add_streaming_stage(addr("cmp"), Arc::new(StreamingCompress), HashMap::new(), vec![s]);
                 p.add_streaming_stage(addr("xor"), Arc::new(StreamingXor), sp_xor.clone(), vec![s1]);
-                collect_stream(p.execute().await.unwrap()).await.unwrap()
+                collect_stream(p.execute(None).await.unwrap()).await.unwrap()
             })
         })
     });
@@ -265,7 +265,7 @@ fn s14_chunk_size_impact(c: &mut Criterion) {
                     let mut p = StreamPipeline::new(cfg);
                     let s = p.add_source(addr("src"), input.clone());
                     p.add_streaming_stage(addr("up"), Arc::new(StreamingUppercase), HashMap::new(), vec![s]);
-                    collect_stream(p.execute().await.unwrap()).await.unwrap()
+                    collect_stream(p.execute(None).await.unwrap()).await.unwrap()
                 })
             })
         });
@@ -301,7 +301,7 @@ fn s15_pipeline_5stage(c: &mut Criterion) {
                 let s3 = p.add_streaming_stage(addr("b64e"), Arc::new(StreamingBase64Encode), HashMap::new(), vec![s2]);
                 let s4 = p.add_streaming_stage(addr("b64d"), Arc::new(StreamingBase64Decode), HashMap::new(), vec![s3]);
                 p.add_streaming_stage(addr("sha"), Arc::new(StreamingSha256), HashMap::new(), vec![s4]);
-                collect_stream(p.execute().await.unwrap()).await.unwrap()
+                collect_stream(p.execute(None).await.unwrap()).await.unwrap()
             })
         })
     });

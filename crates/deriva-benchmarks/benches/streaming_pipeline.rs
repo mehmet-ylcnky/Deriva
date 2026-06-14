@@ -28,7 +28,7 @@ fn bench_streaming_vs_batch_1mb(c: &mut Criterion) {
                     HashMap::new(),
                     vec![s],
                 );
-                let rx = p.execute().await.unwrap();
+                let rx = p.execute(None).await.unwrap();
                 collect_stream(rx).await.unwrap()
             })
         });
@@ -50,7 +50,7 @@ fn bench_streaming_vs_batch_100mb(c: &mut Criterion) {
                     HashMap::new(),
                     vec![s],
                 );
-                let rx = p.execute().await.unwrap();
+                let rx = p.execute(None).await.unwrap();
                 collect_stream(rx).await.unwrap()
             })
         });
@@ -83,7 +83,7 @@ fn bench_streaming_3_stage_pipeline(c: &mut Criterion) {
                     HashMap::new(),
                     vec![s2],
                 );
-                let rx = p.execute().await.unwrap();
+                let rx = p.execute(None).await.unwrap();
                 collect_stream(rx).await.unwrap()
             })
         });
@@ -104,7 +104,7 @@ fn bench_backpressure_slow_consumer(c: &mut Criterion) {
                     HashMap::new(),
                     vec![s],
                 );
-                let mut rx = p.execute().await.unwrap();
+                let mut rx = p.execute(None).await.unwrap();
                 let mut total = 0usize;
                 loop {
                     match rx.recv().await {
@@ -138,7 +138,7 @@ fn bench_chunk_size_comparison(c: &mut Criterion) {
                         HashMap::new(),
                         vec![s],
                     );
-                    let rx = p.execute().await.unwrap();
+                    let rx = p.execute(None).await.unwrap();
                     collect_stream(rx).await.unwrap()
                 })
             });

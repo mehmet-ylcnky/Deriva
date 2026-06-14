@@ -1614,6 +1614,7 @@ dependencies = [
  "arrow",
  "async-trait",
  "base64",
+ "bincode",
  "blake3",
  "brotli 7.0.0",
  "bson",

@@ -73,6 +73,7 @@ pub mod builtins_format;
 
 pub mod adaptive;
 pub mod cache;
+pub mod chunk_cache;
 pub mod executor;
 pub mod function;
 pub mod fusion;

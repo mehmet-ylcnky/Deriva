@@ -112,11 +112,72 @@ impl BlobStore {
         }
         Ok(total)
     }
+
+    // --- String-keyed blob operations for chunk caching ---
+
+    /// Compute the path for a string-keyed blob using the first 4 chars as shard prefix.
+    fn keyed_blob_path(&self, key: &str) -> PathBuf {
+        if key.len() >= 4 {
+            self.root.join(&key[..2]).join(&key[2..4]).join(key)
+        } else {
+            self.root.join("_short").join(key)
+        }
+    }
+
+    /// Store a blob at the given string key. Returns the number of bytes written.
+    pub fn put_by_key(&self, key: &str, data: &[u8]) -> Result<u64> {
+        let path = self.keyed_blob_path(key);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| DerivaError::Storage(e.to_string()))?;
+        }
+        fs::write(&path, data).map_err(|e| DerivaError::Storage(e.to_string()))?;
+        Ok(data.len() as u64)
+    }
+
+    /// Read a blob by its string key. Returns None if not found.
+    pub fn get_by_key(&self, key: &str) -> Result<Option<Bytes>> {
+        let path = self.keyed_blob_path(key);
+        match fs::read(&path) {
+            Ok(data) => Ok(Some(Bytes::from(data))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(DerivaError::Storage(e.to_string())),
+        }
+    }
+
+    /// Remove a blob by its string key. Returns true if removed, false if not found.
+    pub fn remove_by_key(&self, key: &str) -> Result<bool> {
+        let path = self.keyed_blob_path(key);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(DerivaError::Storage(e.to_string())),
+        }
+    }
 }
 
 impl LeafStore for BlobStore {
     fn get_leaf(&self, addr: &CAddr) -> Option<Bytes> {
         self.get(addr).ok().flatten()
+    }
+}
+
+// --- ChunkBlobStore implementation for BlobStore ---
+
+use deriva_compute::chunk_cache::ChunkBlobStore;
+
+#[async_trait::async_trait]
+impl ChunkBlobStore for BlobStore {
+    async fn put_chunk(&self, key: &str, data: &[u8]) -> std::result::Result<(), DerivaError> {
+        self.put_by_key(key, data)?;
+        Ok(())
+    }
+
+    async fn get_chunk(&self, key: &str) -> std::result::Result<Option<Bytes>, DerivaError> {
+        self.get_by_key(key)
+    }
+
+    async fn remove_chunk(&self, key: &str) -> std::result::Result<bool, DerivaError> {
+        self.remove_by_key(key)
     }
 }
 

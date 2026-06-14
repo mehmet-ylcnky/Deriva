@@ -1,0 +1,12 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3f8e5c3b2152534c854001713e40faacc0237646e393d0d29267cdd42d52be01 # shrinks to num_inputs = 2
+cc d03757e2064ac33b86a4889e1bb6a2f53d1d5e509a53c88d5f951588f6a73bf6 # shrinks to num_inputs = 2
+cc e1c479cdd6ef46fb8ee4e85761d09a4b0174f5a3328a96e43ed1dcc5812d0806 # shrinks to num_concurrent = 2
+cc e534a3ef49845e276c1fa2f2c4d8ff6a17d5000ce714c265b319eabc15d9fc0a # shrinks to max_concurrency = 2, num_recipes = 6
+cc 35e00a3de875b4350f7b2d99c03fd1ea584c33d6fd4bb8e25b69aac04c2690e4 # shrinks to input_data = b"\0"
+cc a6430e66cfb285ec14b7eda135d24373896995619019267377cce2df87189edb # shrinks to num_concurrent = 6

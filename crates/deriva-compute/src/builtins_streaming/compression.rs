@@ -40,7 +40,7 @@ impl StreamingComputeFunction for StreamingZstdDecompress {
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, _params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "ZstdDecompress");
         spawn_map(rx, CAP, |chunk| {
-            zstd::decode_all(chunk).map(Bytes::from).map_err(|e| e.to_string())
+            zstd::decode_all(chunk).map(Bytes::from).map_err(|e| format!("zstd decompress: {e}"))
         })
     }
 }
@@ -64,7 +64,7 @@ impl StreamingComputeFunction for StreamingLz4Decompress {
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, _params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "Lz4Decompress");
         spawn_map(rx, CAP, |chunk| {
-            lz4_flex::decompress_size_prepended(chunk).map(Bytes::from).map_err(|e| e.to_string())
+            lz4_flex::decompress_size_prepended(chunk).map(Bytes::from).map_err(|e| format!("lz4 decompress: {e}"))
         })
     }
 }
@@ -90,7 +90,7 @@ impl StreamingComputeFunction for StreamingSnappyDecompress {
         let rx = take_one(&mut inputs, "SnappyDecompress");
         spawn_map(rx, CAP, |chunk| {
             let mut dec = snap::raw::Decoder::new();
-            dec.decompress_vec(chunk).map(Bytes::from).map_err(|e| e.to_string())
+            dec.decompress_vec(chunk).map(Bytes::from).map_err(|e| format!("snappy decompress: {e}"))
         })
     }
 }
@@ -124,7 +124,7 @@ impl StreamingComputeFunction for StreamingBrotliDecompress {
         let rx = take_one(&mut inputs, "BrotliDecompress");
         spawn_map(rx, CAP, |chunk| {
             let mut out = Vec::new();
-            brotli::Decompressor::new(chunk, 4096).read_to_end(&mut out).map_err(|e| e.to_string())?;
+            brotli::Decompressor::new(chunk, 4096).read_to_end(&mut out).map_err(|e| format!("brotli decompress: {e}"))?;
             Ok(Bytes::from(out))
         })
     }

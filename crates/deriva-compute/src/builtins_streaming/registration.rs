@@ -39,7 +39,7 @@ pub fn register_streaming_builtins(registry: &mut FunctionRegistry) {
     registry.register_streaming(Arc::new(StreamingDecrypt), sid("streaming_decrypt"));
     registry.register_streaming(Arc::new(StreamingAeadEncrypt), sid("streaming_aead_encrypt"));
     registry.register_streaming(Arc::new(StreamingAeadDecrypt), sid("streaming_aead_decrypt"));
-    registry.register_streaming(Arc::new(StreamingHmacSha256), sid("streaming_hmac"));
+    registry.register_streaming(Arc::new(StreamingHmacSha256), sid("streaming_hmac_sha256"));
     registry.register_streaming(Arc::new(StreamingMd5), sid("streaming_md5"));
     registry.register_streaming(Arc::new(StreamingSha512), sid("streaming_sha512"));
     registry.register_streaming(Arc::new(StreamingBlake3), sid("streaming_blake3"));

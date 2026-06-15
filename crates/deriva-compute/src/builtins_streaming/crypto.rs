@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::mpsc;
 use deriva_core::streaming::StreamChunk;
-use crate::streaming::{StreamingComputeFunction, DEFAULT_CHANNEL_CAPACITY, DEFAULT_CHUNK_SIZE};
+use crate::streaming::{StreamingComputeFunction, DEFAULT_CHANNEL_CAPACITY};
 use super::core::{spawn_map_stateful, spawn_accumulate, take_one};
 
 fn hex_decode(s: &str, name: &str) -> Result<Vec<u8>, String> {
@@ -271,8 +271,8 @@ impl StreamingComputeFunction for StreamingRedact {
             Ok(v) => v,
             Err(e) => return error_stream(e).await,
         };
-        super::core::spawn_buffered(rx, DEFAULT_CHANNEL_CAPACITY, DEFAULT_CHUNK_SIZE, move |b| {
-            let mut text = String::from_utf8_lossy(&b).into_owned();
+        super::core::spawn_boundary_map(rx, DEFAULT_CHANNEL_CAPACITY, move |chunk| {
+            let mut text = String::from_utf8_lossy(chunk).into_owned();
             for re in &regexes {
                 text = re.replace_all(&text, "[REDACTED]").into_owned();
             }

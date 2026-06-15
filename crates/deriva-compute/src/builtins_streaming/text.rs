@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use deriva_core::streaming::StreamChunk;
 use crate::streaming::StreamingComputeFunction;
 use super::core::{take_one, spawn_boundary_map, spawn_buffered};
+use encoding_rs;
 
 fn error_stream(msg: String) -> mpsc::Receiver<StreamChunk> {
     let (tx, rx) = mpsc::channel(1);
@@ -168,20 +169,30 @@ impl StreamingComputeFunction for StreamingGrep {
         let invert = params.get("invert").is_some_and(|v| v == "true");
         let re = match regex::Regex::new(&pattern) {
             Ok(r) => r,
-            Err(e) => return error_stream(format!("invalid regex: {e}")),
+            Err(e) => return error_stream(format!("regex: compilation failed: invalid regex: {e}")),
         };
         spawn_boundary_map(rx, 2, move |chunk| {
             let text = String::from_utf8_lossy(chunk);
             let mut out = String::new();
-            for line in text.split('\n') {
-                let matches = re.is_match(line);
-                if matches != invert {
-                    if !out.is_empty() { out.push('\n'); }
-                    out.push_str(line);
+            // Process each line preserving its terminator
+            let mut start = 0;
+            for (i, c) in text.char_indices() {
+                if c == '\n' {
+                    let line = &text[start..i]; // line content without \n
+                    let matches = re.is_match(line);
+                    if matches != invert {
+                        out.push_str(&text[start..=i]); // include the \n
+                    }
+                    start = i + 1;
                 }
             }
-            if !out.is_empty() && text.ends_with('\n') {
-                out.push('\n');
+            // Handle trailing content (partial line without terminating \n)
+            if start < text.len() {
+                let line = &text[start..];
+                let matches = re.is_match(line);
+                if matches != invert {
+                    out.push_str(line);
+                }
             }
             Ok(Bytes::from(out))
         })
@@ -203,7 +214,7 @@ impl StreamingComputeFunction for StreamingSed {
         let replacement = params.get("replacement").cloned().unwrap_or_default();
         let re = match regex::Regex::new(&pattern) {
             Ok(r) => r,
-            Err(e) => return error_stream(format!("invalid regex: {e}")),
+            Err(e) => return error_stream(format!("regex: compilation failed: invalid regex: {e}")),
         };
         spawn_boundary_map(rx, 2, move |chunk| {
             let text = String::from_utf8_lossy(chunk);
@@ -238,61 +249,77 @@ impl StreamingComputeFunction for StreamingTruncateLines {
 
 pub struct StreamingCharsetConvert;
 
+/// Normalize encoding labels to WHATWG-compatible labels for encoding_rs
+fn normalize_encoding_label(label: &str) -> &str {
+    match label {
+        "utf8" => "utf-8",
+        "utf16le" => "utf-16le",
+        "utf16be" => "utf-16be",
+        "latin1" => "iso-8859-1",
+        other => other,
+    }
+}
+
 #[async_trait]
 impl StreamingComputeFunction for StreamingCharsetConvert {
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "StreamingCharsetConvert");
-        let from = params.get("from").cloned().unwrap_or_else(|| "utf8".into());
-        let to = params.get("to").cloned().unwrap_or_else(|| "utf8".into());
+        let from = params.get("from").cloned().unwrap_or_else(|| "utf-8".into());
+        let to = params.get("to").cloned().unwrap_or_else(|| "utf-8".into());
+
+        // Special-case ASCII: encoding_rs maps it to windows-1252,
+        // but we need strict ASCII validation.
+        let from_is_ascii = matches!(from.as_str(), "ascii" | "us-ascii");
+        let to_is_ascii = matches!(to.as_str(), "ascii" | "us-ascii");
+
+        let from_label = normalize_encoding_label(&from);
+        let to_label = normalize_encoding_label(&to);
+
+        let from_enc = if from_is_ascii {
+            encoding_rs::UTF_8 // We'll validate ASCII separately
+        } else {
+            match encoding_rs::Encoding::for_label(from_label.as_bytes()) {
+                Some(enc) => enc,
+                None => return error_stream(format!("charset: unsupported encoding '{from}'")),
+            }
+        };
+        let to_enc = if to_is_ascii {
+            encoding_rs::UTF_8 // We'll validate ASCII separately
+        } else {
+            match encoding_rs::Encoding::for_label(to_label.as_bytes()) {
+                Some(enc) => enc,
+                None => return error_stream(format!("charset: unsupported encoding '{to}'")),
+            }
+        };
+
         spawn_buffered(rx, 2, 64 * 1024, move |buf| {
-            let text = match from.as_str() {
-                "latin1" | "iso-8859-1" => buf.iter().map(|&b| b as char).collect::<String>(),
-                "utf8" | "utf-8" => std::str::from_utf8(&buf).map_err(|e| format!("utf8 decode: {e}"))?.to_string(),
-                "ascii" => {
-                    if buf.iter().any(|&b| b > 127) { return Err("non-ascii byte in input".into()); }
-                    std::str::from_utf8(&buf).map_err(|e| format!("ascii: {e}"))?.to_string()
+            // Decode from source encoding to internal string
+            let decoded: String = if from_is_ascii {
+                // Strict ASCII validation
+                if buf.iter().any(|&b| b > 127) {
+                    return Err("charset: non-ascii byte in input".into());
                 }
-                "utf16le" => {
-                    if buf.len() % 2 != 0 { return Err("utf16le: odd byte count".into()); }
-                    let u16s: Vec<u16> = buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-                    String::from_utf16(&u16s).map_err(|e| format!("utf16le: {e}"))?
+                String::from_utf8(buf.to_vec()).map_err(|e| format!("charset: {e}"))?
+            } else {
+                let (cow, _, had_errors) = from_enc.decode(&buf);
+                if had_errors {
+                    return Err(format!("charset: invalid {} input", from_enc.name()));
                 }
-                "utf16be" => {
-                    if buf.len() % 2 != 0 { return Err("utf16be: odd byte count".into()); }
-                    let u16s: Vec<u16> = buf.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
-                    String::from_utf16(&u16s).map_err(|e| format!("utf16be: {e}"))?
-                }
-                _ => return Err(format!("unsupported source encoding: {from}")),
+                cow.into_owned()
             };
-            match to.as_str() {
-                "utf8" | "utf-8" => Ok(Bytes::from(text)),
-                "latin1" | "iso-8859-1" => {
-                    let mut out = Vec::with_capacity(text.len());
-                    for c in text.chars() {
-                        if c as u32 > 255 { return Err(format!("unmappable char for latin1: {c}")); }
-                        out.push(c as u8);
-                    }
-                    Ok(Bytes::from(out))
+
+            // Encode from internal string to target encoding
+            if to_is_ascii {
+                if decoded.bytes().any(|b| b > 127) {
+                    return Err("charset: non-ascii characters in output".into());
                 }
-                "ascii" => {
-                    let mut out = Vec::with_capacity(text.len());
-                    for c in text.chars() {
-                        if !c.is_ascii() { return Err(format!("unmappable char for ascii: {c}")); }
-                        out.push(c as u8);
-                    }
-                    Ok(Bytes::from(out))
+                Ok(Bytes::from(decoded.into_bytes()))
+            } else {
+                let (encoded, _, had_errors) = to_enc.encode(&decoded);
+                if had_errors {
+                    return Err(format!("charset: unmappable characters for {}", to_enc.name()));
                 }
-                "utf16le" => {
-                    let mut out = Vec::new();
-                    for u in text.encode_utf16() { out.extend_from_slice(&u.to_le_bytes()); }
-                    Ok(Bytes::from(out))
-                }
-                "utf16be" => {
-                    let mut out = Vec::new();
-                    for u in text.encode_utf16() { out.extend_from_slice(&u.to_be_bytes()); }
-                    Ok(Bytes::from(out))
-                }
-                _ => Err(format!("unsupported target encoding: {to}")),
+                Ok(Bytes::from(encoded.into_owned()))
             }
         })
     }

@@ -264,7 +264,7 @@ async fn byteswap_double_inverse() {
 async fn entropy_uniform_byte() {
     // All same byte → entropy = 0.0
     let out = run_one(&StreamingEntropy, vec![&[0xAA; 100]], &hp(&[])).await;
-    let h = f64::from_be_bytes(out[..8].try_into().unwrap());
+    let h: f64 = std::str::from_utf8(&out).unwrap().parse().unwrap();
     assert!((h - 0.0).abs() < 1e-9);
 }
 
@@ -273,14 +273,17 @@ async fn entropy_two_values() {
     // Equal distribution of 2 values → entropy = 1.0 bit
     let data: Vec<u8> = (0..100).map(|i| if i % 2 == 0 { 0 } else { 1 }).collect();
     let out = run_one(&StreamingEntropy, vec![&data], &hp(&[])).await;
-    let h = f64::from_be_bytes(out[..8].try_into().unwrap());
+    let h: f64 = std::str::from_utf8(&out).unwrap().parse().unwrap();
     assert!((h - 1.0).abs() < 0.01);
 }
 
 #[tokio::test]
 async fn entropy_output_8_bytes() {
+    // Output is an ASCII decimal string, not 8-byte binary
     let out = run_one(&StreamingEntropy, vec![b"hello"], &hp(&[])).await;
-    assert_eq!(out.len(), 8);
+    // Verify it's a parseable f64 string in range [0.0, 8.0]
+    let h: f64 = std::str::from_utf8(&out).unwrap().parse().unwrap();
+    assert!(h >= 0.0 && h <= 8.0);
 }
 
 #[tokio::test]
@@ -295,7 +298,7 @@ async fn entropy_high_for_random() {
     // 256 distinct bytes → entropy close to 8.0
     let data: Vec<u8> = (0..=255).collect();
     let out = run_one(&StreamingEntropy, vec![&data], &hp(&[])).await;
-    let h = f64::from_be_bytes(out[..8].try_into().unwrap());
+    let h: f64 = std::str::from_utf8(&out).unwrap().parse().unwrap();
     assert!(h > 7.9);
 }
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::mpsc;
@@ -22,13 +22,14 @@ pub struct StreamingSum;
 impl StreamingComputeFunction for StreamingSum {
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, _params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "Sum");
-        spawn_accumulate(rx, (0.0f64, Vec::<u8>::new()), |state, chunk| {
-            state.1.extend_from_slice(chunk);
+        spawn_accumulate(rx, Vec::<u8>::new(), |state, chunk| {
+            state.extend_from_slice(chunk);
         }, |state| {
-            let text = String::from_utf8_lossy(&state.1);
+            let text = String::from_utf8_lossy(&state);
             let sum: f64 = text.lines().filter(|l| !l.trim().is_empty()).filter_map(|l| l.trim().parse::<f64>().ok()).sum();
-            let s = if sum == 0.0 { "0".to_string() } else { sum.to_string() };
-            Bytes::from(s)
+            // Normalize -0.0 to 0.0 for clean output
+            let sum = sum + 0.0;
+            Bytes::from(sum.to_string())
         })
     }
 }
@@ -127,7 +128,7 @@ impl StreamingComputeFunction for StreamingByteSwap {
     }
 }
 
-// #99 StreamingEntropy — Shannon entropy in bits
+// #99 StreamingEntropy — Shannon entropy in bits/byte (ASCII decimal string output)
 pub struct StreamingEntropy;
 #[async_trait]
 impl StreamingComputeFunction for StreamingEntropy {
@@ -137,18 +138,20 @@ impl StreamingComputeFunction for StreamingEntropy {
             for &b in chunk { state.0[b as usize] += 1; state.1 += 1; }
         }, |state| {
             let (freq, total) = state;
-            if total == 0 { return Bytes::from(0.0f64.to_be_bytes().to_vec()); }
+            if total == 0 { return Bytes::from("0.0"); }
             let t = total as f64;
             let h: f64 = freq.iter().filter(|&&c| c > 0).map(|&c| {
                 let p = c as f64 / t;
                 -p * p.log2()
             }).sum();
-            Bytes::from(h.to_be_bytes().to_vec())
+            // Clamp to [0.0, 8.0] range (Shannon entropy max for bytes)
+            let h = h.clamp(0.0, 8.0);
+            Bytes::from(h.to_string())
         })
     }
 }
 
-// #100 StreamingRollingHash — Rabin fingerprint, append 8-byte hash per chunk
+// #100 StreamingRollingHash — Rabin fingerprint over sliding window, append 8-byte hash per chunk
 pub struct StreamingRollingHash;
 #[async_trait]
 impl StreamingComputeFunction for StreamingRollingHash {
@@ -164,13 +167,21 @@ impl StreamingComputeFunction for StreamingRollingHash {
         let mut base_pow = 1u64;
         for _ in 0..window_size { base_pow = (base_pow as u128 * base as u128 % modulus as u128) as u64; }
 
+        // Maintain sliding window state across chunks
+        let mut window: VecDeque<u8> = VecDeque::with_capacity(window_size);
+        let mut hash: u64 = 0;
+
         spawn_map_stateful(rx, DEFAULT_CAP, move |chunk| {
-            // We keep a simple rolling hash state in captured vars via interior pattern
-            // For simplicity: compute Rabin hash over the last `window_size` bytes of the chunk
-            let mut hash: u64 = 0;
-            let start = if chunk.len() > window_size { chunk.len() - window_size } else { 0 };
-            for &b in &chunk[start..] {
+            // Process each byte through the rolling hash, maintaining window state
+            for &b in chunk {
+                if window.len() >= window_size {
+                    // Remove oldest byte from hash
+                    let old = window.pop_front().unwrap();
+                    hash = ((hash as u128 + modulus as u128 - (old as u128 * base_pow as u128 % modulus as u128)) % modulus as u128) as u64;
+                }
+                // Add new byte to hash
                 hash = ((hash as u128 * base as u128 + b as u128) % modulus as u128) as u64;
+                window.push_back(b);
             }
             let mut out = chunk.to_vec();
             out.extend_from_slice(&hash.to_be_bytes());

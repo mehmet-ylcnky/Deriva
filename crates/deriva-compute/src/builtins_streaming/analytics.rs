@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::hash::{Hash, Hasher};
 use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::mpsc;
@@ -227,9 +226,7 @@ impl StreamingComputeFunction for StreamingTail {
 pub struct StreamingDeduplicate;
 
 fn hash_chunk(data: &[u8]) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    data.hash(&mut h);
-    h.finish()
+    xxhash_rust::xxh64::xxh64(data, 0)
 }
 
 #[async_trait]

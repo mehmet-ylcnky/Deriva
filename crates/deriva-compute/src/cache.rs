@@ -59,11 +59,18 @@ pub trait AsyncMaterializationCache: Send + Sync {
 /// Wraps EvictableCache with tokio RwLock for async access
 pub struct SharedCache {
     inner: RwLock<EvictableCache>,
+    /// Tracks the last value reported to the CACHE_SIZE gauge, set atomically
+    /// during put under the same lock. Useful for testing gauge correctness
+    /// without reading the racy global Prometheus gauge.
+    last_reported_size: std::sync::atomic::AtomicU64,
 }
 
 impl SharedCache {
     pub fn new(cache: EvictableCache) -> Self {
-        Self { inner: RwLock::new(cache) }
+        Self {
+            inner: RwLock::new(cache),
+            last_reported_size: std::sync::atomic::AtomicU64::new(0),
+        }
     }
 
     pub async fn entry_count(&self) -> usize {
@@ -76,6 +83,13 @@ impl SharedCache {
 
     pub async fn hit_rate(&self) -> f64 {
         self.inner.read().await.hit_rate()
+    }
+
+    /// Returns the last cache size value that was reported to the CACHE_SIZE gauge.
+    /// This is set atomically during `put`, so it reflects what the gauge was set to
+    /// without the race condition of reading the global Prometheus gauge directly.
+    pub fn last_reported_size(&self) -> u64 {
+        self.last_reported_size.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub async fn remove(&self, addr: &CAddr) -> Option<Bytes> {
@@ -111,7 +125,9 @@ impl AsyncMaterializationCache for SharedCache {
         }
 
         // Update gauges to reflect current cache state
-        CACHE_SIZE.set(inner.current_size() as f64);
+        let current_size = inner.current_size();
+        CACHE_SIZE.set(current_size as f64);
+        self.last_reported_size.store(current_size, std::sync::atomic::Ordering::SeqCst);
         CACHE_ENTRIES.set(inner.entry_count() as f64);
 
         size

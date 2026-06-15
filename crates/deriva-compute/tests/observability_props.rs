@@ -184,11 +184,14 @@ async fn test_cache_size_reflects_actual_size() {
     cache.put(addr1, data1).await;
     cache.put(addr2, data2).await;
 
-    let reported_size = CACHE_SIZE.get();
+    // Use last_reported_size() which is set atomically during put, avoiding
+    // the race condition of reading the global Prometheus gauge that concurrent
+    // tests may overwrite.
+    let reported_size = cache.last_reported_size();
     let actual_size = cache.current_size().await;
 
     assert_eq!(
-        reported_size as u64, actual_size,
+        reported_size, actual_size,
         "CACHE_SIZE gauge ({}) should match actual cache size ({})",
         reported_size, actual_size
     );

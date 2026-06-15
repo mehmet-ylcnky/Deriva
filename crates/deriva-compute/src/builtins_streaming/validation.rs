@@ -116,8 +116,10 @@ impl StreamingComputeFunction for StreamingMagicBytes {
                         if !checked {
                             checked = true;
                             if !chunk.starts_with(&expected) {
+                                let actual_len = expected.len().min(chunk.len());
+                                let actual_hex = to_hex(&chunk[..actual_len]);
                                 let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(
-                                    format!("magic bytes mismatch: expected {expected_hex}")
+                                    format!("magic bytes mismatch: expected {expected_hex}, got {actual_hex}")
                                 ))).await;
                                 return;
                             }
@@ -187,12 +189,12 @@ impl StreamingComputeFunction for StreamingChecksumVerify {
         let (tx, out) = mpsc::channel(2);
         tokio::spawn(async move {
             let mut hasher = crc32fast::Hasher::new();
-            let mut forwarded = Vec::new();
             loop {
                 match rx.recv().await {
                     Some(StreamChunk::Data(chunk)) => {
                         hasher.update(&chunk);
-                        forwarded.push(chunk);
+                        // Forward Data chunks downstream during accumulation (Req 4.9)
+                        if tx.send(StreamChunk::Data(chunk)).await.is_err() { return; }
                     }
                     Some(StreamChunk::End) | None => break,
                     Some(StreamChunk::Error(e)) => { let _ = tx.send(StreamChunk::Error(e)).await; return; }
@@ -204,9 +206,6 @@ impl StreamingComputeFunction for StreamingChecksumVerify {
                     format!("crc32 mismatch: expected {expected}, got {actual}")
                 ))).await;
                 return;
-            }
-            for chunk in forwarded {
-                if tx.send(StreamChunk::Data(chunk)).await.is_err() { return; }
             }
             let _ = tx.send(StreamChunk::End).await;
         });
@@ -233,12 +232,12 @@ impl StreamingComputeFunction for StreamingSha256Verify {
         tokio::spawn(async move {
             use sha2::{Sha256, Digest};
             let mut hasher = Sha256::new();
-            let mut forwarded = Vec::new();
             loop {
                 match rx.recv().await {
                     Some(StreamChunk::Data(chunk)) => {
                         hasher.update(&chunk);
-                        forwarded.push(chunk);
+                        // Forward Data chunks downstream during accumulation (Req 4.9)
+                        if tx.send(StreamChunk::Data(chunk)).await.is_err() { return; }
                     }
                     Some(StreamChunk::End) | None => break,
                     Some(StreamChunk::Error(e)) => { let _ = tx.send(StreamChunk::Error(e)).await; return; }
@@ -250,9 +249,6 @@ impl StreamingComputeFunction for StreamingSha256Verify {
                     format!("sha256 mismatch: expected {expected}, got {actual}")
                 ))).await;
                 return;
-            }
-            for chunk in forwarded {
-                if tx.send(StreamChunk::Data(chunk)).await.is_err() { return; }
             }
             let _ = tx.send(StreamChunk::End).await;
         });

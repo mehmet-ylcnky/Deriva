@@ -91,7 +91,7 @@ async fn caddr_embed_preserves_data() {
 
 #[tokio::test]
 async fn caddr_verify_correct() {
-    let hash = to_hex(&Sha256::digest(b"hello"));
+    let hash = CAddr::from_bytes(b"hello").to_hex();
     let out = run_one(&StreamingCAddrVerify, vec![b"hello"], &hp(&[("expected_caddr", &hash)])).await;
     assert_eq!(out.as_ref(), b"hello");
 }
@@ -104,7 +104,7 @@ async fn caddr_verify_wrong() {
 
 #[tokio::test]
 async fn caddr_verify_multi_chunk() {
-    let hash = to_hex(&Sha256::digest(b"helloworld"));
+    let hash = CAddr::from_bytes(b"helloworld").to_hex();
     let out = run_one(&StreamingCAddrVerify, vec![b"hello", b"world"], &hp(&[("expected_caddr", &hash)])).await;
     assert_eq!(out.as_ref(), b"helloworld");
 }
@@ -118,7 +118,7 @@ async fn caddr_verify_missing_param() {
 #[tokio::test]
 async fn caddr_verify_preserves_data() {
     let data = b"binary\x00\xff";
-    let hash = to_hex(&Sha256::digest(data));
+    let hash = CAddr::from_bytes(data).to_hex();
     let out = run_one(&StreamingCAddrVerify, vec![data], &hp(&[("expected_caddr", &hash)])).await;
     assert_eq!(out.as_ref(), data);
 }

@@ -5,7 +5,7 @@ use sha2::{Sha256, Digest};
 use tokio::sync::mpsc;
 use deriva_core::streaming::StreamChunk;
 use crate::streaming::StreamingComputeFunction;
-use super::core::{take_one, spawn_accumulate, spawn_map};
+use super::core::{take_one, spawn_accumulate, spawn_map, spawn_passthrough, PassAction};
 
 fn error_stream(msg: String) -> mpsc::Receiver<StreamChunk> {
     let (tx, rx) = mpsc::channel(1);
@@ -27,16 +27,19 @@ pub struct StreamingCAddrEmbed;
 impl StreamingComputeFunction for StreamingCAddrEmbed {
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, _params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "StreamingCAddrEmbed");
-        spawn_accumulate(
+        // Passthrough pattern: forward chunks unchanged while computing hash,
+        // emit the 32-byte CAddr as a final Data chunk before End.
+        spawn_passthrough(
             rx,
-            Vec::new(),
-            |buf, chunk| buf.extend_from_slice(chunk),
-            |buf| {
-                let addr = deriva_core::CAddr::from_bytes(&buf);
-                let mut out = Vec::with_capacity(buf.len() + 32);
-                out.extend_from_slice(&buf);
-                out.extend_from_slice(addr.as_bytes());
-                Bytes::from(out)
+            2,
+            blake3::Hasher::new(),
+            |hasher, chunk| {
+                hasher.update(chunk);
+                PassAction::Forward
+            },
+            |hasher| {
+                let hash: [u8; 32] = hasher.finalize().into();
+                Some(Bytes::copy_from_slice(&hash))
             },
         )
     }
@@ -49,36 +52,38 @@ pub struct StreamingCAddrVerify;
 #[async_trait]
 impl StreamingComputeFunction for StreamingCAddrVerify {
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
-        let mut rx = take_one(&mut inputs, "StreamingCAddrVerify");
+        let rx = take_one(&mut inputs, "StreamingCAddrVerify");
         let expected = match params.get("expected_caddr") {
             Some(s) => s.clone(),
-            None => return error_stream("missing param: expected_caddr".into()),
+            None => return error_stream("StreamingCAddrVerify: missing param 'expected_caddr'".into()),
         };
+        // Passthrough pattern: forward chunks unchanged while computing hash,
+        // emit Error on End if hash doesn't match expected.
         let (tx, out) = mpsc::channel(2);
         tokio::spawn(async move {
-            let mut hasher = Sha256::new();
-            let mut forwarded = Vec::new();
+            let mut hasher = blake3::Hasher::new();
+            let mut rx = rx;
             loop {
                 match rx.recv().await {
                     Some(StreamChunk::Data(chunk)) => {
                         hasher.update(&chunk);
-                        forwarded.push(chunk);
+                        if tx.send(StreamChunk::Data(chunk)).await.is_err() { return; }
                     }
                     Some(StreamChunk::End) | None => break,
-                    Some(StreamChunk::Error(e)) => { let _ = tx.send(StreamChunk::Error(e)).await; return; }
+                    Some(StreamChunk::Error(e)) => {
+                        let _ = tx.send(StreamChunk::Error(e)).await;
+                        return;
+                    }
                 }
             }
-            let actual = to_hex(&hasher.finalize());
+            let actual = to_hex(hasher.finalize().as_bytes());
             if actual != expected {
                 let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(
                     format!("caddr mismatch: expected {expected}, got {actual}")
                 ))).await;
-                return;
+            } else {
+                let _ = tx.send(StreamChunk::End).await;
             }
-            for chunk in forwarded {
-                if tx.send(StreamChunk::Data(chunk)).await.is_err() { return; }
-            }
-            let _ = tx.send(StreamChunk::End).await;
         });
         out
     }

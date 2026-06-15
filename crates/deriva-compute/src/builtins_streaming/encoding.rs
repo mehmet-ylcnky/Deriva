@@ -50,9 +50,19 @@ impl StreamingComputeFunction for StreamingHexDecode {
         let rx = take_one(&mut inputs, "hex_decode");
         spawn_map(rx, DEFAULT_CHANNEL_CAPACITY, |b| {
             let s = std::str::from_utf8(b).map_err(|e| format!("hex decode: {}", e))?;
-            if s.len() % 2 != 0 { return Err("hex decode: odd-length input".into()); }
-            (0..s.len()).step_by(2)
-                .map(|i| u8::from_str_radix(&s[i..i+2], 16).map_err(|_| format!("hex decode: invalid char at {}", i)))
+            if s.len() % 2 != 0 {
+                return Err(format!("hex decode: invalid char '?' at position {} (odd-length input)", s.len() - 1));
+            }
+            let chars: Vec<char> = s.chars().collect();
+            (0..chars.len()).step_by(2)
+                .map(|i| {
+                    u8::from_str_radix(&s[i..i+2], 16).map_err(|_| {
+                        // Find the first invalid char in the pair
+                        let c = if !chars[i].is_ascii_hexdigit() { chars[i] } else { chars[i+1] };
+                        let pos = if !chars[i].is_ascii_hexdigit() { i } else { i + 1 };
+                        format!("hex decode: invalid char '{}' at position {}", c, pos)
+                    })
+                })
                 .collect::<Result<Vec<u8>, _>>()
                 .map(Bytes::from)
         })
@@ -82,8 +92,10 @@ impl StreamingComputeFunction for StreamingUtf8Validate {
                         let trail = incomplete_utf8_tail(&buf);
                         let valid_end = buf.len() - trail;
                         if let Err(e) = std::str::from_utf8(&buf[..valid_end]) {
+                            let pos = e.valid_up_to();
+                            let byte = buf[pos];
                             let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(
-                                format!("utf8: invalid byte at position {}", e.valid_up_to())))).await;
+                                format!("utf8: invalid byte 0x{:02x} at position {}", byte, pos)))).await;
                             return;
                         }
                         pending = buf[valid_end..].to_vec();

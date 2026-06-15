@@ -9,6 +9,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
+use crate::metrics::{
+    CHUNK_CACHE_BYTES_WRITTEN, CHUNK_CACHE_CHUNKS_STORED, CHUNK_CACHE_MANIFESTS_COMMITTED,
+    CHUNK_CACHE_BYTES_READ, CHUNK_CACHE_CHUNKS_SERVED, CHUNK_CACHE_STREAM_READS_INITIATED,
+    CHUNK_CACHE_RANGE_REQUESTS_SERVED, CHUNK_CACHE_CHUNKS_READ_PER_RANGE, CHUNK_CACHE_PARTIAL_MISS,
+};
+
 // --- Error types ---
 
 #[derive(Debug, Error)]
@@ -197,6 +203,12 @@ pub trait ChunkBlobStore: Send + Sync {
 
     /// Remove a blob by key. Returns true if removed, false if not found.
     async fn remove_chunk(&self, key: &str) -> std::result::Result<bool, DerivaError>;
+
+    /// List all chunk blob keys in the store. Used for orphan detection during GC.
+    /// Default implementation returns empty (not all stores support listing).
+    async fn list_chunk_keys(&self) -> std::result::Result<Vec<String>, DerivaError> {
+        Ok(Vec::new())
+    }
 }
 
 // --- ChunkCacheWriter ---
@@ -266,6 +278,7 @@ impl ChunkCacheWriter {
                         if let Err(e) = self.blob_store.put_chunk(&key, &data).await {
                             tracing::warn!(
                                 caddr = %self.caddr,
+                                op = "chunk_write",
                                 chunk_key = %key,
                                 error = %e,
                                 "chunk cache write failed, cleaning up"
@@ -276,6 +289,10 @@ impl ChunkCacheWriter {
                         }
 
                         builder.add_chunk(len, key);
+
+                        // Record metrics for successful chunk write
+                        CHUNK_CACHE_BYTES_WRITTEN.inc_by(len as u64);
+                        CHUNK_CACHE_CHUNKS_STORED.inc();
 
                         // Forward to consumer
                         if tx.send(StreamChunk::Data(data)).await.is_err() {
@@ -299,6 +316,7 @@ impl ChunkCacheWriter {
                                 {
                                     tracing::warn!(
                                         caddr = %self.caddr,
+                                        op = "manifest_write",
                                         error = %e,
                                         "failed to write chunk manifest"
                                     );
@@ -307,6 +325,7 @@ impl ChunkCacheWriter {
                                     let _ = tx.send(StreamChunk::Error(e)).await;
                                     return;
                                 }
+                                CHUNK_CACHE_MANIFESTS_COMMITTED.inc();
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -427,10 +446,14 @@ pub fn stream_from_cache(
     let caddr = manifest.caddr;
     let (tx, rx) = mpsc::channel(capacity);
 
+    CHUNK_CACHE_STREAM_READS_INITIATED.inc();
+
     tokio::spawn(async move {
         for entry in &manifest_clone.chunks {
             match blob_store.get_chunk(&entry.blob_key).await {
                 Ok(Some(data)) => {
+                    CHUNK_CACHE_BYTES_READ.inc_by(data.len() as u64);
+                    CHUNK_CACHE_CHUNKS_SERVED.inc();
                     if tx.send(StreamChunk::Data(data)).await.is_err() {
                         // Consumer dropped the receiver — stop sending.
                         return;
@@ -438,8 +461,10 @@ pub fn stream_from_cache(
                 }
                 Ok(None) => {
                     // Chunk blob missing — partial cache miss detected.
+                    CHUNK_CACHE_PARTIAL_MISS.inc();
                     tracing::warn!(
                         caddr = %caddr,
+                        op = "stream_read",
                         blob_key = %entry.blob_key,
                         total_chunks = manifest_clone.chunks.len(),
                         "partial cache miss detected: chunk blob missing, cleaning up all cached data for CAddr"
@@ -460,6 +485,7 @@ pub fn stream_from_cache(
                     // Storage error reading chunk.
                     tracing::warn!(
                         caddr = %caddr,
+                        op = "stream_read",
                         blob_key = %entry.blob_key,
                         error = %e,
                         "storage error during streaming cache read"
@@ -499,6 +525,8 @@ pub async fn range_read(
     offset: u64,
     length: u64,
 ) -> std::result::Result<Bytes, DerivaError> {
+    CHUNK_CACHE_RANGE_REQUESTS_SERVED.inc();
+
     // Early return for empty reads
     if length == 0 || offset >= manifest.total_size {
         return Ok(Bytes::new());
@@ -516,15 +544,21 @@ pub async fn range_read(
 
     // Pre-allocate output buffer
     let mut result = Vec::with_capacity(clamped_length as usize);
+    let mut chunks_read: u64 = 0;
 
     for (i, entry) in overlapping.iter().enumerate() {
         // Read chunk from blob store
         let chunk_data = match blob_store.get_chunk(&entry.blob_key).await? {
-            Some(data) => data,
+            Some(data) => {
+                chunks_read += 1;
+                data
+            }
             None => {
                 // Partial cache miss — clean up and return error
+                CHUNK_CACHE_PARTIAL_MISS.inc();
                 tracing::warn!(
                     caddr = %manifest.caddr,
+                    op = "range_read",
                     blob_key = %entry.blob_key,
                     "partial cache miss during range read, cleaning up"
                 );
@@ -554,6 +588,10 @@ pub async fn range_read(
 
         result.extend_from_slice(&chunk_data[slice_start..slice_end]);
     }
+
+    // Record range read metrics
+    CHUNK_CACHE_CHUNKS_READ_PER_RANGE.observe(chunks_read as f64);
+    CHUNK_CACHE_BYTES_READ.inc_by(result.len() as u64);
 
     Ok(Bytes::from(result))
 }

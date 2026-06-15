@@ -849,3 +849,79 @@ pub(crate) fn spawn_buffered(
     });
     out
 }
+
+// ---------------------------------------------------------------------------
+// Pattern 5: Passthrough with side-state
+// ---------------------------------------------------------------------------
+
+/// Action returned by the `on_chunk` callback in `spawn_passthrough`.
+pub(crate) enum PassAction {
+    /// Pass the chunk through unchanged.
+    Forward,
+    /// Replace the chunk content with these bytes.
+    Replace(Bytes),
+    /// Suppress the chunk (don't emit anything).
+    Drop,
+    /// Emit an error and terminate.
+    Error(String),
+}
+
+/// Spawn a passthrough task with side-state.
+///
+/// Each `Data` chunk is passed to `on_chunk` which decides whether to forward,
+/// replace, drop, or error. On `End`, `on_end` is called with the accumulated
+/// state and may emit a final `Data` chunk before `End`.
+pub(crate) fn spawn_passthrough<S: Send + 'static>(
+    mut rx: mpsc::Receiver<StreamChunk>,
+    cap: usize,
+    init: S,
+    on_chunk: impl Fn(&mut S, &Bytes) -> PassAction + Send + 'static,
+    on_end: impl FnOnce(S) -> Option<Bytes> + Send + 'static,
+) -> mpsc::Receiver<StreamChunk> {
+    let (tx, out) = mpsc::channel(cap);
+    tokio::spawn(async move {
+        let mut state = init;
+        loop {
+            match rx.recv().await {
+                Some(StreamChunk::Data(chunk)) => {
+                    match on_chunk(&mut state, &chunk) {
+                        PassAction::Forward => {
+                            if tx.send(StreamChunk::Data(chunk)).await.is_err() {
+                                return;
+                            }
+                        }
+                        PassAction::Replace(bytes) => {
+                            if tx.send(StreamChunk::Data(bytes)).await.is_err() {
+                                return;
+                            }
+                        }
+                        PassAction::Drop => {}
+                        PassAction::Error(msg) => {
+                            let _ = tx
+                                .send(StreamChunk::Error(
+                                    deriva_core::DerivaError::ComputeFailed(msg),
+                                ))
+                                .await;
+                            return;
+                        }
+                    }
+                }
+                Some(StreamChunk::End) => {
+                    if let Some(bytes) = on_end(state) {
+                        if tx.send(StreamChunk::Data(bytes)).await.is_err() {
+                            return;
+                        }
+                    }
+                    let _ = tx.send(StreamChunk::End).await;
+                    return;
+                }
+                Some(StreamChunk::Error(e)) => {
+                    let _ = tx.send(StreamChunk::Error(e)).await;
+                    return;
+                }
+                None => return,
+            }
+        }
+    });
+    out
+}

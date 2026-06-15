@@ -16,6 +16,12 @@ pub struct GcResult {
     pub duration: Duration,
     pub removed_addrs: Vec<CAddr>,
     pub dry_run: bool,
+    /// Number of chunk blobs removed during chunk-manifested GC.
+    pub chunk_blobs_removed: u64,
+    /// Bytes reclaimed from chunk blob removal.
+    pub chunk_bytes_reclaimed: u64,
+    /// Number of orphan chunk blobs removed (chunks with no corresponding manifest).
+    pub orphan_chunks_removed: u64,
 }
 
 /// Configuration for a GC cycle.

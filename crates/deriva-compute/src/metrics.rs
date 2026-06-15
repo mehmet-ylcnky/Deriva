@@ -162,3 +162,61 @@ lazy_static! {
         "Total backpressure events where a producer blocked waiting for a permit"
     ).unwrap();
 }
+
+// §2.13 Chunk cache metrics
+lazy_static! {
+    // Cache write metrics
+    pub static ref CHUNK_CACHE_BYTES_WRITTEN: IntCounter = register_int_counter!(
+        "deriva_chunk_cache_bytes_written_total",
+        "Total bytes written to chunk cache"
+    ).unwrap();
+    pub static ref CHUNK_CACHE_CHUNKS_STORED: IntCounter = register_int_counter!(
+        "deriva_chunk_cache_chunks_stored_total",
+        "Total chunks stored in chunk cache"
+    ).unwrap();
+    pub static ref CHUNK_CACHE_MANIFESTS_COMMITTED: IntCounter = register_int_counter!(
+        "deriva_chunk_cache_manifests_committed_total",
+        "Total chunk manifests committed to blob store"
+    ).unwrap();
+
+    // Cache read metrics
+    pub static ref CHUNK_CACHE_BYTES_READ: IntCounter = register_int_counter!(
+        "deriva_chunk_cache_bytes_read_total",
+        "Total bytes read from chunk cache"
+    ).unwrap();
+    pub static ref CHUNK_CACHE_CHUNKS_SERVED: IntCounter = register_int_counter!(
+        "deriva_chunk_cache_chunks_served_total",
+        "Total chunks served from chunk cache"
+    ).unwrap();
+    pub static ref CHUNK_CACHE_STREAM_READS_INITIATED: IntCounter = register_int_counter!(
+        "deriva_chunk_cache_stream_reads_initiated_total",
+        "Total streaming reads initiated from chunk cache"
+    ).unwrap();
+
+    // Range read metrics
+    pub static ref CHUNK_CACHE_RANGE_REQUESTS_SERVED: IntCounter = register_int_counter!(
+        "deriva_chunk_cache_range_requests_served_total",
+        "Total range read requests served from chunk cache"
+    ).unwrap();
+    pub static ref CHUNK_CACHE_CHUNKS_READ_PER_RANGE: Histogram = register_histogram!(
+        "deriva_chunk_cache_chunks_read_per_range",
+        "Number of chunks read per range read request",
+        vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]
+    ).unwrap();
+
+    // Path selection metrics
+    pub static ref CHUNK_CACHE_MONOLITHIC_WRITES: IntCounter = register_int_counter!(
+        "deriva_chunk_cache_monolithic_writes_total",
+        "Total monolithic (non-chunked) cache writes"
+    ).unwrap();
+    pub static ref CHUNK_CACHE_CHUNK_LEVEL_WRITES: IntCounter = register_int_counter!(
+        "deriva_chunk_cache_chunk_level_writes_total",
+        "Total chunk-level cache writes"
+    ).unwrap();
+
+    // Partial miss counter
+    pub static ref CHUNK_CACHE_PARTIAL_MISS: IntCounter = register_int_counter!(
+        "deriva_chunk_cache_partial_miss_total",
+        "Total partial cache misses detected (missing chunk blobs)"
+    ).unwrap();
+}

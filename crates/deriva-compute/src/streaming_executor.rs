@@ -8,6 +8,7 @@ use crate::cache::AsyncMaterializationCache;
 use crate::chunk_cache::{ChunkBlobStore, ChunkCacheWriter};
 use crate::leaf_store::AsyncLeafStore;
 use crate::memory_budget::GlobalMemoryController;
+use crate::metrics::{CHUNK_CACHE_MONOLITHIC_WRITES, CHUNK_CACHE_CHUNK_LEVEL_WRITES};
 use crate::pipeline::{StreamPipeline, PipelineConfig};
 use crate::registry::FunctionRegistry;
 
@@ -190,6 +191,12 @@ impl StreamingExecutor {
         let final_node_size = addr_to_idx.get(addr)
             .and_then(|&idx| pipeline.node_data_size(idx));
         let cache_path = self.select_cache_path(final_node_size);
+
+        // Record path selection metric
+        match cache_path {
+            CachePathSelection::Monolithic => CHUNK_CACHE_MONOLITHIC_WRITES.inc(),
+            CachePathSelection::ChunkLevel => CHUNK_CACHE_CHUNK_LEVEL_WRITES.inc(),
+        }
 
         let rx = pipeline.execute(global_controller).await?;
 

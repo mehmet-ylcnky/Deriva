@@ -9,7 +9,7 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::RwLock;
 
 use crate::chunk_cache::{manifest_key, stream_from_cache, range_read, ChunkBlobStore, ChunkManifest, ChunkAddr, ChunkManifestBuilder, cleanup_partial_cache_miss};
-use crate::metrics::{CACHE_EVICTION_TOTAL, CACHE_SIZE, CACHE_ENTRIES, CACHE_HIT_RATE};
+use crate::metrics::{CACHE_EVICTION_TOTAL, CACHE_SIZE, CACHE_ENTRIES, CACHE_HIT_RATE, CHUNK_CACHE_PARTIAL_MISS};
 
 pub trait MaterializationCache {
     fn get(&mut self, addr: &CAddr) -> Option<Bytes>;
@@ -147,6 +147,7 @@ impl ChunkAwareCache {
                 Err(e) => {
                     tracing::warn!(
                         caddr = %addr,
+                        op = "manifest_read",
                         error = %e,
                         "failed to deserialize chunk manifest"
                     );
@@ -157,6 +158,7 @@ impl ChunkAwareCache {
             Err(e) => {
                 tracing::warn!(
                     caddr = %addr,
+                    op = "manifest_read",
                     error = %e,
                     "error reading chunk manifest from blob store"
                 );
@@ -186,8 +188,10 @@ impl AsyncMaterializationCache for ChunkAwareCache {
                 }
                 Ok(None) => {
                     // Partial cache miss: a chunk is missing
+                    CHUNK_CACHE_PARTIAL_MISS.inc();
                     tracing::warn!(
                         caddr = %addr,
+                        op = "full_read",
                         blob_key = %entry.blob_key,
                         "partial cache miss during full-value get, cleaning up"
                     );
@@ -197,6 +201,7 @@ impl AsyncMaterializationCache for ChunkAwareCache {
                 Err(e) => {
                     tracing::warn!(
                         caddr = %addr,
+                        op = "full_read",
                         blob_key = %entry.blob_key,
                         error = %e,
                         "blob store error during full-value get"
@@ -222,6 +227,7 @@ impl AsyncMaterializationCache for ChunkAwareCache {
         if let Err(e) = self.blob_store.put_chunk(&blob_key, &data).await {
             tracing::warn!(
                 caddr = %addr,
+                op = "chunk_write",
                 error = %e,
                 "failed to write chunk blob during monolithic put"
             );
@@ -239,6 +245,7 @@ impl AsyncMaterializationCache for ChunkAwareCache {
                 if let Err(e) = self.blob_store.put_chunk(&mkey, &manifest_bytes).await {
                     tracing::warn!(
                         caddr = %addr,
+                        op = "manifest_write",
                         error = %e,
                         "failed to write manifest during monolithic put"
                     );
@@ -247,6 +254,7 @@ impl AsyncMaterializationCache for ChunkAwareCache {
             Err(e) => {
                 tracing::warn!(
                     caddr = %addr,
+                    op = "manifest_write",
                     error = %e,
                     "failed to serialize manifest during monolithic put"
                 );
@@ -285,6 +293,7 @@ impl AsyncMaterializationCache for ChunkAwareCache {
             Err(e) => {
                 tracing::warn!(
                     caddr = %addr,
+                    op = "range_read",
                     offset = offset,
                     length = length,
                     error = %e,

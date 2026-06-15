@@ -144,6 +144,20 @@ impl BlobStore {
         }
     }
 
+    /// List all string-keyed blob names (chunk and manifest blobs).
+    /// Returns keys matching pattern *_chunk_* or *_manifest.
+    pub fn list_keyed_blobs(&self) -> Result<Vec<String>> {
+        let mut keys = Vec::new();
+        for path in walkdir(&self.root)? {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.contains("_chunk_") || name.ends_with("_manifest") {
+                    keys.push(name.to_string());
+                }
+            }
+        }
+        Ok(keys)
+    }
+
     /// Remove a blob by its string key. Returns true if removed, false if not found.
     pub fn remove_by_key(&self, key: &str) -> Result<bool> {
         let path = self.keyed_blob_path(key);
@@ -178,6 +192,11 @@ impl ChunkBlobStore for BlobStore {
 
     async fn remove_chunk(&self, key: &str) -> std::result::Result<bool, DerivaError> {
         self.remove_by_key(key)
+    }
+
+    async fn list_chunk_keys(&self) -> std::result::Result<Vec<String>, DerivaError> {
+        let all_keys = self.list_keyed_blobs()?;
+        Ok(all_keys.into_iter().filter(|k| k.contains("_chunk_")).collect())
     }
 }
 

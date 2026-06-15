@@ -1,10 +1,13 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Instant;
 use deriva_core::CAddr;
 use deriva_core::error::DerivaError;
 use deriva_core::gc::{GcConfig, GcResult, PinSet};
 use deriva_core::persistent_dag::PersistentDag;
 use deriva_compute::cache::SharedCache;
+use deriva_compute::chunk_cache::ChunkBlobStore;
+use deriva_compute::gc::{remove_chunk_cached_entries, remove_orphan_chunks};
 use deriva_storage::blob_store::BlobStore;
 
 /// Run a garbage collection cycle.
@@ -50,6 +53,22 @@ pub async fn run_gc(
         blobs.remove_batch_blobs(&orphaned_blobs)?
     };
 
+    // 5b. Remove chunk-cached entries (manifests + chunk blobs) for orphaned CAddrs
+    let (chunk_blobs_removed, chunk_bytes_reclaimed) = if config.dry_run {
+        (0u64, 0u64)
+    } else {
+        let chunk_store: Arc<dyn ChunkBlobStore> = Arc::new(blobs.clone());
+        remove_chunk_cached_entries(&orphaned_blobs, &chunk_store).await
+    };
+
+    // 5c. Remove orphan chunks (chunks with no corresponding manifest)
+    let orphan_chunks_removed = if config.dry_run {
+        0u64
+    } else {
+        let chunk_store: Arc<dyn ChunkBlobStore> = Arc::new(blobs.clone());
+        remove_orphan_chunks(&chunk_store).await
+    };
+
     // 6. Find orphaned recipes (any input was just removed)
     let removed_set: HashSet<CAddr> = orphaned_blobs.iter().copied().collect();
     let mut orphaned_recipes = Vec::new();
@@ -86,12 +105,15 @@ pub async fn run_gc(
         cache_entries_removed,
         bytes_reclaimed_blobs,
         bytes_reclaimed_cache,
-        total_bytes_reclaimed: bytes_reclaimed_blobs + bytes_reclaimed_cache,
+        total_bytes_reclaimed: bytes_reclaimed_blobs + bytes_reclaimed_cache + chunk_bytes_reclaimed,
         live_blobs: (all_blobs.len() as u64).saturating_sub(blobs_removed),
         live_recipes: dag.len() as u64,
         pinned_count: pins.count() as u64,
         duration: start.elapsed(),
         removed_addrs: if config.detail_addrs { all_removed } else { vec![] },
         dry_run: config.dry_run,
+        chunk_blobs_removed,
+        chunk_bytes_reclaimed,
+        orphan_chunks_removed,
     })
 }

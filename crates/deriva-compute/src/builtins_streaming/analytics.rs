@@ -9,10 +9,8 @@ use super::core::{take_one, spawn_accumulate};
 // ── helpers ──────────────────────────────────────────────────────────
 
 fn error_stream(msg: String) -> mpsc::Receiver<StreamChunk> {
-    let (tx, rx) = mpsc::channel(1);
-    tokio::spawn(async move {
-        let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg))).await;
-    });
+    let (tx, rx) = mpsc::channel(2);
+    let _ = tx.try_send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg)));
     rx
 }
 
@@ -147,7 +145,7 @@ impl StreamingComputeFunction for StreamingSample {
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "StreamingSample");
         let rate: usize = params.get("rate").and_then(|v| v.parse().ok()).unwrap_or(10);
-        if rate == 0 { return error_stream("rate must be > 0".into()); }
+        if rate == 0 { return error_stream("StreamingSample: rate must be > 0".into()); }
         let mut counter = 0usize;
         spawn_filter_map(rx, move |chunk| {
             let emit = counter.is_multiple_of(rate);

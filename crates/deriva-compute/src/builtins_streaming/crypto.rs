@@ -8,15 +8,20 @@ use deriva_core::streaming::StreamChunk;
 use crate::streaming::{StreamingComputeFunction, DEFAULT_CHANNEL_CAPACITY};
 use super::core::{spawn_map_stateful, spawn_accumulate, take_one};
 
-fn hex_decode(s: &str, name: &str) -> Result<Vec<u8>, String> {
+fn hex_decode(s: &str, func_name: &str, param_name: &str) -> Result<Vec<u8>, String> {
+    if s.len() % 2 != 0 {
+        return Err(format!("{}: invalid hex in param '{}' (odd length)", func_name, param_name));
+    }
     (0..s.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| format!("{}: invalid hex", name)))
+        .map(|i| {
+            u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| format!("{}: invalid hex in param '{}'", func_name, param_name))
+        })
         .collect()
 }
 
-fn get_param<'a>(params: &'a HashMap<String, String>, key: &str) -> Result<&'a str, String> {
-    params.get(key).map(|s| s.as_str()).ok_or_else(|| format!("missing param: {}", key))
+fn get_param<'a>(params: &'a HashMap<String, String>, key: &str, func_name: &str) -> Result<&'a str, String> {
+    params.get(key).map(|s| s.as_str()).ok_or_else(|| format!("{}: missing required param '{}'", func_name, key))
 }
 
 // ── #21 StreamingEncrypt (AES-256-CTR) ──
@@ -33,7 +38,7 @@ impl StreamingComputeFunction for StreamingEncrypt {
         let rx = take_one(&mut inputs, "encrypt");
         let (key, nonce) = match parse_aes_ctr_params(params) {
             Ok(v) => v,
-            Err(e) => return error_stream(e).await,
+            Err(e) => return error_stream(e),
         };
         use aes::Aes256;
         use ctr::cipher::{KeyIvInit, StreamCipher};
@@ -61,7 +66,7 @@ impl StreamingComputeFunction for StreamingDecrypt {
         let rx = take_one(&mut inputs, "decrypt");
         let (key, nonce) = match parse_aes_ctr_params(params) {
             Ok(v) => v,
-            Err(e) => return error_stream(e).await,
+            Err(e) => return error_stream(e),
         };
         use aes::Aes256;
         use ctr::cipher::{KeyIvInit, StreamCipher};
@@ -76,10 +81,10 @@ impl StreamingComputeFunction for StreamingDecrypt {
 }
 
 fn parse_aes_ctr_params(params: &HashMap<String, String>) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let key = hex_decode(get_param(params, "key")?, "key")?;
-    let nonce = hex_decode(get_param(params, "nonce")?, "nonce")?;
-    if key.len() != 32 { return Err("key must be 32 bytes (64 hex chars)".into()); }
-    if nonce.len() != 16 { return Err("nonce must be 16 bytes (32 hex chars)".into()); }
+    let key = hex_decode(get_param(params, "key", "aes")?, "aes", "key")?;
+    let nonce = hex_decode(get_param(params, "nonce", "aes")?, "aes", "nonce")?;
+    if key.len() != 32 { return Err("aes: invalid key length, expected 32 bytes (64 hex chars)".into()); }
+    if nonce.len() != 16 { return Err("aes: invalid nonce length, expected 16 bytes (32 hex chars)".into()); }
     Ok((key, nonce))
 }
 
@@ -97,7 +102,7 @@ impl StreamingComputeFunction for StreamingAeadEncrypt {
         let rx = take_one(&mut inputs, "aead_encrypt");
         let (key, nonce_prefix) = match parse_aead_params(params) {
             Ok(v) => v,
-            Err(e) => return error_stream(e).await,
+            Err(e) => return error_stream(e),
         };
         use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead, Nonce};
         let cipher = Aes256Gcm::new(key[..].into());
@@ -129,7 +134,7 @@ impl StreamingComputeFunction for StreamingAeadDecrypt {
         let rx = take_one(&mut inputs, "aead_decrypt");
         let (key, nonce_prefix) = match parse_aead_params(params) {
             Ok(v) => v,
-            Err(e) => return error_stream(e).await,
+            Err(e) => return error_stream(e),
         };
         use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead, Nonce};
         let cipher = Aes256Gcm::new(key[..].into());
@@ -148,10 +153,10 @@ impl StreamingComputeFunction for StreamingAeadDecrypt {
 }
 
 fn parse_aead_params(params: &HashMap<String, String>) -> Result<(Vec<u8>, [u8; 8]), String> {
-    let key = hex_decode(get_param(params, "key")?, "key")?;
-    let nonce_prefix = hex_decode(get_param(params, "nonce_prefix")?, "nonce_prefix")?;
-    if key.len() != 32 { return Err("key must be 32 bytes (64 hex chars)".into()); }
-    if nonce_prefix.len() != 8 { return Err("nonce_prefix must be 8 bytes (16 hex chars)".into()); }
+    let key = hex_decode(get_param(params, "key", "aead")?, "aead", "key")?;
+    let nonce_prefix = hex_decode(get_param(params, "nonce_prefix", "aead")?, "aead", "nonce_prefix")?;
+    if key.len() != 32 { return Err("aead: invalid key length, expected 32 bytes (64 hex chars)".into()); }
+    if nonce_prefix.len() != 8 { return Err("aead: invalid nonce_prefix length, expected 8 bytes (16 hex chars)".into()); }
     let mut np = [0u8; 8];
     np.copy_from_slice(&nonce_prefix);
     Ok((key, np))
@@ -169,16 +174,16 @@ impl StreamingComputeFunction for StreamingHmacSha256 {
         params: &HashMap<String, String>,
     ) -> mpsc::Receiver<StreamChunk> {
         let rx = take_one(&mut inputs, "hmac_sha256");
-        let key = match get_param(params, "key").and_then(|k| hex_decode(k, "key")) {
+        let key = match get_param(params, "key", "hmac_sha256").and_then(|k| hex_decode(k, "hmac_sha256", "key")) {
             Ok(v) => v,
-            Err(e) => return error_stream(e).await,
+            Err(e) => return error_stream(e),
         };
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;
         let mac = match HmacSha256::new_from_slice(&key) {
             Ok(m) => m,
-            Err(e) => return error_stream(format!("hmac init: {}", e)).await,
+            Err(e) => return error_stream(format!("hmac init: {}", e)),
         };
         spawn_accumulate(rx, mac, |m, b| m.update(b), |m| {
             Bytes::copy_from_slice(&m.finalize().into_bytes())
@@ -265,11 +270,11 @@ impl StreamingComputeFunction for StreamingRedact {
             pattern_str.split(',').map(|s| s.trim().to_string()).collect()
         };
         let regexes: Vec<regex::Regex> = match patterns.iter()
-            .map(|p| regex::Regex::new(p).map_err(|e| format!("redact: invalid regex '{}': {}", p, e)))
+            .map(|p| regex::Regex::new(p).map_err(|e| format!("StreamingRedact: invalid regex '{}': {}", p, e)))
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(v) => v,
-            Err(e) => return error_stream(e).await,
+            Err(e) => return error_stream(e),
         };
         super::core::spawn_boundary_map(rx, DEFAULT_CHANNEL_CAPACITY, move |chunk| {
             let mut text = String::from_utf8_lossy(chunk).into_owned();
@@ -290,8 +295,8 @@ fn spawn_map(
     super::core::spawn_map(rx, cap, f)
 }
 
-async fn error_stream(msg: String) -> mpsc::Receiver<StreamChunk> {
-    let (tx, rx) = mpsc::channel(1);
-    let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg))).await;
+fn error_stream(msg: String) -> mpsc::Receiver<StreamChunk> {
+    let (tx, rx) = mpsc::channel(2);
+    let _ = tx.try_send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg)));
     rx
 }

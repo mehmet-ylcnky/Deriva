@@ -8,10 +8,8 @@ use crate::streaming::StreamingComputeFunction;
 use super::core::{take_one, spawn_accumulate, spawn_map, spawn_passthrough, PassAction};
 
 fn error_stream(msg: String) -> mpsc::Receiver<StreamChunk> {
-    let (tx, rx) = mpsc::channel(1);
-    tokio::spawn(async move {
-        let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg))).await;
-    });
+    let (tx, rx) = mpsc::channel(2);
+    let _ = tx.try_send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg)));
     rx
 }
 
@@ -55,7 +53,7 @@ impl StreamingComputeFunction for StreamingCAddrVerify {
         let rx = take_one(&mut inputs, "StreamingCAddrVerify");
         let expected = match params.get("expected_caddr") {
             Some(s) => s.clone(),
-            None => return error_stream("StreamingCAddrVerify: missing param 'expected_caddr'".into()),
+            None => return error_stream("StreamingCAddrVerify: missing required param 'expected_caddr'".into()),
         };
         // Passthrough pattern: forward chunks unchanged while computing hash,
         // emit Error on End if hash doesn't match expected.

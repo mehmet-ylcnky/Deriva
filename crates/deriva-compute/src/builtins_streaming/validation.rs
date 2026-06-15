@@ -6,10 +6,9 @@ use crate::streaming::StreamingComputeFunction;
 use super::core::{take_one, spawn_buffered};
 
 fn error_stream(msg: String) -> mpsc::Receiver<StreamChunk> {
-    let (tx, rx) = mpsc::channel(1);
-    tokio::spawn(async move {
-        let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg))).await;
-    });
+    let (tx, rx) = mpsc::channel(2);
+    // Use try_send to avoid needing async - channel capacity 2 ensures this won't fail
+    let _ = tx.try_send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg)));
     rx
 }
 
@@ -78,7 +77,7 @@ impl StreamingComputeFunction for StreamingSchemaValidate {
         let rx = take_one(&mut inputs, "StreamingSchemaValidate");
         let schema_str = match params.get("schema") {
             Some(s) => s.clone(),
-            None => return error_stream("missing param: schema".into()),
+            None => return error_stream("StreamingSchemaValidate: missing required param 'schema'".into()),
         };
         spawn_buffered(rx, 2, 64 * 1024, move |buf| {
             let val: serde_json::Value = serde_json::from_slice(&buf)
@@ -101,7 +100,7 @@ impl StreamingComputeFunction for StreamingMagicBytes {
         let mut rx = take_one(&mut inputs, "StreamingMagicBytes");
         let expected_hex = match params.get("expected") {
             Some(s) => s.clone(),
-            None => return error_stream("missing param: expected".into()),
+            None => return error_stream("StreamingMagicBytes: missing required param 'expected'".into()),
         };
         let expected = match hex_to_bytes(&expected_hex) {
             Ok(b) => b,
@@ -143,9 +142,12 @@ pub struct StreamingSizeLimit;
 impl StreamingComputeFunction for StreamingSizeLimit {
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let mut rx = take_one(&mut inputs, "StreamingSizeLimit");
-        let max: u64 = match params.get("max_bytes").and_then(|v| v.parse().ok()) {
-            Some(n) => n,
-            None => return error_stream("missing param: max_bytes".into()),
+        let max: u64 = match params.get("max_bytes") {
+            Some(v) => match v.parse::<u64>() {
+                Ok(n) => n,
+                Err(e) => return error_stream(format!("StreamingSizeLimit: invalid param 'max_bytes': {e}")),
+            },
+            None => return error_stream("StreamingSizeLimit: missing required param 'max_bytes'".into()),
         };
         let (tx, out) = mpsc::channel(2);
         tokio::spawn(async move {
@@ -156,7 +158,7 @@ impl StreamingComputeFunction for StreamingSizeLimit {
                         total += chunk.len() as u64;
                         if total > max {
                             let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(
-                                format!("size limit exceeded: {total} > {max}")
+                                format!("StreamingSizeLimit: size limit exceeded: {} > {} max_bytes", total, max)
                             ))).await;
                             return;
                         }
@@ -181,7 +183,7 @@ impl StreamingComputeFunction for StreamingChecksumVerify {
         let mut rx = take_one(&mut inputs, "StreamingChecksumVerify");
         let expected = match params.get("expected_crc32") {
             Some(s) => s.clone(),
-            None => return error_stream("missing param: expected_crc32".into()),
+            None => return error_stream("StreamingChecksumVerify: missing required param 'expected_crc32'".into()),
         };
         if expected.len() != 8 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
             return error_stream(format!("checksum: invalid hex in expected_crc32: '{}'", expected));
@@ -223,7 +225,7 @@ impl StreamingComputeFunction for StreamingSha256Verify {
         let mut rx = take_one(&mut inputs, "StreamingSha256Verify");
         let expected = match params.get("expected_hash") {
             Some(s) => s.clone(),
-            None => return error_stream("missing param: expected_hash".into()),
+            None => return error_stream("StreamingSha256Verify: missing required param 'expected_hash'".into()),
         };
         if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
             return error_stream(format!("sha256_verify: expected 64 hex chars, got {}", expected.len()));
@@ -275,7 +277,7 @@ impl StreamingComputeFunction for StreamingNonEmpty {
                     }
                     Some(StreamChunk::End) | None => {
                         if !saw_data {
-                            let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed("stream is empty".into()))).await;
+                            let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed("StreamingNonEmpty: stream is empty".into()))).await;
                         } else {
                             let _ = tx.send(StreamChunk::End).await;
                         }

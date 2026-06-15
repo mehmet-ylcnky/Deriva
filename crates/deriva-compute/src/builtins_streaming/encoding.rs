@@ -9,9 +9,9 @@ use crate::streaming::{StreamingComputeFunction, DEFAULT_CHANNEL_CAPACITY, DEFAU
 use super::core::{spawn_map, spawn_buffered, take_one};
 
 #[allow(dead_code)]
-async fn error_stream(msg: String) -> mpsc::Receiver<StreamChunk> {
-    let (tx, rx) = mpsc::channel(1);
-    let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg))).await;
+fn error_stream(msg: String) -> mpsc::Receiver<StreamChunk> {
+    let (tx, rx) = mpsc::channel(2);
+    let _ = tx.try_send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg)));
     rx
 }
 

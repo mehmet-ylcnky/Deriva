@@ -57,7 +57,7 @@ async fn replace_multiple_occurrences() {
 #[tokio::test]
 async fn replace_missing_param() {
     let err = run_one_err(&StreamingReplace, vec![b"x"], &hp(&[])).await;
-    assert!(err.contains("missing param"));
+    assert!(err.contains("find"), "expected param name 'find' in error: {}", err);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -203,7 +203,7 @@ async fn grep_regex_pattern() {
 #[tokio::test]
 async fn grep_missing_param() {
     let err = run_one_err(&StreamingGrep, vec![b"x"], &hp(&[])).await;
-    assert!(err.contains("missing param"));
+    assert!(err.contains("pattern"), "expected param name 'pattern' in error but got: {}", err);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -237,7 +237,7 @@ async fn sed_global_replace() {
 #[tokio::test]
 async fn sed_missing_param() {
     let err = run_one_err(&StreamingSed, vec![b"x"], &hp(&[])).await;
-    assert!(err.contains("missing param"));
+    assert!(err.contains("pattern"), "expected param name 'pattern' in error: {}", err);
 }
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -112,7 +112,7 @@ async fn caddr_verify_multi_chunk() {
 #[tokio::test]
 async fn caddr_verify_missing_param() {
     let err = run_one_err(&StreamingCAddrVerify, vec![b"x"], &hp(&[])).await;
-    assert!(err.contains("missing param"));
+    assert!(err.contains("expected_caddr"), "expected param name 'expected_caddr' in error: {}", err);
 }
 
 #[tokio::test]

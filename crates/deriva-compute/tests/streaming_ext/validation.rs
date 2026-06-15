@@ -96,7 +96,7 @@ async fn schema_validate_required_present() {
 #[tokio::test]
 async fn schema_validate_missing_param() {
     let err = run_one_err(&StreamingSchemaValidate, vec![b"{}"], &hp(&[])).await;
-    assert!(err.contains("missing param"));
+    assert!(err.contains("schema"), "expected param name 'schema' in error: {}", err);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -126,7 +126,7 @@ async fn magic_bytes_multi_chunk() {
 #[tokio::test]
 async fn magic_bytes_missing_param() {
     let err = run_one_err(&StreamingMagicBytes, vec![b"data"], &hp(&[])).await;
-    assert!(err.contains("missing param"));
+    assert!(err.contains("expected"), "expected param name 'expected' in error: {}", err);
 }
 
 #[tokio::test]
@@ -166,7 +166,7 @@ async fn size_limit_multi_chunk() {
 #[tokio::test]
 async fn size_limit_missing_param() {
     let err = run_one_err(&StreamingSizeLimit, vec![b"x"], &hp(&[])).await;
-    assert!(err.contains("missing param"));
+    assert!(err.contains("max_bytes"), "expected param name 'max_bytes' in error: {}", err);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -196,7 +196,7 @@ async fn checksum_verify_multi_chunk() {
 #[tokio::test]
 async fn checksum_verify_missing_param() {
     let err = run_one_err(&StreamingChecksumVerify, vec![b"x"], &hp(&[])).await;
-    assert!(err.contains("missing param"));
+    assert!(err.contains("expected_crc32"), "expected param name 'expected_crc32' in error: {}", err);
 }
 
 #[tokio::test]
@@ -236,7 +236,7 @@ async fn sha256_verify_multi_chunk() {
 #[tokio::test]
 async fn sha256_verify_missing_param() {
     let err = run_one_err(&StreamingSha256Verify, vec![b"x"], &hp(&[])).await;
-    assert!(err.contains("missing param"));
+    assert!(err.contains("expected_hash"), "expected param name 'expected_hash' in error: {}", err);
 }
 
 #[tokio::test]

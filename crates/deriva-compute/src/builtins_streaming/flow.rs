@@ -8,10 +8,8 @@ use crate::streaming::StreamingComputeFunction;
 use super::core::take_one;
 
 fn error_stream(msg: String) -> mpsc::Receiver<StreamChunk> {
-    let (tx, rx) = mpsc::channel(1);
-    tokio::spawn(async move {
-        let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg))).await;
-    });
+    let (tx, rx) = mpsc::channel(2);
+    let _ = tx.try_send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg)));
     rx
 }
 

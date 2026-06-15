@@ -8,10 +8,8 @@ use super::core::{take_one, spawn_boundary_map, spawn_buffered};
 use encoding_rs;
 
 fn error_stream(msg: String) -> mpsc::Receiver<StreamChunk> {
-    let (tx, rx) = mpsc::channel(1);
-    tokio::spawn(async move {
-        let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg))).await;
-    });
+    let (tx, rx) = mpsc::channel(2);
+    let _ = tx.try_send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg)));
     rx
 }
 
@@ -25,8 +23,8 @@ impl StreamingComputeFunction for StreamingReplace {
         let rx = take_one(&mut inputs, "StreamingReplace");
         let find = match params.get("find") {
             Some(s) if !s.is_empty() => s.clone(),
-            Some(_) => return error_stream("replace: find pattern must not be empty".into()),
-            None => return error_stream("missing param: find".into()),
+            Some(_) => return error_stream("StreamingReplace: find pattern must not be empty".into()),
+            None => return error_stream("StreamingReplace: missing required param 'find'".into()),
         };
         let replace = params.get("replace").cloned().unwrap_or_default();
         // Check if find contains regex metacharacters
@@ -34,7 +32,7 @@ impl StreamingComputeFunction for StreamingReplace {
         if is_regex {
             let re = match regex::Regex::new(&find) {
                 Ok(r) => r,
-                Err(e) => return error_stream(format!("invalid regex: {e}")),
+                Err(e) => return error_stream(format!("StreamingReplace: invalid regex: {e}")),
             };
             spawn_boundary_map(rx, 2, move |chunk| {
                 let s = String::from_utf8_lossy(chunk);
@@ -164,12 +162,12 @@ impl StreamingComputeFunction for StreamingGrep {
         let rx = take_one(&mut inputs, "StreamingGrep");
         let pattern = match params.get("pattern") {
             Some(s) => s.clone(),
-            None => return error_stream("missing param: pattern".into()),
+            None => return error_stream("StreamingGrep: missing required param 'pattern'".into()),
         };
         let invert = params.get("invert").is_some_and(|v| v == "true");
         let re = match regex::Regex::new(&pattern) {
             Ok(r) => r,
-            Err(e) => return error_stream(format!("regex: compilation failed: invalid regex: {e}")),
+            Err(e) => return error_stream(format!("StreamingGrep: invalid regex: {e}")),
         };
         spawn_boundary_map(rx, 2, move |chunk| {
             let text = String::from_utf8_lossy(chunk);
@@ -209,12 +207,12 @@ impl StreamingComputeFunction for StreamingSed {
         let rx = take_one(&mut inputs, "StreamingSed");
         let pattern = match params.get("pattern") {
             Some(s) => s.clone(),
-            None => return error_stream("missing param: pattern".into()),
+            None => return error_stream("StreamingSed: missing required param 'pattern'".into()),
         };
         let replacement = params.get("replacement").cloned().unwrap_or_default();
         let re = match regex::Regex::new(&pattern) {
             Ok(r) => r,
-            Err(e) => return error_stream(format!("regex: compilation failed: invalid regex: {e}")),
+            Err(e) => return error_stream(format!("StreamingSed: invalid regex: {e}")),
         };
         spawn_boundary_map(rx, 2, move |chunk| {
             let text = String::from_utf8_lossy(chunk);
@@ -280,7 +278,7 @@ impl StreamingComputeFunction for StreamingCharsetConvert {
         } else {
             match encoding_rs::Encoding::for_label(from_label.as_bytes()) {
                 Some(enc) => enc,
-                None => return error_stream(format!("charset: unsupported encoding '{from}'")),
+                None => return error_stream(format!("StreamingCharsetConvert: unsupported encoding '{from}'")),
             }
         };
         let to_enc = if to_is_ascii {
@@ -288,7 +286,7 @@ impl StreamingComputeFunction for StreamingCharsetConvert {
         } else {
             match encoding_rs::Encoding::for_label(to_label.as_bytes()) {
                 Some(enc) => enc,
-                None => return error_stream(format!("charset: unsupported encoding '{to}'")),
+                None => return error_stream(format!("StreamingCharsetConvert: unsupported encoding '{to}'")),
             }
         };
 

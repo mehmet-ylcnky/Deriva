@@ -9,10 +9,8 @@ use super::core::*;
 const DEFAULT_CAP: usize = 8;
 
 fn error_stream(msg: String) -> mpsc::Receiver<StreamChunk> {
-    let (tx, rx) = mpsc::channel(1);
-    tokio::spawn(async move {
-        let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg))).await;
-    });
+    let (tx, rx) = mpsc::channel(2);
+    let _ = tx.try_send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(msg)));
     rx
 }
 
@@ -55,7 +53,7 @@ impl StreamingComputeFunction for StreamingAverage {
             let text = String::from_utf8_lossy(&buf);
             let vals: Vec<f64> = text.lines().filter(|l| !l.trim().is_empty()).filter_map(|l| l.trim().parse().ok()).collect();
             if vals.is_empty() {
-                let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed("no valid numbers".into()))).await;
+                let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed("StreamingAverage: no valid numbers found".into()))).await;
                 return;
             }
             let avg = vals.iter().sum::<f64>() / vals.len() as f64;
@@ -117,7 +115,7 @@ impl StreamingComputeFunction for StreamingByteSwap {
         let ws: usize = params.get("word_size").and_then(|v| v.parse().ok()).unwrap_or(2);
         spawn_map(rx, DEFAULT_CAP, move |b| {
             if b.len() % ws != 0 {
-                return Err(format!("chunk length {} not divisible by word_size {}", b.len(), ws));
+                return Err(format!("StreamingByteSwap: chunk length {} not divisible by word_size {}", b.len(), ws));
             }
             let mut out = b.to_vec();
             for word in out.chunks_mut(ws) {
@@ -159,7 +157,7 @@ impl StreamingComputeFunction for StreamingRollingHash {
         let rx = take_one(&mut inputs, "RollingHash");
         let window_size: usize = params.get("window_size").and_then(|v| v.parse().ok()).unwrap_or(48);
         if window_size == 0 {
-            return error_stream("rolling_hash: window_size must be > 0".into());
+            return error_stream("StreamingRollingHash: window_size must be > 0".into());
         }
         let base: u64 = 257;
         let modulus: u64 = (1 << 61) - 1; // Mersenne prime

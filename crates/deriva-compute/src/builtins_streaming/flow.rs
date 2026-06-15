@@ -21,9 +21,18 @@ pub struct StreamingRateLimit;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingRateLimit {
+    fn is_fusible(&self) -> bool { false }
+
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let mut rx = take_one(&mut inputs, "StreamingRateLimit");
-        let bps: f64 = params.get("bytes_per_sec").and_then(|v| v.parse().ok()).unwrap_or(1_048_576.0);
+        let bps_str = params.get("bytes_per_sec");
+        let bps: f64 = match bps_str {
+            Some(v) => match v.parse::<f64>() {
+                Ok(val) => val,
+                Err(e) => return error_stream(format!("rate_limit: invalid param 'bytes_per_sec': {e}")),
+            },
+            None => 1_048_576.0,
+        };
         if bps <= 0.0 {
             return error_stream("rate_limit: bytes_per_sec must be > 0".into());
         }
@@ -53,9 +62,17 @@ pub struct StreamingDelay;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingDelay {
+    fn is_fusible(&self) -> bool { false }
+
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let mut rx = take_one(&mut inputs, "StreamingDelay");
-        let ms: u64 = params.get("delay_ms").and_then(|v| v.parse().ok()).unwrap_or(100);
+        let ms: u64 = match params.get("delay_ms") {
+            Some(v) => match v.parse::<u64>() {
+                Ok(val) => val,
+                Err(e) => return error_stream(format!("delay: invalid param 'delay_ms': {e}")),
+            },
+            None => 100,
+        };
         let (tx, out) = mpsc::channel(2);
         tokio::spawn(async move {
             loop {
@@ -79,9 +96,17 @@ pub struct StreamingTimeout;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingTimeout {
+    fn is_fusible(&self) -> bool { false }
+
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let mut rx = take_one(&mut inputs, "StreamingTimeout");
-        let ms: u64 = params.get("timeout_ms").and_then(|v| v.parse().ok()).unwrap_or(5000);
+        let ms: u64 = match params.get("timeout_ms") {
+            Some(v) => match v.parse::<u64>() {
+                Ok(val) => val,
+                Err(e) => return error_stream(format!("timeout: invalid param 'timeout_ms': {e}")),
+            },
+            None => 5000,
+        };
         let (tx, out) = mpsc::channel(2);
         tokio::spawn(async move {
             loop {
@@ -92,7 +117,9 @@ impl StreamingComputeFunction for StreamingTimeout {
                     Ok(Some(StreamChunk::End)) | Ok(None) => { let _ = tx.send(StreamChunk::End).await; return; }
                     Ok(Some(StreamChunk::Error(e))) => { let _ = tx.send(StreamChunk::Error(e)).await; return; }
                     Err(_) => {
-                        let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed("timeout".into()))).await;
+                        let _ = tx.send(StreamChunk::Error(deriva_core::DerivaError::ComputeFailed(
+                            format!("timeout: no chunk within {ms}ms")
+                        ))).await;
                         return;
                     }
                 }
@@ -108,13 +135,22 @@ pub struct StreamingRetry;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingRetry {
+    fn is_fusible(&self) -> bool { false }
+
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let mut rx = take_one(&mut inputs, "StreamingRetry");
-        let max: usize = params.get("max_retries").and_then(|v| v.parse().ok()).unwrap_or(3);
+        let max: usize = match params.get("max_retries") {
+            Some(v) => match v.parse::<usize>() {
+                Ok(val) => val,
+                Err(e) => return error_stream(format!("retry: invalid param 'max_retries': {e}")),
+            },
+            None => 3,
+        };
         // Pipeline-level: forward data, count errors, re-emit error only after max retries exhausted
         let (tx, out) = mpsc::channel(2);
         tokio::spawn(async move {
             let mut errors = 0usize;
+            let mut last_error = String::new();
             loop {
                 match rx.recv().await {
                     Some(StreamChunk::Data(chunk)) => {
@@ -123,8 +159,13 @@ impl StreamingComputeFunction for StreamingRetry {
                     Some(StreamChunk::End) | None => { let _ = tx.send(StreamChunk::End).await; return; }
                     Some(StreamChunk::Error(e)) => {
                         errors += 1;
+                        last_error = e.to_string();
                         if errors > max {
-                            let _ = tx.send(StreamChunk::Error(e)).await;
+                            let _ = tx.send(StreamChunk::Error(
+                                deriva_core::DerivaError::ComputeFailed(
+                                    format!("retry: {} attempts failed: {}", max, last_error)
+                                )
+                            )).await;
                             return;
                         }
                         // Swallow error, continue reading (retry semantics at pipeline level)
@@ -142,9 +183,17 @@ pub struct StreamingTee;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingTee {
+    fn is_fusible(&self) -> bool { false }
+
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let mut rx = take_one(&mut inputs, "StreamingTee");
-        let n: usize = params.get("outputs").and_then(|v| v.parse().ok()).unwrap_or(2).max(1);
+        let n: usize = match params.get("outputs") {
+            Some(v) => match v.parse::<usize>() {
+                Ok(val) => val.max(1),
+                Err(e) => return error_stream(format!("tee: invalid param 'outputs': {e}")),
+            },
+            None => 2,
+        };
         let mut senders = Vec::with_capacity(n);
         let mut receivers = Vec::with_capacity(n);
         for _ in 0..n {
@@ -186,10 +235,10 @@ pub struct StreamingMerge;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingMerge {
+    fn is_fusible(&self) -> bool { false }
+
     async fn stream_execute(&self, inputs: Vec<mpsc::Receiver<StreamChunk>>, _params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let (tx, out) = mpsc::channel(2);
-        // Spawn one task per input, all send to same output
-        let tx2 = tx.clone();
         let n = inputs.len();
         let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         for mut rx in inputs {
@@ -214,7 +263,7 @@ impl StreamingComputeFunction for StreamingMerge {
                 }
             });
         }
-        drop(tx2);
+        drop(tx);
         out
     }
 }
@@ -225,11 +274,18 @@ pub struct StreamingBroadcast;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingBroadcast {
+    fn is_fusible(&self) -> bool { false }
+
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
-        // Like Tee but uses bounded channels — slowest consumer gates producer
-        // Within single-output trait, behaves identically to Tee
+        // Like Tee but uses bounded channels (capacity 1) — slowest consumer gates producer
         let mut rx = take_one(&mut inputs, "StreamingBroadcast");
-        let n: usize = params.get("outputs").and_then(|v| v.parse().ok()).unwrap_or(2).max(1);
+        let n: usize = match params.get("outputs") {
+            Some(v) => match v.parse::<usize>() {
+                Ok(val) => val.max(1),
+                Err(e) => return error_stream(format!("broadcast: invalid param 'outputs': {e}")),
+            },
+            None => 2,
+        };
         let mut senders = Vec::with_capacity(n);
         let mut receivers = Vec::with_capacity(n);
         for _ in 0..n {
@@ -270,6 +326,8 @@ pub struct StreamingPartition;
 
 #[async_trait]
 impl StreamingComputeFunction for StreamingPartition {
+    fn is_fusible(&self) -> bool { false }
+
     async fn stream_execute(&self, mut inputs: Vec<mpsc::Receiver<StreamChunk>>, params: &HashMap<String, String>) -> mpsc::Receiver<StreamChunk> {
         let mut rx = take_one(&mut inputs, "StreamingPartition");
         let pred = params.get("predicate").cloned().unwrap_or_else(|| "non_empty".into());
@@ -288,8 +346,10 @@ impl StreamingComputeFunction for StreamingPartition {
                         } else {
                             true
                         };
-                        if matches
-                            && tx.send(StreamChunk::Data(chunk)).await.is_err() { return; }
+                        if matches {
+                            if tx.send(StreamChunk::Data(chunk)).await.is_err() { return; }
+                        }
+                        // Non-matching chunks are routed to "output B" (dropped in single-output trait)
                     }
                     Some(StreamChunk::End) | None => { let _ = tx.send(StreamChunk::End).await; return; }
                     Some(StreamChunk::Error(e)) => { let _ = tx.send(StreamChunk::Error(e)).await; return; }

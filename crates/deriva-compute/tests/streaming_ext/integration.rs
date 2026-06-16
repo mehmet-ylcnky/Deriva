@@ -230,6 +230,120 @@ async fn t199_ten_stage_fusible_chain() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// T201 — Fusion chain: HexEncode → BitwiseNot → Base32Encode (fused)
+// Validates: Requirements 12.3, 15.6
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn t201_fusion_chain_hex_bitwisenot_base32() {
+    use std::sync::Arc;
+    use deriva_compute::pipeline::{PipelineConfig, StreamPipeline};
+    use deriva_core::address::CAddr;
+
+    // All three must be fusible
+    assert!(StreamingHexEncode.is_fusible(), "HexEncode should be fusible");
+    assert!(StreamingBitwiseNot.is_fusible(), "BitwiseNot should be fusible");
+    assert!(StreamingBase32Encode.is_fusible(), "Base32Encode should be fusible");
+
+    let input = b"fusion test data!";
+
+    // Run chained (unfused, direct stream_execute):
+    let rx = make_stream(vec![input]).await;
+    let rx = StreamingHexEncode.stream_execute(vec![rx], &hp(&[])).await;
+    let rx = StreamingBitwiseNot.stream_execute(vec![rx], &hp(&[])).await;
+    let unfused_out = collect_stream(
+        StreamingBase32Encode.stream_execute(vec![rx], &hp(&[])).await
+    ).await.unwrap();
+
+    // Run via StreamPipeline with fusion enabled:
+    let fused_out = {
+        let mut pipeline = StreamPipeline::new(PipelineConfig {
+            chunk_size: 8,
+            enable_fusion: true,
+            ..Default::default()
+        });
+        let idx_src = pipeline.add_source(
+            CAddr::from_bytes(b"fusion_src"),
+            Bytes::copy_from_slice(input),
+        );
+        let idx_hex = pipeline.add_streaming_stage(
+            CAddr::from_bytes(b"hex_encode"),
+            Arc::new(StreamingHexEncode),
+            HashMap::new(),
+            vec![idx_src],
+        );
+        let idx_not = pipeline.add_streaming_stage(
+            CAddr::from_bytes(b"bitwise_not"),
+            Arc::new(StreamingBitwiseNot),
+            HashMap::new(),
+            vec![idx_hex],
+        );
+        let _idx_b32 = pipeline.add_streaming_stage(
+            CAddr::from_bytes(b"base32_encode"),
+            Arc::new(StreamingBase32Encode),
+            HashMap::new(),
+            vec![idx_not],
+        );
+        let rx = pipeline.execute(None).await.unwrap();
+        collect_stream(rx).await.unwrap()
+    };
+
+    // Run via StreamPipeline with fusion disabled:
+    let unfused_pipeline_out = {
+        let mut pipeline = StreamPipeline::new(PipelineConfig {
+            chunk_size: 8,
+            enable_fusion: false,
+            ..Default::default()
+        });
+        let idx_src = pipeline.add_source(
+            CAddr::from_bytes(b"fusion_src"),
+            Bytes::copy_from_slice(input),
+        );
+        let idx_hex = pipeline.add_streaming_stage(
+            CAddr::from_bytes(b"hex_encode"),
+            Arc::new(StreamingHexEncode),
+            HashMap::new(),
+            vec![idx_src],
+        );
+        let idx_not = pipeline.add_streaming_stage(
+            CAddr::from_bytes(b"bitwise_not"),
+            Arc::new(StreamingBitwiseNot),
+            HashMap::new(),
+            vec![idx_hex],
+        );
+        let _idx_b32 = pipeline.add_streaming_stage(
+            CAddr::from_bytes(b"base32_encode"),
+            Arc::new(StreamingBase32Encode),
+            HashMap::new(),
+            vec![idx_not],
+        );
+        let rx = pipeline.execute(None).await.unwrap();
+        collect_stream(rx).await.unwrap()
+    };
+
+    // Fused and unfused pipeline must produce byte-identical output (Requirement 12.3)
+    assert_eq!(fused_out, unfused_pipeline_out, "fused vs unfused pipeline mismatch");
+
+    // Direct chain (single-chunk) output should also be valid Base32
+    assert!(!unfused_out.is_empty(), "direct chain output should not be empty");
+    for &b in unfused_out.iter() {
+        assert!(
+            (b'A'..=b'Z').contains(&b) || (b'2'..=b'7').contains(&b) || b == b'=',
+            "unexpected byte in direct chain base32 output: 0x{b:02x}"
+        );
+    }
+
+    // Pipeline output should also be valid Base32
+    assert!(!fused_out.is_empty(), "fused pipeline output should not be empty");
+    for &b in fused_out.iter() {
+        assert!(
+            (b'A'..=b'Z').contains(&b) || (b'2'..=b'7').contains(&b) || b == b'=',
+            "unexpected byte in fused pipeline base32 output: 0x{b:02x}"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // T200 — Concurrent: 50 independent Compress → Decompress pipelines
 // ═══════════════════════════════════════════════════════════════════════
 

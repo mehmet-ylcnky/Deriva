@@ -188,4 +188,16 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
 
     // Streaming functions (#1–#100)
     crate::builtins_streaming::register_streaming_builtins(registry);
+
+    // Extended batch functions (gated behind extended-batch feature)
+    #[cfg(feature = "extended-batch")]
+    register_extended_batch(registry);
+}
+
+/// Register extended batch functions (96 new functions).
+/// Gated behind the `extended-batch` feature flag.
+#[cfg(feature = "extended-batch")]
+pub fn register_extended_batch(registry: &mut crate::registry::FunctionRegistry) {
+    // New extended batch functions will be registered here in subsequent tasks.
+    let _ = registry;
 }

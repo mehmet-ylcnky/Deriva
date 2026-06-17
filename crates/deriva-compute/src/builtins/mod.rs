@@ -9,6 +9,8 @@ mod validation;
 mod format_conversion;
 mod cas;
 mod batch_only;
+#[cfg(feature = "extended-batch")]
+mod analytics;
 
 pub use transforms::*;
 pub use compression::*;
@@ -21,6 +23,8 @@ pub use validation::*;
 pub use format_conversion::*;
 pub use cas::*;
 pub use batch_only::*;
+#[cfg(feature = "extended-batch")]
+pub use analytics::*;
 
 use crate::function::{ComputeCost, ComputeError};
 use deriva_core::address::Value;
@@ -238,4 +242,15 @@ pub fn register_extended_batch(registry: &mut crate::registry::FunctionRegistry)
     registry.register(Arc::new(NotEmptyFn));
     registry.register(Arc::new(RegexMatchFn));
     registry.register(Arc::new(ContentTypeCheckFn));
+
+    // Analytics functions
+    registry.register(Arc::new(ReservoirSampleFn));
+    registry.register(Arc::new(PercentileFn));
+    registry.register(Arc::new(MeanFn));
+    registry.register(Arc::new(MedianFn));
+    registry.register(Arc::new(NumericMinFn));
+    registry.register(Arc::new(NumericMaxFn));
+    registry.register(Arc::new(FrequencyFn));
+    registry.register(Arc::new(DedupCountFn));
+    registry.register(Arc::new(CardinalityFn));
 }

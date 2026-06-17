@@ -245,5 +245,65 @@ impl ComputeFunction for BrotliDecompressFn {
     fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
-// ── #31 Sha256Fn ──
+// ── #31 GzipCompressFn ──
+
+pub struct GzipCompressFn;
+
+impl ComputeFunction for GzipCompressFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("gzip_compress", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let level: u32 = match params.get("level") {
+            Some(Value::String(s)) => s.parse().map_err(|_| ComputeError::InvalidParam("level must be 1-9".into()))?,
+            None => 6,
+            _ => return Err(ComputeError::InvalidParam("level must be a string".into())),
+        };
+        if !(1..=9).contains(&level) {
+            return Err(ComputeError::InvalidParam("level must be 1-9".into()));
+        }
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::new(level));
+        encoder.write_all(&inputs[0])
+            .map_err(|e| ComputeError::ExecutionFailed(format!("gzip compress: {}", e)))?;
+        let compressed = encoder.finish()
+            .map_err(|e| ComputeError::ExecutionFailed(format!("gzip compress: {}", e)))?;
+        Ok(Bytes::from(compressed))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}
+
+// ── #32 GzipDecompressFn ──
+
+pub struct GzipDecompressFn;
+
+impl ComputeFunction for GzipDecompressFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("gzip_decompress", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+        let mut decoder = GzDecoder::new(&inputs[0][..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("gzip decompress: {}", e)))?;
+        Ok(Bytes::from(decompressed))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}
+
+// ── #33 Sha256Fn ──
 

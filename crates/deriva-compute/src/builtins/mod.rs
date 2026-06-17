@@ -115,6 +115,8 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(SnappyDecompressFn));
     registry.register(Arc::new(BrotliCompressFn));
     registry.register(Arc::new(BrotliDecompressFn));
+    registry.register(Arc::new(GzipCompressFn));
+    registry.register(Arc::new(GzipDecompressFn));
     registry.register(Arc::new(Sha256Fn));
     registry.register(Arc::new(Sha512Fn));
     registry.register(Arc::new(Md5Fn));

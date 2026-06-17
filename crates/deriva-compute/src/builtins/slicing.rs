@@ -131,7 +131,7 @@ impl ComputeFunction for HeadFn {
     fn id(&self) -> FunctionId { FunctionId::new("head", "1.0.0") }
     fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
         if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
-        let n: usize = parse_usize_param(params, "lines")?;
+        let n: usize = parse_usize_param(params, "n")?;
         let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("head requires UTF-8 input".into()))?;
         let result: Vec<&str> = text.lines().take(n).collect();
         Ok(Bytes::from(result.join("\n")))
@@ -147,7 +147,7 @@ impl ComputeFunction for TailFn {
     fn id(&self) -> FunctionId { FunctionId::new("tail", "1.0.0") }
     fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
         if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
-        let n: usize = parse_usize_param(params, "lines")?;
+        let n: usize = parse_usize_param(params, "n")?;
         let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("tail requires UTF-8 input".into()))?;
         let all_lines: Vec<&str> = text.lines().collect();
         let start = all_lines.len().saturating_sub(n);

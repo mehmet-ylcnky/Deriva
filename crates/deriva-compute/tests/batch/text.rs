@@ -30,34 +30,46 @@ fn read_f64(b: &Bytes) -> f64 { f64::from_be_bytes(b[..8].try_into().unwrap()) }
 
 #[test]
 fn replace_basic() {
-    let r = exec1_params(&ReplaceFn, b"hello world", params(&[("find", "world"), ("replace", "rust")])).unwrap();
+    let r = exec1_params(&ReplaceFn, b"hello world", params(&[("pattern", "world"), ("replacement", "rust")])).unwrap();
     assert_eq!(r.as_ref(), b"hello rust");
 }
 
 #[test]
 fn replace_multiple_occurrences() {
-    let r = exec1_params(&ReplaceFn, b"aabaa", params(&[("find", "a"), ("replace", "x")])).unwrap();
+    let r = exec1_params(&ReplaceFn, b"aabaa", params(&[("pattern", "a"), ("replacement", "x")])).unwrap();
     assert_eq!(r.as_ref(), b"xxbxx");
 }
 
 #[test]
 fn replace_no_match() {
-    let r = exec1_params(&ReplaceFn, b"hello", params(&[("find", "xyz"), ("replace", "!")])).unwrap();
+    let r = exec1_params(&ReplaceFn, b"hello", params(&[("pattern", "xyz"), ("replacement", "!")])).unwrap();
     assert_eq!(r.as_ref(), b"hello");
 }
 
 #[test]
-fn replace_empty_find_error() {
+fn replace_invalid_regex() {
     assert!(matches!(
-        exec1_params(&ReplaceFn, b"hello", params(&[("find", ""), ("replace", "x")])),
+        exec1_params(&ReplaceFn, b"hello", params(&[("pattern", "[bad"), ("replacement", "x")])),
         Err(ComputeError::InvalidParam(_))
     ));
 }
 
 #[test]
 fn replace_empty_input() {
-    let r = exec1_params(&ReplaceFn, b"", params(&[("find", "a"), ("replace", "b")])).unwrap();
+    let r = exec1_params(&ReplaceFn, b"", params(&[("pattern", "a"), ("replacement", "b")])).unwrap();
     assert!(r.is_empty());
+}
+
+#[test]
+fn replace_capture_groups() {
+    let r = exec1_params(&ReplaceFn, b"2024-01-15", params(&[("pattern", r"(\d{4})-(\d{2})-(\d{2})"), ("replacement", "$2/$3/$1")])).unwrap();
+    assert_eq!(r.as_ref(), b"01/15/2024");
+}
+
+#[test]
+fn replace_regex_special_chars() {
+    let r = exec1_params(&ReplaceFn, b"foo123bar456", params(&[("pattern", r"\d+"), ("replacement", "NUM")])).unwrap();
+    assert_eq!(r.as_ref(), b"fooNUMbarNUM");
 }
 
 
@@ -362,3 +374,171 @@ fn charset_convert_empty_input() {
 }
 
 
+// ── SplitFn ──
+
+#[test]
+fn split_basic() {
+    let r = exec1_params(&SplitFn, b"a,b,c", params(&[("delimiter", ",")])).unwrap();
+    assert_eq!(r.as_ref(), b"a\x00b\x00c");
+}
+
+#[test]
+fn split_no_delimiter_found() {
+    let r = exec1_params(&SplitFn, b"hello", params(&[("delimiter", ",")])).unwrap();
+    assert_eq!(r.as_ref(), b"hello");
+}
+
+#[test]
+fn split_empty_input() {
+    let r = exec1_params(&SplitFn, b"", params(&[("delimiter", ",")])).unwrap();
+    assert_eq!(r.as_ref(), b"");
+}
+
+#[test]
+fn split_multi_char_delimiter() {
+    let r = exec1_params(&SplitFn, b"a::b::c", params(&[("delimiter", "::")])).unwrap();
+    assert_eq!(r.as_ref(), b"a\x00b\x00c");
+}
+
+#[test]
+fn split_missing_param() {
+    let r = exec1(&SplitFn, b"test");
+    assert!(matches!(r, Err(ComputeError::InvalidParam(_))));
+}
+
+#[test]
+fn split_input_count_error() {
+    let f = SplitFn;
+    let r = f.execute(vec![], &params(&[("delimiter", ",")]));
+    assert!(matches!(r, Err(ComputeError::InputCount { expected: 1, got: 0 })));
+}
+
+
+// ── JoinFn ──
+
+fn exec_multi_params(f: &dyn ComputeFunction, inputs: Vec<&[u8]>, p: BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+    f.execute(inputs.iter().map(|b| Bytes::from(b.to_vec())).collect(), &p)
+}
+
+#[test]
+fn join_basic() {
+    let r = exec_multi_params(&JoinFn, vec![b"a", b"b", b"c"], params(&[("separator", ",")])).unwrap();
+    assert_eq!(r.as_ref(), b"a,b,c");
+}
+
+#[test]
+fn join_single_input() {
+    let r = exec_multi_params(&JoinFn, vec![b"hello"], params(&[("separator", ",")])).unwrap();
+    assert_eq!(r.as_ref(), b"hello");
+}
+
+#[test]
+fn join_empty_separator() {
+    let r = exec_multi_params(&JoinFn, vec![b"a", b"b", b"c"], params(&[("separator", "")])).unwrap();
+    assert_eq!(r.as_ref(), b"abc");
+}
+
+#[test]
+fn join_newline_separator() {
+    let r = exec_multi_params(&JoinFn, vec![b"line1", b"line2"], params(&[("separator", "\n")])).unwrap();
+    assert_eq!(r.as_ref(), b"line1\nline2");
+}
+
+#[test]
+fn join_no_inputs_error() {
+    let f = JoinFn;
+    let r = f.execute(vec![], &params(&[("separator", ",")]));
+    assert!(matches!(r, Err(ComputeError::InputCount { expected: 1, got: 0 })));
+}
+
+#[test]
+fn join_missing_param() {
+    let r = exec_multi_params(&JoinFn, vec![b"a", b"b"], BTreeMap::new());
+    assert!(matches!(r, Err(ComputeError::InvalidParam(_))));
+}
+
+
+// ── SortLinesFn ──
+
+#[test]
+fn sort_lines_basic() {
+    let r = exec1(&SortLinesFn, b"banana\napple\ncherry").unwrap();
+    assert_eq!(r.as_ref(), b"apple\nbanana\ncherry");
+}
+
+#[test]
+fn sort_lines_preserves_trailing_newline() {
+    let r = exec1(&SortLinesFn, b"banana\napple\ncherry\n").unwrap();
+    assert_eq!(r.as_ref(), b"apple\nbanana\ncherry\n");
+}
+
+#[test]
+fn sort_lines_no_trailing_newline() {
+    let r = exec1(&SortLinesFn, b"c\nb\na").unwrap();
+    assert_eq!(r.as_ref(), b"a\nb\nc");
+}
+
+#[test]
+fn sort_lines_already_sorted() {
+    let r = exec1(&SortLinesFn, b"a\nb\nc").unwrap();
+    assert_eq!(r.as_ref(), b"a\nb\nc");
+}
+
+#[test]
+fn sort_lines_single_line() {
+    let r = exec1(&SortLinesFn, b"hello").unwrap();
+    assert_eq!(r.as_ref(), b"hello");
+}
+
+#[test]
+fn sort_lines_empty() {
+    let r = exec1(&SortLinesFn, b"").unwrap();
+    assert_eq!(r.as_ref(), b"");
+}
+
+#[test]
+fn sort_lines_input_count_error() {
+    let f = SortLinesFn;
+    let r = f.execute(vec![], &BTreeMap::new());
+    assert!(matches!(r, Err(ComputeError::InputCount { expected: 1, got: 0 })));
+}
+
+
+// ── UniqueLinesFn ──
+
+#[test]
+fn unique_lines_basic() {
+    let r = exec1(&UniqueLinesFn, b"a\na\nb\nb\nc").unwrap();
+    assert_eq!(r.as_ref(), b"a\nb\nc");
+}
+
+#[test]
+fn unique_lines_no_duplicates() {
+    let r = exec1(&UniqueLinesFn, b"a\nb\nc").unwrap();
+    assert_eq!(r.as_ref(), b"a\nb\nc");
+}
+
+#[test]
+fn unique_lines_non_consecutive_duplicates_kept() {
+    let r = exec1(&UniqueLinesFn, b"a\nb\na").unwrap();
+    assert_eq!(r.as_ref(), b"a\nb\na");
+}
+
+#[test]
+fn unique_lines_all_same() {
+    let r = exec1(&UniqueLinesFn, b"x\nx\nx\nx").unwrap();
+    assert_eq!(r.as_ref(), b"x");
+}
+
+#[test]
+fn unique_lines_empty() {
+    let r = exec1(&UniqueLinesFn, b"").unwrap();
+    assert_eq!(r.as_ref(), b"");
+}
+
+#[test]
+fn unique_lines_input_count_error() {
+    let f = UniqueLinesFn;
+    let r = f.execute(vec![], &BTreeMap::new());
+    assert!(matches!(r, Err(ComputeError::InputCount { expected: 1, got: 0 })));
+}

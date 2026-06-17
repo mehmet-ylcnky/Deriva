@@ -59,8 +59,8 @@ fn empty_input_hash_functions() {
 #[test]
 fn empty_input_accumulators() {
     assert_eq!(read_u64(&exec1(&ByteCountFn, b"").unwrap()), 0);
-    assert_eq!(read_u64(&exec1(&LineCountFn, b"").unwrap()), 0);
-    assert_eq!(read_u64(&exec1(&WordCountFn, b"").unwrap()), 0);
+    assert_eq!(exec1(&LineCountFn, b"").unwrap().as_ref(), b"0");
+    assert_eq!(exec1(&WordCountFn, b"").unwrap().as_ref(), b"0");
 }
 
 #[test]
@@ -113,7 +113,7 @@ fn wrong_input_count_multi_input_fns() {
 #[test]
 fn non_utf8_text_functions_fail() {
     let bad = &[0xFF, 0xFE, 0x80];
-    let rp = params(&[("find", "x"), ("replace", "y")]);
+    let rp = params(&[("pattern", "x"), ("replacement", "y")]);
     assert!(matches!(exec1_params(&ReplaceFn, bad, rp), Err(ComputeError::ExecutionFailed(_))));
     assert!(matches!(exec1(&LineNumberFn, bad), Err(ComputeError::ExecutionFailed(_))));
     assert!(matches!(exec1(&Utf8ValidateFn, bad), Err(ComputeError::ExecutionFailed(_))));
@@ -308,11 +308,11 @@ fn slice_start_beyond_end() {
     ));
 }
 
-// Text: replace with empty find pattern
+// Text: replace with invalid regex pattern
 #[test]
-fn replace_empty_pattern() {
+fn replace_invalid_regex_pattern() {
     assert!(matches!(
-        exec1_params(&ReplaceFn, b"hello", params(&[("find", ""), ("replace", "x")])),
+        exec1_params(&ReplaceFn, b"hello", params(&[("pattern", "[invalid"), ("replacement", "x")])),
         Err(ComputeError::InvalidParam(_))
     ));
 }

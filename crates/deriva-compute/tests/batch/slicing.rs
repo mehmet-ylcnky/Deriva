@@ -270,31 +270,31 @@ fn shuffle_empty() {
 
 #[test]
 fn head_first_2_lines() {
-    let r = exec1_params(&HeadFn, b"a\nb\nc\nd", params(&[("lines", "2")])).unwrap();
+    let r = exec1_params(&HeadFn, b"a\nb\nc\nd", params(&[("n", "2")])).unwrap();
     assert_eq!(r.as_ref(), b"a\nb");
 }
 
 #[test]
 fn head_more_than_available() {
-    let r = exec1_params(&HeadFn, b"a\nb", params(&[("lines", "10")])).unwrap();
+    let r = exec1_params(&HeadFn, b"a\nb", params(&[("n", "10")])).unwrap();
     assert_eq!(r.as_ref(), b"a\nb");
 }
 
 #[test]
 fn head_one_line() {
-    let r = exec1_params(&HeadFn, b"a\nb\nc", params(&[("lines", "1")])).unwrap();
+    let r = exec1_params(&HeadFn, b"a\nb\nc", params(&[("n", "1")])).unwrap();
     assert_eq!(r.as_ref(), b"a");
 }
 
 #[test]
 fn head_empty() {
-    let r = exec1_params(&HeadFn, b"", params(&[("lines", "5")])).unwrap();
+    let r = exec1_params(&HeadFn, b"", params(&[("n", "5")])).unwrap();
     assert_eq!(r.as_ref(), b"");
 }
 
 #[test]
 fn head_single_line_input() {
-    let r = exec1_params(&HeadFn, b"only line", params(&[("lines", "1")])).unwrap();
+    let r = exec1_params(&HeadFn, b"only line", params(&[("n", "1")])).unwrap();
     assert_eq!(r.as_ref(), b"only line");
 }
 
@@ -303,31 +303,31 @@ fn head_single_line_input() {
 
 #[test]
 fn tail_last_2_lines() {
-    let r = exec1_params(&TailFn, b"a\nb\nc\nd", params(&[("lines", "2")])).unwrap();
+    let r = exec1_params(&TailFn, b"a\nb\nc\nd", params(&[("n", "2")])).unwrap();
     assert_eq!(r.as_ref(), b"c\nd");
 }
 
 #[test]
 fn tail_more_than_available() {
-    let r = exec1_params(&TailFn, b"a\nb", params(&[("lines", "10")])).unwrap();
+    let r = exec1_params(&TailFn, b"a\nb", params(&[("n", "10")])).unwrap();
     assert_eq!(r.as_ref(), b"a\nb");
 }
 
 #[test]
 fn tail_one_line() {
-    let r = exec1_params(&TailFn, b"a\nb\nc", params(&[("lines", "1")])).unwrap();
+    let r = exec1_params(&TailFn, b"a\nb\nc", params(&[("n", "1")])).unwrap();
     assert_eq!(r.as_ref(), b"c");
 }
 
 #[test]
 fn tail_empty() {
-    let r = exec1_params(&TailFn, b"", params(&[("lines", "5")])).unwrap();
+    let r = exec1_params(&TailFn, b"", params(&[("n", "5")])).unwrap();
     assert_eq!(r.as_ref(), b"");
 }
 
 #[test]
 fn tail_single_line_input() {
-    let r = exec1_params(&TailFn, b"only line", params(&[("lines", "1")])).unwrap();
+    let r = exec1_params(&TailFn, b"only line", params(&[("n", "1")])).unwrap();
     assert_eq!(r.as_ref(), b"only line");
 }
 

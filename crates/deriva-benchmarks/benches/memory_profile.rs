@@ -223,7 +223,7 @@ fn s07_text_memory(c: &mut Criterion) {
         })
     });
     g.bench_function("replace_same_len", |b| {
-        let rp = p(&[("find", "fox"), ("replace", "cat")]);
+        let rp = p(&[("pattern", "fox"), ("replacement", "cat")]);
         b.iter(|| {
             let out = exec(&ReplaceFn, vec![text.clone()], &rp);
             assert_eq!(out.len(), text.len()); // Same length replacement
@@ -231,7 +231,7 @@ fn s07_text_memory(c: &mut Criterion) {
         })
     });
     g.bench_function("replace_expand", |b| {
-        let rp = p(&[("find", "fox"), ("replace", "elephant")]);
+        let rp = p(&[("pattern", "fox"), ("replacement", "elephant")]);
         b.iter(|| {
             let out = exec(&ReplaceFn, vec![text.clone()], &rp);
             assert!(out.len() > text.len()); // Expansion

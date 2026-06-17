@@ -164,7 +164,7 @@ fn s08_onlogn_sort_unique(c: &mut Criterion) {
 // §7.3 Scenario 9: O(n×m) — Replace (many matches)
 fn s09_onm_replace(c: &mut Criterion) {
     let f = ReplaceFn;
-    let params = p(&[("find", "the"), ("replace", "THE")]);
+    let params = p(&[("pattern", "the"), ("replacement", "THE")]);
     let mut g = c.benchmark_group("7.3_09_Onm_replace");
     for &(sz, label) in SIZES {
         // "the" appears ~2× per line in our text

@@ -226,4 +226,10 @@ pub fn register_extended_batch(registry: &mut crate::registry::FunctionRegistry)
     registry.register(Arc::new(Ed25519SignFn));
     registry.register(Arc::new(Ed25519VerifyFn));
     registry.register(Arc::new(Argon2HashFn));
+
+    // Text: split, join, sort_lines, unique_lines
+    registry.register(Arc::new(SplitFn));
+    registry.register(Arc::new(JoinFn));
+    registry.register(Arc::new(SortLinesFn));
+    registry.register(Arc::new(UniqueLinesFn));
 }

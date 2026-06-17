@@ -24,12 +24,8 @@ impl ComputeFunction for LineCountFn {
     fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
         if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
         let input = &inputs[0];
-        if input.is_empty() {
-            return Ok(Bytes::copy_from_slice(&0u64.to_be_bytes()));
-        }
-        let newlines = input.iter().filter(|&&b| b == b'\n').count() as u64;
-        let count = if input.last() == Some(&b'\n') { newlines } else { newlines + 1 };
-        Ok(Bytes::copy_from_slice(&count.to_be_bytes()))
+        let newlines = input.iter().filter(|&&b| b == b'\n').count();
+        Ok(Bytes::from(newlines.to_string()))
     }
     fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
@@ -52,7 +48,7 @@ impl ComputeFunction for WordCountFn {
                 count += 1;
             }
         }
-        Ok(Bytes::copy_from_slice(&count.to_be_bytes()))
+        Ok(Bytes::from(count.to_string()))
     }
     fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }

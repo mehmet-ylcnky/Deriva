@@ -60,7 +60,8 @@ fn pipeline_analytics() {
     let input = Bytes::from("error: bad\ninfo: ok\nerror: fail\ninfo: fine\n");
     let grepped = ep(&GrepFn, input, params(&[("pattern", "error")]));
     let count = e(&LineCountFn, grepped);
-    assert_eq!(read_u64(&count), 2);
+    // grep returns "error: bad\nerror: fail" — 1 newline character
+    assert_eq!(count.as_ref(), b"1");
 }
 
 // 4. Format pipeline: csv_to_json → json_minify → sha256
@@ -173,7 +174,8 @@ fn pipeline_sort_unique_count() {
     let input = Bytes::from("banana\napple\nbanana\ncherry\napple\n");
     let sorted_unique = e(&SortUniqueFn, input);
     let count = e(&LineCountFn, sorted_unique);
-    assert_eq!(read_u64(&count), 3);
+    // sort_unique returns "apple\nbanana\ncherry" — 2 newline characters
+    assert_eq!(count.as_ref(), b"2");
 }
 
 // 16. Grep → prefix → line_number
@@ -256,10 +258,10 @@ fn pipeline_merkle_of_compressed() {
 #[test]
 fn pipeline_replace_filter_count() {
     let input = Bytes::from("foo bar\nfoo baz\nbaz qux\n");
-    let replaced = ep(&ReplaceFn, input, params(&[("find", "foo"), ("replace", "XXX")]));
+    let replaced = ep(&ReplaceFn, input, params(&[("pattern", "foo"), ("replacement", "XXX")]));
     let filtered = ep(&GrepInvertFn, replaced, params(&[("pattern", "XXX")]));
     let wc = e(&WordCountFn, filtered);
-    assert_eq!(read_u64(&wc), 2); // "baz qux"
+    assert_eq!(wc.as_ref(), b"2"); // "baz qux"
 }
 
 // 25. Full CAS pipeline: data → compress → encrypt → caddr_embed → verify embed

@@ -59,27 +59,28 @@ fn byte_count_null_bytes() {
 
 #[test]
 fn line_count_empty() {
-    assert_eq!(read_u64(&exec1(&LineCountFn, b"").unwrap()), 0);
+    assert_eq!(exec1(&LineCountFn, b"").unwrap().as_ref(), b"0");
 }
 
 #[test]
 fn line_count_no_trailing_newline() {
-    assert_eq!(read_u64(&exec1(&LineCountFn, b"abc").unwrap()), 1);
+    // "abc" has 0 newline characters
+    assert_eq!(exec1(&LineCountFn, b"abc").unwrap().as_ref(), b"0");
 }
 
 #[test]
 fn line_count_with_trailing_newline() {
-    assert_eq!(read_u64(&exec1(&LineCountFn, b"abc\n").unwrap()), 1);
+    assert_eq!(exec1(&LineCountFn, b"abc\n").unwrap().as_ref(), b"1");
 }
 
 #[test]
 fn line_count_multiple_lines() {
-    assert_eq!(read_u64(&exec1(&LineCountFn, b"a\nb\nc\n").unwrap()), 3);
+    assert_eq!(exec1(&LineCountFn, b"a\nb\nc\n").unwrap().as_ref(), b"3");
 }
 
 #[test]
 fn line_count_single_newline() {
-    assert_eq!(read_u64(&exec1(&LineCountFn, b"\n").unwrap()), 1);
+    assert_eq!(exec1(&LineCountFn, b"\n").unwrap().as_ref(), b"1");
 }
 
 
@@ -87,27 +88,27 @@ fn line_count_single_newline() {
 
 #[test]
 fn word_count_empty() {
-    assert_eq!(read_u64(&exec1(&WordCountFn, b"").unwrap()), 0);
+    assert_eq!(exec1(&WordCountFn, b"").unwrap().as_ref(), b"0");
 }
 
 #[test]
 fn word_count_single_word() {
-    assert_eq!(read_u64(&exec1(&WordCountFn, b"hello").unwrap()), 1);
+    assert_eq!(exec1(&WordCountFn, b"hello").unwrap().as_ref(), b"1");
 }
 
 #[test]
 fn word_count_multiple_words() {
-    assert_eq!(read_u64(&exec1(&WordCountFn, b"the quick brown fox").unwrap()), 4);
+    assert_eq!(exec1(&WordCountFn, b"the quick brown fox").unwrap().as_ref(), b"4");
 }
 
 #[test]
 fn word_count_multiple_spaces() {
-    assert_eq!(read_u64(&exec1(&WordCountFn, b"  hello   world  ").unwrap()), 2);
+    assert_eq!(exec1(&WordCountFn, b"  hello   world  ").unwrap().as_ref(), b"2");
 }
 
 #[test]
 fn word_count_tabs_and_newlines() {
-    assert_eq!(read_u64(&exec1(&WordCountFn, b"a\tb\nc\rd").unwrap()), 4);
+    assert_eq!(exec1(&WordCountFn, b"a\tb\nc\rd").unwrap().as_ref(), b"4");
 }
 
 

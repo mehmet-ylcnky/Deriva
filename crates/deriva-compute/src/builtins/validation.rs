@@ -151,5 +151,135 @@ impl ComputeFunction for Crc32VerifyFn {
     fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
+// ── SizeCheckFn (size_check@1.0.0) ──
+
+pub struct SizeCheckFn;
+
+impl ComputeFunction for SizeCheckFn {
+    fn id(&self) -> FunctionId { FunctionId::new("size_check", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let min: usize = match params.get("min") {
+            Some(Value::String(s)) => s.parse().map_err(|_| ComputeError::InvalidParam("min must be a non-negative integer".into()))?,
+            None => 0,
+            _ => return Err(ComputeError::InvalidParam("min must be a string".into())),
+        };
+        let max: Option<usize> = match params.get("max") {
+            Some(Value::String(s)) if s == "unlimited" => None,
+            Some(Value::String(s)) => Some(s.parse().map_err(|_| ComputeError::InvalidParam("max must be a non-negative integer or \"unlimited\"".into()))?),
+            None => None,
+            _ => return Err(ComputeError::InvalidParam("max must be a string".into())),
+        };
+        let size = inputs[0].len();
+        if size < min {
+            return Err(ComputeError::ExecutionFailed(format!(
+                "input size {} is below minimum {}", size, min
+            )));
+        }
+        if let Some(max_val) = max {
+            if size > max_val {
+                return Err(ComputeError::ExecutionFailed(format!(
+                    "input size {} exceeds maximum {}", size, max_val
+                )));
+            }
+        }
+        Ok(inputs[0].clone())
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
+}
+
+// ── NotEmptyFn (not_empty@1.0.0) ──
+
+pub struct NotEmptyFn;
+
+impl ComputeFunction for NotEmptyFn {
+    fn id(&self) -> FunctionId { FunctionId::new("not_empty", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        if inputs[0].is_empty() { return Err(ComputeError::ExecutionFailed("input is empty".into())); }
+        Ok(inputs[0].clone())
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
+}
+
+// ── RegexMatchFn (regex_match@1.0.0) ──
+
+pub struct RegexMatchFn;
+
+impl ComputeFunction for RegexMatchFn {
+    fn id(&self) -> FunctionId { FunctionId::new("regex_match", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let pattern = get_string_param(params, "pattern")?;
+        let re = regex::Regex::new(pattern)
+            .map_err(|e| ComputeError::InvalidParam(format!("invalid regex pattern: {}", e)))?;
+        let text = std::str::from_utf8(&inputs[0])
+            .map_err(|_| ComputeError::ExecutionFailed("input is not valid UTF-8".into()))?;
+        // The entire input must match the pattern
+        if let Some(m) = re.find(text) {
+            if m.start() == 0 && m.end() == text.len() {
+                return Ok(inputs[0].clone());
+            }
+        }
+        Err(ComputeError::ExecutionFailed(format!("input does not match pattern: {}", pattern)))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(100, input_sizes) }
+}
+
+// ── ContentTypeCheckFn (content_type_check@1.0.0) ──
+
+pub struct ContentTypeCheckFn;
+
+impl ContentTypeCheckFn {
+    fn detect_content_type(data: &[u8]) -> &'static str {
+        if data.len() >= 4 && data[0..4] == [0x25, 0x50, 0x44, 0x46] {
+            return "application/pdf";
+        }
+        if data.len() >= 4 && data[0..4] == [0x89, 0x50, 0x4E, 0x47] {
+            return "image/png";
+        }
+        if data.len() >= 3 && data[0..3] == [0xFF, 0xD8, 0xFF] {
+            return "image/jpeg";
+        }
+        if data.len() >= 4 && data[0..4] == [0x47, 0x49, 0x46, 0x38] {
+            return "image/gif";
+        }
+        if data.len() >= 4 && data[0..4] == [0x50, 0x4B, 0x03, 0x04] {
+            return "application/zip";
+        }
+        if data.len() >= 2 && data[0..2] == [0x1F, 0x8B] {
+            return "application/gzip";
+        }
+        if data.len() >= 5 && data[0..5] == [0x3C, 0x3F, 0x78, 0x6D, 0x6C] {
+            return "application/xml";
+        }
+        // JSON detection: starts with { or [ (after optional whitespace)
+        if let Ok(text) = std::str::from_utf8(data) {
+            let trimmed = text.trim_start();
+            if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                return "application/json";
+            }
+        }
+        "application/octet-stream"
+    }
+}
+
+impl ComputeFunction for ContentTypeCheckFn {
+    fn id(&self) -> FunctionId { FunctionId::new("content_type_check", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let expected = get_string_param(params, "expected")?;
+        let detected = Self::detect_content_type(&inputs[0]);
+        if detected == expected {
+            Ok(inputs[0].clone())
+        } else {
+            Err(ComputeError::ExecutionFailed(format!(
+                "content type mismatch: expected {}, detected {}", expected, detected
+            )))
+        }
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}
+
 // ── #84 JsonPrettyPrintFn ──
 

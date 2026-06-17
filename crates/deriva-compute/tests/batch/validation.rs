@@ -315,3 +315,200 @@ fn crc32_verify_passthrough() {
 }
 
 
+// ── SizeCheckFn (size_check@1.0.0) ──
+
+#[test]
+fn size_check_within_range() {
+    let r = exec1_params(&SizeCheckFn, b"hello", params(&[("min", "3"), ("max", "10")])).unwrap();
+    assert_eq!(r.as_ref(), b"hello");
+}
+
+#[test]
+fn size_check_below_min() {
+    let r = exec1_params(&SizeCheckFn, b"hi", params(&[("min", "5"), ("max", "10")]));
+    assert!(matches!(r, Err(ComputeError::ExecutionFailed(_))));
+}
+
+#[test]
+fn size_check_above_max() {
+    let r = exec1_params(&SizeCheckFn, b"hello world!", params(&[("min", "0"), ("max", "5")]));
+    assert!(matches!(r, Err(ComputeError::ExecutionFailed(_))));
+}
+
+#[test]
+fn size_check_defaults_no_params() {
+    // Both min and max are optional; min defaults to 0, max defaults to unlimited
+    let r = exec1_params(&SizeCheckFn, b"anything", BTreeMap::new()).unwrap();
+    assert_eq!(r.as_ref(), b"anything");
+}
+
+#[test]
+fn size_check_max_unlimited_string() {
+    let r = exec1_params(&SizeCheckFn, b"large data here", params(&[("min", "1"), ("max", "unlimited")])).unwrap();
+    assert_eq!(r.as_ref(), b"large data here");
+}
+
+#[test]
+fn size_check_exact_min_boundary() {
+    let r = exec1_params(&SizeCheckFn, b"abc", params(&[("min", "3")])).unwrap();
+    assert_eq!(r.as_ref(), b"abc");
+}
+
+#[test]
+fn size_check_exact_max_boundary() {
+    let r = exec1_params(&SizeCheckFn, b"abcde", params(&[("min", "0"), ("max", "5")])).unwrap();
+    assert_eq!(r.as_ref(), b"abcde");
+}
+
+#[test]
+fn size_check_empty_input_min_zero() {
+    let r = exec1_params(&SizeCheckFn, b"", params(&[("min", "0"), ("max", "100")])).unwrap();
+    assert!(r.is_empty());
+}
+
+#[test]
+fn size_check_invalid_min_param() {
+    let r = exec1_params(&SizeCheckFn, b"data", params(&[("min", "abc")]));
+    assert!(matches!(r, Err(ComputeError::InvalidParam(_))));
+}
+
+#[test]
+fn size_check_invalid_max_param() {
+    let r = exec1_params(&SizeCheckFn, b"data", params(&[("min", "0"), ("max", "abc")]));
+    assert!(matches!(r, Err(ComputeError::InvalidParam(_))));
+}
+
+
+// ── NotEmptyFn (not_empty@1.0.0) ──
+
+#[test]
+fn not_empty_passes() {
+    let r = exec1(&NotEmptyFn, b"data").unwrap();
+    assert_eq!(r.as_ref(), b"data");
+}
+
+#[test]
+fn not_empty_single_byte() {
+    let r = exec1(&NotEmptyFn, &[0x00]).unwrap();
+    assert_eq!(r.len(), 1);
+}
+
+#[test]
+fn not_empty_fails_on_empty() {
+    let r = exec1(&NotEmptyFn, b"");
+    assert!(matches!(r, Err(ComputeError::ExecutionFailed(_))));
+}
+
+#[test]
+fn not_empty_whitespace_passes() {
+    let r = exec1(&NotEmptyFn, b" ").unwrap();
+    assert_eq!(r.as_ref(), b" ");
+}
+
+
+// ── RegexMatchFn (regex_match@1.0.0) ──
+
+#[test]
+fn regex_match_full_match() {
+    let r = exec1_params(&RegexMatchFn, b"hello123", params(&[("pattern", r"^hello\d+$")])).unwrap();
+    assert_eq!(r.as_ref(), b"hello123");
+}
+
+#[test]
+fn regex_match_partial_no_match() {
+    // Pattern matches only part of input → should fail
+    let r = exec1_params(&RegexMatchFn, b"hello123world", params(&[("pattern", r"hello\d+")]));
+    assert!(matches!(r, Err(ComputeError::ExecutionFailed(_))));
+}
+
+#[test]
+fn regex_match_no_match() {
+    let r = exec1_params(&RegexMatchFn, b"goodbye", params(&[("pattern", r"^hello$")]));
+    assert!(matches!(r, Err(ComputeError::ExecutionFailed(_))));
+}
+
+#[test]
+fn regex_match_invalid_pattern() {
+    let r = exec1_params(&RegexMatchFn, b"test", params(&[("pattern", r"[invalid")]));
+    assert!(matches!(r, Err(ComputeError::InvalidParam(_))));
+}
+
+#[test]
+fn regex_match_empty_input_empty_pattern() {
+    let r = exec1_params(&RegexMatchFn, b"", params(&[("pattern", r"^$")])).unwrap();
+    assert!(r.is_empty());
+}
+
+#[test]
+fn regex_match_dot_star() {
+    let r = exec1_params(&RegexMatchFn, b"anything goes", params(&[("pattern", r".*")])).unwrap();
+    assert_eq!(r.as_ref(), b"anything goes");
+}
+
+#[test]
+fn regex_match_non_utf8_input() {
+    let r = exec1_params(&RegexMatchFn, &[0xFF, 0xFE], params(&[("pattern", r".*")]));
+    assert!(matches!(r, Err(ComputeError::ExecutionFailed(_))));
+}
+
+
+// ── ContentTypeCheckFn (content_type_check@1.0.0) ──
+
+#[test]
+fn content_type_check_png() {
+    let mut input = vec![0x89, 0x50, 0x4E, 0x47];
+    input.extend_from_slice(b"rest of png data");
+    let r = exec1_params(&ContentTypeCheckFn, &input, params(&[("expected", "image/png")])).unwrap();
+    assert_eq!(r.as_ref(), input.as_slice());
+}
+
+#[test]
+fn content_type_check_jpeg() {
+    let mut input = vec![0xFF, 0xD8, 0xFF, 0xE0];
+    input.extend_from_slice(b"jpeg data");
+    let r = exec1_params(&ContentTypeCheckFn, &input, params(&[("expected", "image/jpeg")])).unwrap();
+    assert_eq!(r.as_ref(), input.as_slice());
+}
+
+#[test]
+fn content_type_check_pdf() {
+    let mut input = vec![0x25, 0x50, 0x44, 0x46]; // %PDF
+    input.extend_from_slice(b"-1.4 rest");
+    let r = exec1_params(&ContentTypeCheckFn, &input, params(&[("expected", "application/pdf")])).unwrap();
+    assert_eq!(r.as_ref(), input.as_slice());
+}
+
+#[test]
+fn content_type_check_json() {
+    let r = exec1_params(&ContentTypeCheckFn, b"{\"key\":\"value\"}", params(&[("expected", "application/json")])).unwrap();
+    assert_eq!(r.as_ref(), b"{\"key\":\"value\"}");
+}
+
+#[test]
+fn content_type_check_json_array() {
+    let r = exec1_params(&ContentTypeCheckFn, b"[1,2,3]", params(&[("expected", "application/json")])).unwrap();
+    assert_eq!(r.as_ref(), b"[1,2,3]");
+}
+
+#[test]
+fn content_type_check_mismatch() {
+    let r = exec1_params(&ContentTypeCheckFn, b"plain text data", params(&[("expected", "image/png")]));
+    assert!(matches!(r, Err(ComputeError::ExecutionFailed(_))));
+}
+
+#[test]
+fn content_type_check_gzip() {
+    let mut input = vec![0x1F, 0x8B];
+    input.extend_from_slice(b"compressed data");
+    let r = exec1_params(&ContentTypeCheckFn, &input, params(&[("expected", "application/gzip")])).unwrap();
+    assert_eq!(r.as_ref(), input.as_slice());
+}
+
+#[test]
+fn content_type_check_octet_stream_fallback() {
+    // Binary data that doesn't match any known magic bytes
+    let r = exec1_params(&ContentTypeCheckFn, &[0x00, 0x01, 0x02, 0x03], params(&[("expected", "application/octet-stream")])).unwrap();
+    assert_eq!(r.as_ref(), &[0x00, 0x01, 0x02, 0x03]);
+}
+
+

@@ -232,4 +232,10 @@ pub fn register_extended_batch(registry: &mut crate::registry::FunctionRegistry)
     registry.register(Arc::new(JoinFn));
     registry.register(Arc::new(SortLinesFn));
     registry.register(Arc::new(UniqueLinesFn));
+
+    // Validation: size_check, not_empty, regex_match, content_type_check
+    registry.register(Arc::new(SizeCheckFn));
+    registry.register(Arc::new(NotEmptyFn));
+    registry.register(Arc::new(RegexMatchFn));
+    registry.register(Arc::new(ContentTypeCheckFn));
 }

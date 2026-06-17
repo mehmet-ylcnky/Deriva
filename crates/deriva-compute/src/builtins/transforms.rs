@@ -480,5 +480,239 @@ impl ComputeFunction for LineEndingFn {
     fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
 }
 
+pub struct Base64UrlEncodeFn;
+
+impl ComputeFunction for Base64UrlEncodeFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("base64url_encode", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&inputs[0]);
+        Ok(Bytes::from(encoded))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}
+
+pub struct Base64UrlDecodeFn;
+
+impl ComputeFunction for Base64UrlDecodeFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("base64url_decode", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&inputs[0])
+            .map(Bytes::from)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("invalid base64url: {}", e)))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}
+
+pub struct Base58EncodeFn;
+
+impl ComputeFunction for Base58EncodeFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("base58_encode", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let encoded = bs58::encode(&inputs[0]).with_alphabet(bs58::Alphabet::BITCOIN).into_string();
+        Ok(Bytes::from(encoded))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}
+
+pub struct Base58DecodeFn;
+
+impl ComputeFunction for Base58DecodeFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("base58_decode", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        bs58::decode(&inputs[0])
+            .with_alphabet(bs58::Alphabet::BITCOIN)
+            .into_vec()
+            .map(Bytes::from)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("invalid base58: {}", e)))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}
+
+pub struct UrlEncodeFn;
+
+impl ComputeFunction for UrlEncodeFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("url_encode", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        use percent_encoding::{percent_encode, NON_ALPHANUMERIC, AsciiSet};
+        // RFC 3986 unreserved characters: ALPHA / DIGIT / "-" / "." / "_" / "~"
+        // We encode everything except those.
+        const RFC3986_UNRESERVED: &AsciiSet = &NON_ALPHANUMERIC
+            .remove(b'-')
+            .remove(b'.')
+            .remove(b'_')
+            .remove(b'~');
+        let encoded = percent_encode(&inputs[0], RFC3986_UNRESERVED).to_string();
+        Ok(Bytes::from(encoded))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}
+
+pub struct UrlDecodeFn;
+
+impl ComputeFunction for UrlDecodeFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("url_decode", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        use percent_encoding::percent_decode;
+        let decoded = percent_decode(&inputs[0]).collect::<Vec<u8>>();
+        Ok(Bytes::from(decoded))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}
+
+pub struct HtmlEncodeFn;
+
+impl ComputeFunction for HtmlEncodeFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("html_encode", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let input = &inputs[0];
+        let mut out = Vec::with_capacity(input.len());
+        for &b in input.iter() {
+            match b {
+                b'&' => out.extend_from_slice(b"&amp;"),
+                b'<' => out.extend_from_slice(b"&lt;"),
+                b'>' => out.extend_from_slice(b"&gt;"),
+                b'"' => out.extend_from_slice(b"&quot;"),
+                b'\'' => out.extend_from_slice(b"&#39;"),
+                _ => out.push(b),
+            }
+        }
+        Ok(Bytes::from(out))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}
+
+pub struct HtmlDecodeFn;
+
+impl ComputeFunction for HtmlDecodeFn {
+    fn id(&self) -> FunctionId {
+        FunctionId::new("html_decode", "1.0.0")
+    }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 {
+            return Err(ComputeError::InputCount { expected: 1, got: inputs.len() });
+        }
+        let input = &inputs[0];
+        let input_str = std::str::from_utf8(input)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("invalid utf-8 for html_decode: {}", e)))?;
+        let mut out = Vec::with_capacity(input.len());
+        let mut chars = input_str.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '&' {
+                // Collect entity until ';' or end
+                let mut entity = String::new();
+                let mut found_semicolon = false;
+                for next_ch in chars.by_ref() {
+                    if next_ch == ';' {
+                        found_semicolon = true;
+                        break;
+                    }
+                    entity.push(next_ch);
+                    // Limit entity length to prevent runaway
+                    if entity.len() > 10 {
+                        break;
+                    }
+                }
+                if found_semicolon {
+                    match entity.as_str() {
+                        "amp" => out.extend_from_slice(b"&"),
+                        "lt" => out.extend_from_slice(b"<"),
+                        "gt" => out.extend_from_slice(b">"),
+                        "quot" => out.extend_from_slice(b"\""),
+                        "apos" => out.extend_from_slice(b"'"),
+                        _ if entity.starts_with('#') => {
+                            // Numeric entity
+                            let num_str = &entity[1..];
+                            let code_point = if let Some(hex_str) = num_str.strip_prefix('x') {
+                                u32::from_str_radix(hex_str, 16).ok()
+                            } else {
+                                num_str.parse::<u32>().ok()
+                            };
+                            match code_point.and_then(char::from_u32) {
+                                Some(decoded_char) => {
+                                    let mut buf = [0u8; 4];
+                                    out.extend_from_slice(decoded_char.encode_utf8(&mut buf).as_bytes());
+                                }
+                                None => {
+                                    return Err(ComputeError::ExecutionFailed(
+                                        format!("invalid html entity: &{};", entity)
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err(ComputeError::ExecutionFailed(
+                                format!("invalid html entity: &{};", entity)
+                            ));
+                        }
+                    }
+                } else {
+                    // No semicolon found — invalid entity
+                    return Err(ComputeError::ExecutionFailed(
+                        "invalid html: unterminated entity reference".into()
+                    ));
+                }
+            } else {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+            }
+        }
+        Ok(Bytes::from(out))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}
+
 // ── #21 CompressFn (zlib) ──
 

@@ -198,6 +198,15 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
 /// Gated behind the `extended-batch` feature flag.
 #[cfg(feature = "extended-batch")]
 pub fn register_extended_batch(registry: &mut crate::registry::FunctionRegistry) {
-    // New extended batch functions will be registered here in subsequent tasks.
-    let _ = registry;
+    use std::sync::Arc;
+
+    // Encoding functions (base64url, base58, url, html)
+    registry.register(Arc::new(Base64UrlEncodeFn));
+    registry.register(Arc::new(Base64UrlDecodeFn));
+    registry.register(Arc::new(Base58EncodeFn));
+    registry.register(Arc::new(Base58DecodeFn));
+    registry.register(Arc::new(UrlEncodeFn));
+    registry.register(Arc::new(UrlDecodeFn));
+    registry.register(Arc::new(HtmlEncodeFn));
+    registry.register(Arc::new(HtmlDecodeFn));
 }

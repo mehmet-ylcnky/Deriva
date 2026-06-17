@@ -118,6 +118,7 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(GzipCompressFn));
     registry.register(Arc::new(GzipDecompressFn));
     registry.register(Arc::new(Sha256Fn));
+    registry.register(Arc::new(Sha384Fn));
     registry.register(Arc::new(Sha512Fn));
     registry.register(Arc::new(Md5Fn));
     registry.register(Arc::new(Blake3Fn));
@@ -211,4 +212,18 @@ pub fn register_extended_batch(registry: &mut crate::registry::FunctionRegistry)
     registry.register(Arc::new(UrlDecodeFn));
     registry.register(Arc::new(HtmlEncodeFn));
     registry.register(Arc::new(HtmlDecodeFn));
+
+    // Crypto functions (HMAC, AES-CTR, AES-GCM, ChaCha20)
+    registry.register(Arc::new(HmacFn));
+    registry.register(Arc::new(AesCtrEncryptFn));
+    registry.register(Arc::new(AesCtrDecryptFn));
+    registry.register(Arc::new(AesGcmEncryptFn));
+    registry.register(Arc::new(AesGcmDecryptFn));
+    registry.register(Arc::new(ChaCha20EncryptFn));
+    registry.register(Arc::new(ChaCha20DecryptFn));
+
+    // Crypto: Ed25519 and Argon2
+    registry.register(Arc::new(Ed25519SignFn));
+    registry.register(Arc::new(Ed25519VerifyFn));
+    registry.register(Arc::new(Argon2HashFn));
 }

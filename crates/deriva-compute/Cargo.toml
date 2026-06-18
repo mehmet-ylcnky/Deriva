@@ -156,6 +156,9 @@ proptest = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 
 [[test]]
+name = "feature_flag_isolation"
+
+[[test]]
 name = "format_archive_tests"
 required-features = ["format-archive"]
 

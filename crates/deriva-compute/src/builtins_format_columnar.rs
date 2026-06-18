@@ -131,6 +131,16 @@ impl ComputeFunction for ParquetProjectionFn {
         let cols: Vec<&str> = cols_str.split(',').map(|s| s.trim()).collect();
         let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(b.clone())
             .map_err(|e| fail(format!("parquet: {e}")))?;
+        // Validate requested columns against schema (Requirement 9.3)
+        let available: Vec<String> = builder.schema().fields().iter().map(|f| f.name().clone()).collect();
+        let invalid: Vec<&str> = cols.iter().filter(|c| !available.iter().any(|a| a == *c)).copied().collect();
+        if !invalid.is_empty() {
+            return Err(ComputeError::InvalidParam(format!(
+                "column(s) not found: {}. Available columns: {}",
+                invalid.join(", "),
+                available.join(", ")
+            )));
+        }
         let mask = parquet::arrow::ProjectionMask::columns(builder.parquet_schema(), cols.iter().copied());
         let schema = builder.schema().clone();
         let reader = builder.with_projection(mask).build().map_err(|e| fail(format!("parquet: {e}")))?;

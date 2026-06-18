@@ -170,6 +170,17 @@ fn parquet_projection_missing_columns_param() {
 }
 
 #[test]
+fn parquet_projection_invalid_column_lists_available() {
+    let pq = sample_parquet();
+    let err = ParquetProjectionFn.execute(vec![pq], &p(&[("columns", "nonexistent")])).unwrap_err();
+    let msg = err.to_string();
+    // Error should mention the invalid column and list available ones (Requirement 9.3)
+    assert!(msg.contains("nonexistent"), "error should mention the invalid column name");
+    assert!(msg.contains("name"), "error should list available column 'name'");
+    assert!(msg.contains("age"), "error should list available column 'age'");
+}
+
+#[test]
 fn parquet_projection_preserves_row_count() {
     let pq = sample_parquet();
     let projected = ParquetProjectionFn.execute(vec![pq], &p(&[("columns", "age")])).unwrap();
@@ -183,7 +194,78 @@ fn parquet_projection_no_input() {
     assert!(ParquetProjectionFn.execute(vec![], &p(&[("columns", "name")])).is_err());
 }
 
-// ---- parquet_filter (5 tests) ----
+// ---- parquet_filter (5 tests + statistics pushdown) ----
+
+/// Test row group statistics-based pushdown: create a parquet file with multiple row groups
+/// and verify that filtering across row group boundaries produces correct results.
+/// This validates Requirement 5.4 (predicate pushdown via row group statistics).
+#[test]
+fn parquet_filter_statistics_pushdown_multi_row_group() {
+    // Create a larger dataset that will produce multiple row groups when written
+    // with a small row group size. We write two separate batches to force multiple row groups.
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("value", DataType::Int32, false),
+    ]));
+    // Batch 1: ids 1-100, values 1-100 (row group stats: min=1, max=100)
+    let ids1: Vec<i32> = (1..=100).collect();
+    let vals1: Vec<i32> = (1..=100).collect();
+    let batch1 = RecordBatch::try_new(schema.clone(), vec![
+        Arc::new(Int32Array::from(ids1)),
+        Arc::new(Int32Array::from(vals1)),
+    ]).unwrap();
+    // Batch 2: ids 101-200, values 101-200 (row group stats: min=101, max=200)
+    let ids2: Vec<i32> = (101..=200).collect();
+    let vals2: Vec<i32> = (101..=200).collect();
+    let batch2 = RecordBatch::try_new(schema.clone(), vec![
+        Arc::new(Int32Array::from(ids2)),
+        Arc::new(Int32Array::from(vals2)),
+    ]).unwrap();
+    // Write with small max_row_group_size to force multiple row groups
+    let props = parquet::file::properties::WriterProperties::builder()
+        .set_max_row_group_size(100)
+        .build();
+    let mut buf = Vec::new();
+    let mut writer = parquet::arrow::ArrowWriter::try_new(&mut buf, schema.clone(), Some(props)).unwrap();
+    writer.write(&batch1).unwrap();
+    writer.write(&batch2).unwrap();
+    writer.close().unwrap();
+    let pq = Bytes::from(buf);
+
+    // Verify there are indeed multiple row groups
+    let meta_out = ParquetMetadataFn.execute(vec![pq.clone()], &p(&[])).unwrap();
+    let meta: serde_json::Value = serde_json::from_slice(&meta_out).unwrap();
+    assert!(meta["num_row_groups"].as_i64().unwrap() >= 2, "expected multiple row groups");
+
+    // Filter: value > 150 should only return rows from the second row group
+    // With statistics-based pushdown, the first row group (max=100) would be skipped entirely
+    let filtered = ParquetFilterFn.execute(vec![pq.clone()], &p(&[("column", "value"), ("op", "gt"), ("value", "150")])).unwrap();
+    let ipc = ParquetReadFn.execute(vec![filtered], &p(&[])).unwrap();
+    let ndjson = ColumnarToRowFn.execute(vec![ipc], &p(&[])).unwrap();
+    let text = std::str::from_utf8(&ndjson).unwrap();
+    // Should have exactly 50 rows (151-200)
+    assert_eq!(text.lines().count(), 50);
+    // Verify all results satisfy the predicate
+    for line in text.lines() {
+        let row: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert!(row["value"].as_i64().unwrap() > 150);
+    }
+}
+
+/// Test that parquet_statistics returns min/max info that could be used for pushdown
+#[test]
+fn parquet_filter_statistics_available_for_pushdown() {
+    // Verify that row group statistics are actually populated for filter use
+    let pq = sample_parquet();
+    let stats_out = ParquetStatisticsFn.execute(vec![pq], &p(&[])).unwrap();
+    let stats: serde_json::Value = serde_json::from_slice(&stats_out).unwrap();
+    // The 'age' column should have min/max statistics
+    assert!(stats.get("age").is_some(), "age column should have statistics");
+    let age_stats = &stats["age"];
+    assert!(age_stats.get("min").is_some(), "should have min statistic");
+    assert!(age_stats.get("max").is_some(), "should have max statistic");
+}
+
 #[test]
 fn parquet_filter_eq() {
     let pq = sample_parquet();

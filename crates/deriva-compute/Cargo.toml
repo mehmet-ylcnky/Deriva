@@ -183,6 +183,14 @@ name = "format_columnar_tests"
 required-features = ["format-columnar"]
 
 [[test]]
+name = "format_columnar_filter_props"
+required-features = ["format-columnar"]
+
+[[test]]
+name = "format_columnar_projection_props"
+required-features = ["format-columnar"]
+
+[[test]]
 name = "format_config_tests"
 required-features = ["format-config"]
 

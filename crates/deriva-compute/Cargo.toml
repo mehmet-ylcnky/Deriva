@@ -215,6 +215,10 @@ name = "format_erasure_tests"
 required-features = ["format-erasure"]
 
 [[test]]
+name = "format_erasure_props"
+required-features = ["format-erasure"]
+
+[[test]]
 name = "format_geo_tests"
 required-features = ["format-geo"]
 

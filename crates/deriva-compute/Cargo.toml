@@ -243,6 +243,10 @@ name = "format_serialization_tests"
 required-features = ["format-serialization"]
 
 [[test]]
+name = "format_serialization_props"
+required-features = ["format-serialization"]
+
+[[test]]
 name = "format_detection_integration"
 required-features = ["format-detect"]
 

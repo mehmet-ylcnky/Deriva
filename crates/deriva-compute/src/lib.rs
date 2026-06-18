@@ -69,6 +69,29 @@ pub mod builtins_format_binary;
     feature = "format-bio",
     feature = "format-binary"
 ))]
+pub mod builtins_format_common;
+
+#[cfg(any(
+    feature = "format-detect",
+    feature = "format-csv",
+    feature = "format-config",
+    feature = "format-archive",
+    feature = "format-log",
+    feature = "format-cas",
+    feature = "format-erasure",
+    feature = "format-serialization",
+    feature = "format-columnar",
+    feature = "format-image",
+    feature = "format-document",
+    feature = "format-audio",
+    feature = "format-geo",
+    feature = "format-scientific",
+    feature = "format-database",
+    feature = "format-ml",
+    feature = "format-network",
+    feature = "format-bio",
+    feature = "format-binary"
+))]
 pub mod builtins_format;
 
 pub mod adaptive;

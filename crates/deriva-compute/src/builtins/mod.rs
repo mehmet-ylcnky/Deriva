@@ -203,6 +203,34 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     // Extended batch functions (gated behind extended-batch feature)
     #[cfg(feature = "extended-batch")]
     register_extended_batch(registry);
+
+    // Format-aware functions (§2.16) — gated behind respective feature flags
+    #[cfg(any(
+        feature = "format-detect",
+        feature = "format-csv",
+        feature = "format-config",
+        feature = "format-archive",
+        feature = "format-log",
+        feature = "format-cas",
+        feature = "format-erasure",
+        feature = "format-serialization",
+        feature = "format-columnar",
+        feature = "format-image",
+        feature = "format-document",
+        feature = "format-audio",
+        feature = "format-geo",
+        feature = "format-scientific",
+        feature = "format-database",
+        feature = "format-ml",
+        feature = "format-network",
+        feature = "format-bio",
+        feature = "format-binary"
+    ))]
+    {
+        for f in crate::builtins_format::register_format_functions() {
+            registry.register(f);
+        }
+    }
 }
 
 /// Register extended batch functions (96 new functions).

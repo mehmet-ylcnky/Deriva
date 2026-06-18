@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["extended-streaming"]
+default = ["extended-streaming", "format-phase1"]
 extended-streaming = []
 extended-batch = ["extended-streaming"]
 
@@ -15,21 +15,24 @@ format-phase3 = ["format-image", "format-document", "format-audio", "format-geo"
 format-phase4 = ["format-scientific", "format-database", "format-ml", "format-network", "format-bio", "format-binary"]
 format-all = ["format-phase1", "format-phase2", "format-phase3", "format-phase4"]
 
-# Category flags
-format-detect = []
-format-csv = []
-format-config = []
-format-archive = []
+# Alias: format-media maps to format-audio (spec uses "media", code uses "audio")
+format-media = ["format-audio"]
+
+# Category flags with conditional dependency activation
+format-detect = ["dep:quick-xml"]
+format-csv = ["dep:quick-xml", "dep:jsonpath-rust"]
+format-config = ["dep:configparser", "dep:hcl-rs"]
+format-archive = ["dep:tar", "dep:zip", "dep:bzip2", "dep:xz2", "dep:sevenz-rust"]
 format-log = []
-format-cas = []
-format-erasure = []
-format-serialization = []
-format-columnar = []
-format-image = []
-format-document = []
-format-audio = []
-format-geo = []
-format-scientific = []
+format-cas = ["dep:libipld"]
+format-erasure = ["dep:reed-solomon-erasure"]
+format-serialization = ["dep:apache-avro", "dep:prost", "dep:prost-reflect", "dep:prost-types", "dep:rmp-serde", "dep:ciborium", "dep:bson"]
+format-columnar = ["dep:parquet", "dep:arrow", "dep:orc-rust"]
+format-image = ["dep:image", "dep:resvg"]
+format-document = ["dep:lopdf", "dep:calamine", "dep:scraper", "dep:comrak"]
+format-audio = ["dep:symphonia", "dep:image"]
+format-geo = ["dep:geojson", "dep:geo", "dep:wkt", "dep:shapefile", "dep:flatgeobuf", "dep:geozero"]
+format-scientific = ["dep:ndarray"]
 format-database = []
 format-ml = []
 format-network = []
@@ -37,24 +40,7 @@ format-bio = []
 format-binary = []
 
 [dependencies]
-parquet = { version = "57", features = ["arrow"] }
-arrow = { version = "57", features = ["ipc", "json"] }
-orc-rust = "0.7"
-image = { version = "0.25", features = ["png", "jpeg", "gif", "webp", "tiff", "bmp"] }
-hex = "0.4"
-resvg = "0.47"
-lopdf = "0.39"
-calamine = "0.33"
-scraper = "0.25"
-comrak = "0.50"
-symphonia = { version = "0.5", features = ["mp3", "flac", "wav", "ogg", "aac", "isomp4", "mkv"] }
-geojson = "0.24"
-geo = "0.29"
-wkt = "0.14"
-shapefile = "0.7"
-flatgeobuf = "6.0"
-geozero = { version = "0.15", features = ["with-geojson"] }
-ndarray = "0.16"
+# === Core dependencies (always available) ===
 deriva-core = { path = "../deriva-core" }
 bytes = { workspace = true }
 thiserror = { workspace = true }
@@ -85,35 +71,83 @@ serde_json = "1"
 bincode = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 jsonschema = "0.28"
-csv = "1"
-serde_yaml = "0.9"
-configparser = "3"
-hcl-rs = "0.19"
-toml = "0.8"
-quick-xml = { version = "0.36", features = ["serialize"] }
-jsonpath-rust = "0.7"
 sha2 = { workspace = true }
 base64 = { workspace = true }
 bs58 = "0.5"
 percent-encoding = "2"
 flate2 = { workspace = true }
-tar = "0.4"
-zip = { version = "2", default-features = false, features = ["deflate"] }
-bzip2 = "0.5"
-xz2 = "0.1"
-sevenz-rust = "0.6"
 crc32fast = { workspace = true }
-libipld = "0.16"
-reed-solomon-erasure = "6"
-apache-avro = "0.21"
-rmp-serde = "1"
-ciborium = "0.2"
-bson = { version = "3", features = ["serde_json-1", "serde"] }
-prost = "0.14"
-prost-reflect = { version = "0.16", features = ["serde"] }
-prost-types = "0.14"
+hex = "0.4"
 prometheus = { workspace = true }
 lazy_static = { workspace = true }
+
+# Core format deps (used by builtins/format_conversion.rs — not optional)
+csv = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+
+# === Optional dependencies (gated behind feature flags) ===
+
+# format-detect, format-csv
+quick-xml = { version = "0.36", features = ["serialize"], optional = true }
+
+# format-csv
+jsonpath-rust = { version = "0.7", optional = true }
+
+# format-config
+configparser = { version = "3", optional = true }
+hcl-rs = { version = "0.19", optional = true }
+
+# format-archive
+tar = { version = "0.4", optional = true }
+zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
+bzip2 = { version = "0.5", optional = true }
+xz2 = { version = "0.1", optional = true }
+sevenz-rust = { version = "0.6", optional = true }
+
+# format-cas
+libipld = { version = "0.16", optional = true }
+
+# format-erasure
+reed-solomon-erasure = { version = "6", optional = true }
+
+# format-serialization
+apache-avro = { version = "0.21", optional = true }
+rmp-serde = { version = "1", optional = true }
+ciborium = { version = "0.2", optional = true }
+bson = { version = "3", features = ["serde_json-1", "serde"], optional = true }
+prost = { version = "0.14", optional = true }
+prost-reflect = { version = "0.16", features = ["serde"], optional = true }
+prost-types = { version = "0.14", optional = true }
+
+# format-columnar
+parquet = { version = "57", features = ["arrow"], optional = true }
+arrow = { version = "57", features = ["ipc", "json"], optional = true }
+orc-rust = { version = "0.7", optional = true }
+
+# format-image
+image = { version = "0.25", features = ["png", "jpeg", "gif", "webp", "tiff", "bmp"], optional = true }
+resvg = { version = "0.47", optional = true }
+
+# format-document
+lopdf = { version = "0.39", optional = true }
+calamine = { version = "0.33", optional = true }
+scraper = { version = "0.25", optional = true }
+comrak = { version = "0.50", optional = true }
+
+# format-audio
+symphonia = { version = "0.5", features = ["mp3", "flac", "wav", "ogg", "aac", "isomp4", "mkv"], optional = true }
+
+# format-geo
+geojson = { version = "0.24", optional = true }
+geo = { version = "0.29", optional = true }
+wkt = { version = "0.14", optional = true }
+shapefile = { version = "0.7", optional = true }
+flatgeobuf = { version = "6.0", optional = true }
+geozero = { version = "0.15", features = ["with-geojson"], optional = true }
+
+# format-scientific
+ndarray = { version = "0.16", optional = true }
 
 [dev-dependencies]
 sled = { workspace = true }

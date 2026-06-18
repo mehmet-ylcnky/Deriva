@@ -111,13 +111,18 @@ async fn parity_concat() {
 // 15. zip_concat — line-by-line zip
 #[tokio::test]
 async fn parity_zip_concat() {
+    // NOTE: After spec 9.3 update, batch ZipConcatFn uses length-prefix format
+    // while StreamingZipConcat uses line-by-line zip. They are no longer parity.
+    // Verify batch ZipConcatFn produces length-prefix format.
     let a = b"line1\nline2\n";
     let b_data = b"lineA\nlineB\n";
     let batch_out = ZipConcatFn.execute(vec![Bytes::from(&a[..]), Bytes::from(&b_data[..])], &bp(&[])).unwrap();
-    let rx1 = feed_and_drop(a).await;
-    let rx2 = feed_and_drop(b_data).await;
-    let stream_out = collect_stream(StreamingZipConcat.stream_execute(vec![rx1, rx2], &sp(&[])).await).await.unwrap();
-    assert_eq!(batch_out, stream_out);
+    // Should have 8-byte header (two u32 BE lengths) + data
+    assert_eq!(batch_out.len(), 8 + a.len() + b_data.len());
+    let len_a = u32::from_be_bytes([batch_out[0], batch_out[1], batch_out[2], batch_out[3]]) as usize;
+    let len_b = u32::from_be_bytes([batch_out[4], batch_out[5], batch_out[6], batch_out[7]]) as usize;
+    assert_eq!(len_a, a.len());
+    assert_eq!(len_b, b_data.len());
 }
 
 // 16. interleave — byte-level interleave

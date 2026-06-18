@@ -256,4 +256,10 @@ pub fn register_extended_batch(registry: &mut crate::registry::FunctionRegistry)
     registry.register(Arc::new(FrequencyFn));
     registry.register(Arc::new(DedupCountFn));
     registry.register(Arc::new(CardinalityFn));
+
+    // Combiner functions (Spec Requirement 9)
+    registry.register(Arc::new(InterleaveBytesFn));
+    registry.register(Arc::new(MergeFn));
+    registry.register(Arc::new(SelectInputFn));
+    registry.register(Arc::new(AlternateFn));
 }

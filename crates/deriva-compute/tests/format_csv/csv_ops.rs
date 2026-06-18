@@ -50,6 +50,12 @@ fn csv_parse_empty_fields() {
     assert_eq!(arr[0]["b"], "");
     assert_eq!(arr[1]["a"], "");
 }
+#[test]
+fn csv_parse_malformed_unclosed_quote_error() {
+    let data = b"name,age\n\"Alice,30\nbob,25\n";
+    let r = CsvParseFn.execute(vec![Bytes::from(&data[..])], &BTreeMap::new());
+    assert!(r.is_err());
+}
 
 // ---- CsvWriteFn (#220) ----
 #[test]

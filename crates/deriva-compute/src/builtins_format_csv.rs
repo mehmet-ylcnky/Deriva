@@ -435,6 +435,195 @@ impl ComputeFunction for CsvDeduplicateFn {
 }
 
 // ---------------------------------------------------------------------------
+// Streaming implementations for CSV sequential operations
+// ---------------------------------------------------------------------------
+use std::collections::HashMap;
+use tokio::sync::mpsc;
+use deriva_core::streaming::StreamChunk;
+use crate::streaming::{StreamingComputeFunction, DEFAULT_CHUNK_SIZE, DEFAULT_CHANNEL_CAPACITY};
+use crate::builtins_streaming::spawn_buffered;
+
+#[async_trait::async_trait]
+impl StreamingComputeFunction for CsvColumnSelectFn {
+    async fn stream_execute(
+        &self,
+        mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
+        params: &HashMap<String, String>,
+    ) -> mpsc::Receiver<StreamChunk> {
+        assert_eq!(inputs.len(), 1, "CsvColumnSelectFn takes exactly 1 input");
+        let rx = inputs.remove(0);
+        let columns = params.get("columns").cloned().unwrap_or_default();
+        spawn_buffered(rx, DEFAULT_CHANNEL_CAPACITY, DEFAULT_CHUNK_SIZE, move |data| {
+            let cols: Vec<&str> = columns.split(',').map(|s| s.trim()).collect();
+            let mut rdr = csv::Reader::from_reader(&data[..]);
+            let headers = rdr.headers().map_err(|e| format!("csv: {}", e))?.clone();
+            let indices: Vec<usize> = cols.iter()
+                .filter_map(|c| headers.iter().position(|h| h == *c))
+                .collect();
+            if indices.is_empty() {
+                return Err("no matching columns".to_string());
+            }
+            let sel_headers: Vec<&str> = indices.iter().map(|&i| headers.get(i).unwrap()).collect();
+            let mut wtr = csv::Writer::from_writer(Vec::new());
+            wtr.write_record(&sel_headers).map_err(|e| format!("csv: {}", e))?;
+            for rec in rdr.records() {
+                let rec = rec.map_err(|e| format!("csv: {}", e))?;
+                let fields: Vec<&str> = indices.iter().map(|&i| rec.get(i).unwrap_or("")).collect();
+                wtr.write_record(&fields).map_err(|e| format!("csv: {}", e))?;
+            }
+            Ok(Bytes::from(wtr.into_inner().map_err(|e| format!("csv: {}", e))?))
+        })
+    }
+
+    fn supports_streaming(&self) -> bool { true }
+    fn is_fusible(&self) -> bool { true }
+}
+
+#[async_trait::async_trait]
+impl StreamingComputeFunction for CsvFilterFn {
+    async fn stream_execute(
+        &self,
+        mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
+        params: &HashMap<String, String>,
+    ) -> mpsc::Receiver<StreamChunk> {
+        assert_eq!(inputs.len(), 1, "CsvFilterFn takes exactly 1 input");
+        let rx = inputs.remove(0);
+        let column = params.get("column").cloned().unwrap_or_default();
+        let op = params.get("op").cloned().unwrap_or_default();
+        let value = params.get("value").cloned().unwrap_or_default();
+        spawn_buffered(rx, DEFAULT_CHANNEL_CAPACITY, DEFAULT_CHUNK_SIZE, move |data| {
+            let mut rdr = csv::Reader::from_reader(&data[..]);
+            let headers = rdr.headers().map_err(|e| format!("csv: {}", e))?.clone();
+            let col_idx = headers.iter().position(|h| h == column.as_str())
+                .ok_or_else(|| format!("column '{}' not found", column))?;
+            let mut wtr = csv::Writer::from_writer(Vec::new());
+            wtr.write_record(&headers).map_err(|e| format!("csv: {}", e))?;
+            for rec in rdr.records() {
+                let rec = rec.map_err(|e| format!("csv: {}", e))?;
+                let field = rec.get(col_idx).unwrap_or("");
+                if streaming_matches_predicate(field, &op, &value)? {
+                    wtr.write_record(&rec).map_err(|e| format!("csv: {}", e))?;
+                }
+            }
+            Ok(Bytes::from(wtr.into_inner().map_err(|e| format!("csv: {}", e))?))
+        })
+    }
+
+    fn supports_streaming(&self) -> bool { true }
+    fn is_fusible(&self) -> bool { true }
+}
+
+/// Predicate matching for streaming context (returns String errors instead of ComputeError).
+fn streaming_matches_predicate(field: &str, op: &str, value: &str) -> Result<bool, String> {
+    Ok(match op {
+        "eq" => field == value,
+        "ne" => field != value,
+        "lt" => field < value,
+        "le" => field <= value,
+        "gt" => field > value,
+        "ge" => field >= value,
+        "contains" => field.contains(value),
+        "starts_with" => field.starts_with(value),
+        "ends_with" => field.ends_with(value),
+        "regex" => regex::Regex::new(value)
+            .map_err(|e| format!("invalid regex: {}", e))?
+            .is_match(field),
+        _ => return Err(format!("unknown op: {}", op)),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Streaming implementations for NDJSON sequential operations
+// ---------------------------------------------------------------------------
+
+#[async_trait::async_trait]
+impl StreamingComputeFunction for NdjsonFilterFn {
+    async fn stream_execute(
+        &self,
+        mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
+        params: &HashMap<String, String>,
+    ) -> mpsc::Receiver<StreamChunk> {
+        assert_eq!(inputs.len(), 1, "NdjsonFilterFn takes exactly 1 input");
+        let rx = inputs.remove(0);
+        let path = params.get("path").cloned().unwrap_or_default();
+        let op = params.get("op").cloned().unwrap_or_default();
+        let value = params.get("value").cloned().unwrap_or_default();
+        spawn_buffered(rx, DEFAULT_CHANNEL_CAPACITY, DEFAULT_CHUNK_SIZE, move |data| {
+            let text = std::str::from_utf8(&data)
+                .map_err(|_| "ndjson_filter: requires UTF-8".to_string())?;
+            let mut out = Vec::new();
+            for line in text.lines() {
+                if line.trim().is_empty() { continue; }
+                let obj: serde_json::Value = serde_json::from_str(line)
+                    .map_err(|e| format!("ndjson: {}", e))?;
+                let field_val = streaming_extract_path(&obj, &path);
+                let field_str = match &field_val {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Null => "null".to_string(),
+                    other => other.to_string(),
+                };
+                if streaming_matches_predicate(&field_str, &op, &value)? {
+                    out.push(line.to_string());
+                }
+            }
+            Ok(Bytes::from(out.join("\n")))
+        })
+    }
+
+    fn supports_streaming(&self) -> bool { true }
+    fn is_fusible(&self) -> bool { true }
+}
+
+#[async_trait::async_trait]
+impl StreamingComputeFunction for NdjsonProjectFn {
+    async fn stream_execute(
+        &self,
+        mut inputs: Vec<mpsc::Receiver<StreamChunk>>,
+        params: &HashMap<String, String>,
+    ) -> mpsc::Receiver<StreamChunk> {
+        assert_eq!(inputs.len(), 1, "NdjsonProjectFn takes exactly 1 input");
+        let rx = inputs.remove(0);
+        let paths_str = params.get("paths").cloned().unwrap_or_default();
+        spawn_buffered(rx, DEFAULT_CHANNEL_CAPACITY, DEFAULT_CHUNK_SIZE, move |data| {
+            let text = std::str::from_utf8(&data)
+                .map_err(|_| "ndjson_project: requires UTF-8".to_string())?;
+            let paths: Vec<&str> = paths_str.split(',').map(|s| s.trim()).collect();
+            let mut out = Vec::new();
+            for line in text.lines() {
+                if line.trim().is_empty() { continue; }
+                let obj: serde_json::Value = serde_json::from_str(line)
+                    .map_err(|e| format!("ndjson: {}", e))?;
+                let mut projected = serde_json::Map::new();
+                for &p in &paths {
+                    let v = streaming_extract_path(&obj, p);
+                    projected.insert(p.to_string(), v);
+                }
+                out.push(serde_json::to_string(&serde_json::Value::Object(projected))
+                    .map_err(|e| format!("ndjson: {}", e))?);
+            }
+            Ok(Bytes::from(out.join("\n")))
+        })
+    }
+
+    fn supports_streaming(&self) -> bool { true }
+    fn is_fusible(&self) -> bool { true }
+}
+
+/// Dot-path extraction for streaming context (avoids ComputeError dependency).
+fn streaming_extract_path(val: &serde_json::Value, path: &str) -> serde_json::Value {
+    let mut current = val;
+    for key in path.split('.') {
+        match current.get(key) {
+            Some(v) => current = v,
+            None => return serde_json::Value::Null,
+        }
+    }
+    current.clone()
+}
+
+// ---------------------------------------------------------------------------
 // #229 TsvParseFn (Both)
 // ---------------------------------------------------------------------------
 pub struct TsvParseFn;
@@ -958,4 +1147,24 @@ pub fn register_csv_functions(registry: &mut FunctionRegistry) {
     registry.register(Arc::new(XmlXsltTransformFn));
     registry.register(Arc::new(XmlValidateDtdFn));
     registry.register(Arc::new(XmlValidateXsdFn));
+
+    // Register streaming variants for sequential CSV operations
+    registry.register_streaming(
+        Arc::new(CsvColumnSelectFn),
+        FunctionId::new("csv_column_select", "1.0.0"),
+    );
+    registry.register_streaming(
+        Arc::new(CsvFilterFn),
+        FunctionId::new("csv_filter", "1.0.0"),
+    );
+
+    // Register streaming variants for NDJSON sequential operations
+    registry.register_streaming(
+        Arc::new(NdjsonFilterFn),
+        FunctionId::new("ndjson_filter", "1.0.0"),
+    );
+    registry.register_streaming(
+        Arc::new(NdjsonProjectFn),
+        FunctionId::new("ndjson_project", "1.0.0"),
+    );
 }

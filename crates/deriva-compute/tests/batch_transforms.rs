@@ -14,4 +14,5 @@ mod batch {
     mod pipeline_composition;
     mod edge_cases;
     mod streaming_parity;
+    mod registry_count;
 }

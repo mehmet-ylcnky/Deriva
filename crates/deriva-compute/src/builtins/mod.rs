@@ -270,4 +270,13 @@ pub fn register_extended_batch(registry: &mut crate::registry::FunctionRegistry)
     registry.register(Arc::new(StripMetadataFn));
     registry.register(Arc::new(ContentHashFn));
     registry.register(Arc::new(SplitBySizeFn));
+
+    // Accumulator functions (Spec Requirement 13)
+    registry.register(Arc::new(Sha256AccFn));
+    registry.register(Arc::new(Sha512AccFn));
+    registry.register(Arc::new(Blake3AccFn));
+    registry.register(Arc::new(Crc32AccFn));
+    registry.register(Arc::new(LineCountAccFn));
+    registry.register(Arc::new(WordCountAccFn));
+    registry.register(Arc::new(ChecksumAdler32Fn));
 }

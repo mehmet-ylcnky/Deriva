@@ -801,6 +801,405 @@ impl ComputeFunction for MimeTypeMapFn {
 }
 
 // ---------------------------------------------------------------------------
+// EncodingDetectFn
+// ---------------------------------------------------------------------------
+
+pub struct EncodingDetectFn;
+
+impl ComputeFunction for EncodingDetectFn {
+    fn id(&self) -> FunctionId { FunctionId::new("encoding_detect", "1.0.0") }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.is_empty() {
+            return Err(ComputeError::ExecutionFailed("encoding_detect: empty input".into()));
+        }
+        let data = &inputs[0];
+        if data.is_empty() {
+            return Err(ComputeError::ExecutionFailed("encoding_detect: empty input".into()));
+        }
+
+        let (encoding, confidence) = detect_encoding(data);
+        let result = serde_json::json!({
+            "encoding": encoding,
+            "confidence": confidence,
+        });
+        Ok(Bytes::from(serde_json::to_string(&result)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("encoding_detect: {}", e)))?))
+    }
+
+    fn estimated_cost(&self, _input_sizes: &[u64]) -> ComputeCost {
+        ComputeCost { cpu_ms: 1, memory_bytes: 4096 }
+    }
+}
+
+/// Detect text encoding by inspecting byte patterns and BOM markers.
+fn detect_encoding(data: &[u8]) -> (&'static str, f64) {
+    // Check BOM markers first
+    if data.len() >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+        return ("UTF-8", 0.99);
+    }
+    if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xFE {
+        return ("UTF-16LE", 0.99);
+    }
+    if data.len() >= 2 && data[0] == 0xFE && data[1] == 0xFF {
+        return ("UTF-16BE", 0.99);
+    }
+
+    // Try UTF-8 validation
+    if std::str::from_utf8(data).is_ok() {
+        // Check if it's pure ASCII
+        if data.iter().all(|&b| b < 128) {
+            return ("ASCII", 0.95);
+        }
+        return ("UTF-8", 0.95);
+    }
+
+    // Check for UTF-16 patterns (alternating zero bytes)
+    if data.len() >= 4 {
+        let even_zeros = data.iter().step_by(2).filter(|&&b| b == 0).count();
+        let odd_zeros = data.iter().skip(1).step_by(2).filter(|&&b| b == 0).count();
+        let half = data.len() / 2;
+        if half > 0 {
+            if odd_zeros as f64 / half as f64 > 0.5 {
+                return ("UTF-16LE", 0.70);
+            }
+            if even_zeros as f64 / half as f64 > 0.5 {
+                return ("UTF-16BE", 0.70);
+            }
+        }
+    }
+
+    // Heuristic for Latin-1: bytes in 0x80-0xFF range, but no invalid sequences
+    let high_bytes = data.iter().filter(|&&b| b >= 0x80).count();
+    if high_bytes > 0 && high_bytes < data.len() / 2 {
+        return ("Latin-1", 0.60);
+    }
+
+    ("unknown", 0.0)
+}
+
+// ---------------------------------------------------------------------------
+// IsTextFn
+// ---------------------------------------------------------------------------
+
+pub struct IsTextFn;
+
+impl ComputeFunction for IsTextFn {
+    fn id(&self) -> FunctionId { FunctionId::new("is_text", "1.0.0") }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.is_empty() {
+            return Err(ComputeError::ExecutionFailed("is_text: empty input".into()));
+        }
+        let data = &inputs[0];
+        if data.is_empty() {
+            return Err(ComputeError::ExecutionFailed("is_text: empty input".into()));
+        }
+
+        let is_text = check_is_text(data);
+        Ok(Bytes::from(if is_text { "true" } else { "false" }))
+    }
+
+    fn estimated_cost(&self, _input_sizes: &[u64]) -> ComputeCost {
+        ComputeCost { cpu_ms: 1, memory_bytes: 256 }
+    }
+}
+
+/// Check if data appears to be text: valid UTF-8 or high ratio of printable bytes.
+fn check_is_text(data: &[u8]) -> bool {
+    // Quick check: valid UTF-8 is definitely text
+    if std::str::from_utf8(data).is_ok() {
+        // But check for null bytes which indicate binary even in valid UTF-8
+        return !data.contains(&0u8);
+    }
+
+    // Otherwise, check ratio of printable/whitespace bytes
+    let probe = &data[..data.len().min(8192)];
+    let text_bytes = probe.iter().filter(|&&b| {
+        b == b'\n' || b == b'\r' || b == b'\t' || (b >= 0x20 && b < 0x7F) || b >= 0x80
+    }).count();
+
+    let ratio = text_bytes as f64 / probe.len() as f64;
+    ratio > 0.85
+}
+
+// ---------------------------------------------------------------------------
+// IsBinaryFn
+// ---------------------------------------------------------------------------
+
+pub struct IsBinaryFn;
+
+impl ComputeFunction for IsBinaryFn {
+    fn id(&self) -> FunctionId { FunctionId::new("is_binary", "1.0.0") }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.is_empty() {
+            return Err(ComputeError::ExecutionFailed("is_binary: empty input".into()));
+        }
+        let data = &inputs[0];
+        if data.is_empty() {
+            return Err(ComputeError::ExecutionFailed("is_binary: empty input".into()));
+        }
+
+        let is_text = check_is_text(data);
+        Ok(Bytes::from(if is_text { "false" } else { "true" }))
+    }
+
+    fn estimated_cost(&self, _input_sizes: &[u64]) -> ComputeCost {
+        ComputeCost { cpu_ms: 1, memory_bytes: 256 }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IsCompressedFn
+// ---------------------------------------------------------------------------
+
+/// Magic bytes for common compression formats
+const COMPRESSION_MAGIC: &[(&[u8], &str)] = &[
+    (b"\x1f\x8b", "gzip"),
+    (b"\x28\xb5\x2f\xfd", "zstd"),
+    (b"BZh", "bzip2"),
+    (b"\xfd7zXZ\x00", "xz"),
+    (b"\x04\x22\x4d\x18", "lz4"),
+    (b"\xff\x06\x00\x00sNaPpY", "snappy"),
+    (b"PK\x03\x04", "zip"),
+];
+
+pub struct IsCompressedFn;
+
+impl ComputeFunction for IsCompressedFn {
+    fn id(&self) -> FunctionId { FunctionId::new("is_compressed", "1.0.0") }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.is_empty() {
+            return Err(ComputeError::ExecutionFailed("is_compressed: empty input".into()));
+        }
+        let data = &inputs[0];
+        if data.is_empty() {
+            return Err(ComputeError::ExecutionFailed("is_compressed: empty input".into()));
+        }
+
+        // Check magic bytes
+        for &(magic, _) in COMPRESSION_MAGIC {
+            if data.len() >= magic.len() && data.starts_with(magic) {
+                return Ok(Bytes::from("true"));
+            }
+        }
+
+        // High entropy without magic bytes could also indicate compression
+        let entropy = compute_entropy(data);
+        if entropy > 7.9 && data.len() > 64 {
+            return Ok(Bytes::from("true"));
+        }
+
+        Ok(Bytes::from("false"))
+    }
+
+    fn estimated_cost(&self, _input_sizes: &[u64]) -> ComputeCost {
+        ComputeCost { cpu_ms: 2, memory_bytes: 4096 }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IsEncryptedFn
+// ---------------------------------------------------------------------------
+
+pub struct IsEncryptedFn;
+
+impl ComputeFunction for IsEncryptedFn {
+    fn id(&self) -> FunctionId { FunctionId::new("is_encrypted", "1.0.0") }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.is_empty() {
+            return Err(ComputeError::ExecutionFailed("is_encrypted: empty input".into()));
+        }
+        let data = &inputs[0];
+        if data.is_empty() {
+            return Err(ComputeError::ExecutionFailed("is_encrypted: empty input".into()));
+        }
+
+        // Encrypted data characteristics:
+        // 1. High entropy (near 8.0)
+        // 2. No recognizable magic bytes for compression
+        // 3. No recognizable structure
+
+        // First check if it has compression magic (then it's compressed, not encrypted)
+        for &(magic, _) in COMPRESSION_MAGIC {
+            if data.len() >= magic.len() && data.starts_with(magic) {
+                return Ok(Bytes::from("false"));
+            }
+        }
+
+        // Check entropy
+        let entropy = compute_entropy(data);
+        if entropy < 7.5 || data.len() < 16 {
+            return Ok(Bytes::from("false"));
+        }
+
+        // High entropy, no compression magic, no recognizable structure → likely encrypted
+        // Check for any known format magic bytes
+        for &(magic, _, _, _) in MAGIC_TABLE {
+            if data.starts_with(magic) {
+                return Ok(Bytes::from("false"));
+            }
+        }
+
+        // Check if it's text (encrypted data shouldn't be valid text)
+        if std::str::from_utf8(data).is_ok() && !data.contains(&0u8) {
+            return Ok(Bytes::from("false"));
+        }
+
+        Ok(Bytes::from("true"))
+    }
+
+    fn estimated_cost(&self, _input_sizes: &[u64]) -> ComputeCost {
+        ComputeCost { cpu_ms: 2, memory_bytes: 4096 }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ByteHistogramFn
+// ---------------------------------------------------------------------------
+
+pub struct ByteHistogramFn;
+
+impl ComputeFunction for ByteHistogramFn {
+    fn id(&self) -> FunctionId { FunctionId::new("byte_histogram", "1.0.0") }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.is_empty() {
+            return Err(ComputeError::ExecutionFailed("byte_histogram: empty input".into()));
+        }
+        let data = &inputs[0];
+        if data.is_empty() {
+            return Err(ComputeError::ExecutionFailed("byte_histogram: empty input".into()));
+        }
+
+        let mut histogram = [0u64; 256];
+        for &byte in data.iter() {
+            histogram[byte as usize] += 1;
+        }
+
+        let json = serde_json::to_string(&histogram.to_vec())
+            .map_err(|e| ComputeError::ExecutionFailed(format!("byte_histogram: {}", e)))?;
+        Ok(Bytes::from(json))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        ComputeCost { cpu_ms: 2, memory_bytes: 2048 + input_sizes.first().copied().unwrap_or(0) }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EntropyScoreFn
+// ---------------------------------------------------------------------------
+
+pub struct EntropyScoreFn;
+
+impl ComputeFunction for EntropyScoreFn {
+    fn id(&self) -> FunctionId { FunctionId::new("entropy_score", "1.0.0") }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.is_empty() {
+            return Err(ComputeError::ExecutionFailed("entropy_score: empty input".into()));
+        }
+        let data = &inputs[0];
+        if data.is_empty() {
+            return Err(ComputeError::ExecutionFailed("entropy_score: empty input".into()));
+        }
+
+        let entropy = compute_entropy(data);
+        Ok(Bytes::from(format!("{:.3}", entropy)))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        ComputeCost { cpu_ms: 2, memory_bytes: 2048 + input_sizes.first().copied().unwrap_or(0) }
+    }
+}
+
+/// Compute Shannon entropy of a byte slice (0.0 to 8.0).
+fn compute_entropy(data: &[u8]) -> f64 {
+    if data.is_empty() {
+        return 0.0;
+    }
+    let mut histogram = [0u64; 256];
+    for &byte in data.iter() {
+        histogram[byte as usize] += 1;
+    }
+    let len = data.len() as f64;
+    let mut entropy = 0.0;
+    for &count in &histogram {
+        if count > 0 {
+            let p = count as f64 / len;
+            entropy -= p * p.log2();
+        }
+    }
+    entropy
+}
+
+// ---------------------------------------------------------------------------
+// StructureHeuristicFn
+// ---------------------------------------------------------------------------
+
+pub struct StructureHeuristicFn;
+
+impl ComputeFunction for StructureHeuristicFn {
+    fn id(&self) -> FunctionId { FunctionId::new("structure_heuristic", "1.0.0") }
+
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.is_empty() {
+            return Err(ComputeError::ExecutionFailed("structure_heuristic: empty input".into()));
+        }
+        let data = &inputs[0];
+        if data.is_empty() {
+            return Err(ComputeError::ExecutionFailed("structure_heuristic: empty input".into()));
+        }
+
+        let entropy = compute_entropy(data);
+        let is_text = check_is_text(data);
+
+        // Check for compression magic
+        let has_compression_magic = COMPRESSION_MAGIC.iter()
+            .any(|&(magic, _)| data.len() >= magic.len() && data.starts_with(magic));
+
+        // Classify based on characteristics
+        let (classification, confidence) = if has_compression_magic {
+            ("compressed", 0.95)
+        } else if entropy > 7.5 && !is_text {
+            // High entropy, not text, no compression magic → encrypted
+            let has_known_magic = MAGIC_TABLE.iter().any(|&(magic, _, _, _)| data.starts_with(magic));
+            if has_known_magic {
+                ("structured_binary", 0.80)
+            } else {
+                ("encrypted", 0.75)
+            }
+        } else if is_text {
+            ("text", 0.90)
+        } else {
+            // Binary but recognizable structure
+            let has_known_magic = MAGIC_TABLE.iter().any(|&(magic, _, _, _)| data.starts_with(magic));
+            if has_known_magic {
+                ("structured_binary", 0.85)
+            } else {
+                ("binary", 0.70)
+            }
+        };
+
+        let result = serde_json::json!({
+            "classification": classification,
+            "confidence": confidence,
+            "entropy": format!("{:.3}", entropy),
+        });
+        Ok(Bytes::from(serde_json::to_string(&result)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("structure_heuristic: {}", e)))?))
+    }
+
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost {
+        ComputeCost { cpu_ms: 3, memory_bytes: 4096 + input_sizes.first().copied().unwrap_or(0) }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -817,4 +1216,13 @@ pub fn register_detect_functions(registry: &mut FunctionRegistry) {
     registry.register(Arc::new(SchemaInferFn));
     registry.register(Arc::new(SchemaCompareFn));
     registry.register(Arc::new(MimeTypeMapFn));
+    // New detection/analysis functions
+    registry.register(Arc::new(EncodingDetectFn));
+    registry.register(Arc::new(IsTextFn));
+    registry.register(Arc::new(IsBinaryFn));
+    registry.register(Arc::new(IsCompressedFn));
+    registry.register(Arc::new(IsEncryptedFn));
+    registry.register(Arc::new(ByteHistogramFn));
+    registry.register(Arc::new(EntropyScoreFn));
+    registry.register(Arc::new(StructureHeuristicFn));
 }

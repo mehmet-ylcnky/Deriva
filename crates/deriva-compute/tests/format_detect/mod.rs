@@ -7,3 +7,6 @@ mod convert;
 mod schema_infer;
 mod schema_compare;
 mod mime_map;
+mod encoding_detect;
+mod classification;
+mod analysis;

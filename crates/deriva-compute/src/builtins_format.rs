@@ -16,6 +16,14 @@ pub fn register_format_functions() -> Vec<Arc<dyn ComputeFunction>> {
         fns.push(Arc::new(SchemaInferFn));
         fns.push(Arc::new(SchemaCompareFn));
         fns.push(Arc::new(MimeTypeMapFn));
+        fns.push(Arc::new(EncodingDetectFn));
+        fns.push(Arc::new(IsTextFn));
+        fns.push(Arc::new(IsBinaryFn));
+        fns.push(Arc::new(IsCompressedFn));
+        fns.push(Arc::new(IsEncryptedFn));
+        fns.push(Arc::new(ByteHistogramFn));
+        fns.push(Arc::new(EntropyScoreFn));
+        fns.push(Arc::new(StructureHeuristicFn));
     }
 
     #[cfg(feature = "format-csv")]

@@ -75,7 +75,9 @@ fn empty_input_cas() {
     assert_eq!(exec1(&CAddrComputeFn, b"").unwrap().len(), 32);
     assert_eq!(exec1(&CAddrEmbedFn, b"").unwrap().len(), 32);
     assert!(exec1(&ChunkHashFn, b"").unwrap().is_empty());
-    assert_eq!(exec1(&MerkleRootFn, b"").unwrap().len(), 32);
+    // MerkleRootFn now requires 2+ inputs, so test with two inputs
+    let r = MerkleRootFn.execute(vec![Bytes::from("a"), Bytes::from("b")], &BTreeMap::new()).unwrap();
+    assert_eq!(r.len(), 32);
 }
 
 // Single byte input
@@ -154,7 +156,7 @@ fn param_wrong_type() {
 #[test]
 fn zero_numeric_param() {
     assert!(matches!(
-        exec1_params(&MerkleRootFn, b"data", params(&[("block_size", "0")])),
+        exec1_params(&ChunkHashFn, b"data", params(&[("block_size", "0")])),
         Err(ComputeError::InvalidParam(_))
     ));
     assert!(matches!(
@@ -372,13 +374,12 @@ fn caddr_verify_mismatch() {
     assert!(matches!(r, Err(ComputeError::ExecutionFailed(_))));
 }
 
-// CAS: MerkleRoot block_size > input → single leaf = hash of full input
+// CAS: MerkleRoot with different input sets produces different roots
 #[test]
-fn merkle_root_block_larger_than_input() {
-    use sha2::{Sha256, Digest};
-    let data = b"small";
-    let r = exec1_params(&MerkleRootFn, data, params(&[("block_size", "999999")])).unwrap();
-    assert_eq!(r.as_ref(), Sha256::digest(data).as_slice());
+fn merkle_root_different_inputs_differ() {
+    let r1 = MerkleRootFn.execute(vec![Bytes::from("a"), Bytes::from("b")], &BTreeMap::new()).unwrap();
+    let r2 = MerkleRootFn.execute(vec![Bytes::from("c"), Bytes::from("d")], &BTreeMap::new()).unwrap();
+    assert_ne!(r1, r2);
 }
 
 // Batch-Only: sort_bytes all-zero → unchanged

@@ -57,30 +57,32 @@ impl ComputeFunction for CAddrEmbedFn {
 }
 
 // ── #95 MerkleRootFn ──
+// Spec Requirement 12.3: accepts 2 or more inputs, returns BLAKE3 Merkle root
 
 pub struct MerkleRootFn;
 
 impl ComputeFunction for MerkleRootFn {
     fn id(&self) -> FunctionId { FunctionId::new("merkle_root", "1.0.0") }
-    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
-        use sha2::{Sha256, Digest};
-        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
-        let bs: usize = match params.get("block_size") {
-            Some(Value::String(s)) => s.parse().map_err(|_| ComputeError::InvalidParam("block_size must be positive".into()))?,
-            None => 65536,
-            _ => return Err(ComputeError::InvalidParam("block_size must be a string".into())),
-        };
-        if bs == 0 { return Err(ComputeError::InvalidParam("block_size must be > 0".into())); }
-        let input = &inputs[0];
-        if input.is_empty() { return Ok(Bytes::copy_from_slice(&Sha256::digest(b""))); }
-        let mut hashes: Vec<[u8; 32]> = input.chunks(bs).map(|c| Sha256::digest(c).into()).collect();
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() < 2 {
+            return Err(ComputeError::InputCount { expected: 2, got: inputs.len() });
+        }
+        // Hash each input leaf with BLAKE3
+        let mut hashes: Vec<[u8; 32]> = inputs.iter()
+            .map(|input| *blake3::hash(input).as_bytes())
+            .collect();
+        // Recursively hash pairs until we have a single root
         while hashes.len() > 1 {
             let mut next = Vec::with_capacity(hashes.len().div_ceil(2));
             for pair in hashes.chunks(2) {
                 if pair.len() == 2 {
-                    let mut h = Sha256::new(); h.update(pair[0]); h.update(pair[1]);
-                    next.push(h.finalize().into());
-                } else { next.push(pair[0]); }
+                    let mut h = blake3::Hasher::new();
+                    h.update(&pair[0]);
+                    h.update(&pair[1]);
+                    next.push(*h.finalize().as_bytes());
+                } else {
+                    next.push(pair[0]);
+                }
             }
             hashes = next;
         }
@@ -178,3 +180,130 @@ impl ComputeFunction for DedupAnalyzeFn {
 
 // ── #99 ReverseByteFn ──
 
+// ── Spec Requirement 12.1: caddr_of_leaf@1.0.0 ──
+
+pub struct CAddrOfLeafFn;
+
+impl ComputeFunction for CAddrOfLeafFn {
+    fn id(&self) -> FunctionId { FunctionId::new("caddr_of_leaf", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let addr = CAddr::from_bytes(&inputs[0]);
+        Ok(Bytes::copy_from_slice(addr.as_bytes()))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}
+
+// ── Spec Requirement 12.5: embed_metadata@1.0.0 ──
+
+pub struct EmbedMetadataFn;
+
+impl ComputeFunction for EmbedMetadataFn {
+    fn id(&self) -> FunctionId { FunctionId::new("embed_metadata", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let metadata_str = get_string_param(params, "metadata")?;
+        // Validate that metadata is valid JSON
+        serde_json::from_str::<serde_json::Value>(metadata_str)
+            .map_err(|e| ComputeError::InvalidParam(format!("metadata must be valid JSON: {}", e)))?;
+        let metadata_bytes = metadata_str.as_bytes();
+        let len = metadata_bytes.len() as u32;
+        // Format: [4-byte big-endian length][metadata bytes][original input]
+        let mut out = Vec::with_capacity(4 + metadata_bytes.len() + inputs[0].len());
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(metadata_bytes);
+        out.extend_from_slice(&inputs[0]);
+        Ok(Bytes::from(out))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}
+
+// ── Spec Requirement 12.6: strip_metadata@1.0.0 ──
+
+pub struct StripMetadataFn;
+
+impl ComputeFunction for StripMetadataFn {
+    fn id(&self) -> FunctionId { FunctionId::new("strip_metadata", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let input = &inputs[0];
+        if input.len() < 4 {
+            return Err(ComputeError::ExecutionFailed("input too short to contain metadata header".into()));
+        }
+        let len = u32::from_be_bytes([input[0], input[1], input[2], input[3]]) as usize;
+        if input.len() < 4 + len {
+            return Err(ComputeError::ExecutionFailed("input shorter than declared metadata length".into()));
+        }
+        // Return everything after the length-prefixed metadata header
+        Ok(inputs[0].slice(4 + len..))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}
+
+// ── Spec Requirement 12.7: content_hash@1.0.0 ──
+
+pub struct ContentHashFn;
+
+impl ComputeFunction for ContentHashFn {
+    fn id(&self) -> FunctionId { FunctionId::new("content_hash", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let algorithm = get_string_param(params, "algorithm")?;
+        let input = &inputs[0];
+        match algorithm {
+            "sha256" => {
+                use sha2::{Sha256, Digest};
+                Ok(Bytes::copy_from_slice(&Sha256::digest(input)))
+            }
+            "sha512" => {
+                use sha2::{Sha512, Digest};
+                Ok(Bytes::copy_from_slice(&Sha512::digest(input)))
+            }
+            "blake3" => {
+                let hash = blake3::hash(input);
+                Ok(Bytes::copy_from_slice(hash.as_bytes()))
+            }
+            "md5" => {
+                use md5::{Md5, Digest};
+                Ok(Bytes::copy_from_slice(&Md5::digest(input)))
+            }
+            _ => Err(ComputeError::InvalidParam(
+                format!("algorithm must be one of: sha256, sha512, blake3, md5; got: {}", algorithm)
+            )),
+        }
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}
+
+// ── Spec Requirement 12.8: split_by_size@1.0.0 ──
+
+pub struct SplitBySizeFn;
+
+impl ComputeFunction for SplitBySizeFn {
+    fn id(&self) -> FunctionId { FunctionId::new("split_by_size", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let chunk_size_str = get_string_param(params, "chunk_size")?;
+        let chunk_size: usize = chunk_size_str.parse()
+            .map_err(|_| ComputeError::InvalidParam("chunk_size must be a positive integer".into()))?;
+        if chunk_size == 0 {
+            return Err(ComputeError::InvalidParam("chunk_size must be > 0".into()));
+        }
+        let input = &inputs[0];
+        if input.is_empty() {
+            return Ok(Bytes::new());
+        }
+        let chunks: Vec<&[u8]> = input.chunks(chunk_size).collect();
+        // Join chunks with null byte separator
+        let total_len = input.len() + chunks.len().saturating_sub(1);
+        let mut out = Vec::with_capacity(total_len);
+        for (i, chunk) in chunks.iter().enumerate() {
+            if i > 0 {
+                out.push(0u8); // null byte separator
+            }
+            out.extend_from_slice(chunk);
+        }
+        Ok(Bytes::from(out))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}

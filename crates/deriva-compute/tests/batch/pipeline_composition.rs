@@ -245,12 +245,12 @@ fn pipeline_take_sort_hex() {
     assert_eq!(decoded.as_ref(), b"apple\ncherry");
 }
 
-// 23. MerkleRoot of compressed data
+// 23. MerkleRoot of two inputs
 #[test]
 fn pipeline_merkle_of_compressed() {
-    let data = Bytes::from(vec![0u8; 100_000]);
-    let compressed = e(&CompressFn, data);
-    let root = e(&MerkleRootFn, compressed);
+    let data1 = Bytes::from(vec![0u8; 100_000]);
+    let data2 = Bytes::from(vec![1u8; 100_000]);
+    let root = MerkleRootFn.execute(vec![data1, data2], &BTreeMap::new()).unwrap();
     assert_eq!(root.len(), 32);
 }
 

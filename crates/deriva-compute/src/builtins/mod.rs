@@ -263,4 +263,11 @@ pub fn register_extended_batch(registry: &mut crate::registry::FunctionRegistry)
     registry.register(Arc::new(MergeFn));
     registry.register(Arc::new(SelectInputFn));
     registry.register(Arc::new(AlternateFn));
+
+    // CAS functions (Spec Requirement 12)
+    registry.register(Arc::new(CAddrOfLeafFn));
+    registry.register(Arc::new(EmbedMetadataFn));
+    registry.register(Arc::new(StripMetadataFn));
+    registry.register(Arc::new(ContentHashFn));
+    registry.register(Arc::new(SplitBySizeFn));
 }

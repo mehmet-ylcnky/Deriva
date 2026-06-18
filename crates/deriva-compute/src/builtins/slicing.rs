@@ -184,5 +184,72 @@ impl ComputeFunction for SampleFn {
     fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
-// ── #66 ReplaceFn ──
+// ── #66 NthFn ──
+
+pub struct NthFn;
+
+impl ComputeFunction for NthFn {
+    fn id(&self) -> FunctionId { FunctionId::new("nth", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let index = parse_u64_param(params, "index")? as usize;
+        let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("nth requires UTF-8 input".into()))?;
+        let lines: Vec<&str> = text.lines().collect();
+        if index >= lines.len() {
+            return Err(ComputeError::ExecutionFailed(format!("index {} out of bounds (0..{})", index, lines.len())));
+        }
+        Ok(Bytes::from(lines[index].to_string()))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
+}
+
+// ── #67 ChunkSplitFn ──
+
+pub struct ChunkSplitFn;
+
+impl ComputeFunction for ChunkSplitFn {
+    fn id(&self) -> FunctionId { FunctionId::new("chunk_split", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let size: usize = parse_usize_param(params, "size")?;
+        let input = &inputs[0];
+        if input.is_empty() {
+            return Ok(Bytes::new());
+        }
+        let chunks: Vec<&[u8]> = input.chunks(size).collect();
+        let mut result = Vec::with_capacity(input.len() + chunks.len());
+        for (i, chunk) in chunks.iter().enumerate() {
+            if i > 0 {
+                result.push(0u8); // null byte separator
+            }
+            result.extend_from_slice(chunk);
+        }
+        Ok(Bytes::from(result))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
+}
+
+// ── #68 ZipFn ──
+
+pub struct ZipFn;
+
+impl ComputeFunction for ZipFn {
+    fn id(&self) -> FunctionId { FunctionId::new("zip", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 2 { return Err(ComputeError::InputCount { expected: 2, got: inputs.len() }); }
+        let separator = super::get_string_param(params, "separator")?;
+        let text_a = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("zip requires UTF-8 input".into()))?;
+        let text_b = std::str::from_utf8(&inputs[1]).map_err(|_| ComputeError::ExecutionFailed("zip requires UTF-8 input".into()))?;
+        let lines_a: Vec<&str> = text_a.lines().collect();
+        let lines_b: Vec<&str> = text_b.lines().collect();
+        let len = lines_a.len().min(lines_b.len());
+        let result: Vec<String> = (0..len)
+            .map(|i| format!("{}{}{}", lines_a[i], separator, lines_b[i]))
+            .collect();
+        Ok(Bytes::from(result.join("\n")))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(10, input_sizes) }
+}
+
+// ── ReplaceFn ──
 

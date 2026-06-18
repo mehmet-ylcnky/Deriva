@@ -374,3 +374,104 @@ fn sample_empty() {
 }
 
 
+
+// ── #66 NthFn ──
+
+#[test]
+fn nth_first_line() {
+    let r = exec1_params(&NthFn, b"alpha\nbeta\ngamma", params(&[("index", "0")])).unwrap();
+    assert_eq!(r.as_ref(), b"alpha");
+}
+
+#[test]
+fn nth_middle_line() {
+    let r = exec1_params(&NthFn, b"alpha\nbeta\ngamma", params(&[("index", "1")])).unwrap();
+    assert_eq!(r.as_ref(), b"beta");
+}
+
+#[test]
+fn nth_last_line() {
+    let r = exec1_params(&NthFn, b"alpha\nbeta\ngamma", params(&[("index", "2")])).unwrap();
+    assert_eq!(r.as_ref(), b"gamma");
+}
+
+#[test]
+fn nth_out_of_bounds() {
+    let r = exec1_params(&NthFn, b"alpha\nbeta", params(&[("index", "5")]));
+    assert!(matches!(r, Err(ComputeError::ExecutionFailed(_))));
+}
+
+#[test]
+fn nth_single_line() {
+    let r = exec1_params(&NthFn, b"only", params(&[("index", "0")])).unwrap();
+    assert_eq!(r.as_ref(), b"only");
+}
+
+// ── #67 ChunkSplitFn ──
+
+#[test]
+fn chunk_split_basic() {
+    let r = exec1_params(&ChunkSplitFn, b"abcdef", params(&[("size", "2")])).unwrap();
+    assert_eq!(r.as_ref(), b"ab\x00cd\x00ef");
+}
+
+#[test]
+fn chunk_split_uneven() {
+    let r = exec1_params(&ChunkSplitFn, b"abcdefg", params(&[("size", "3")])).unwrap();
+    assert_eq!(r.as_ref(), b"abc\x00def\x00g");
+}
+
+#[test]
+fn chunk_split_size_larger_than_input() {
+    let r = exec1_params(&ChunkSplitFn, b"abc", params(&[("size", "10")])).unwrap();
+    assert_eq!(r.as_ref(), b"abc");
+}
+
+#[test]
+fn chunk_split_empty() {
+    let r = exec1_params(&ChunkSplitFn, b"", params(&[("size", "4")])).unwrap();
+    assert_eq!(r.as_ref(), b"");
+}
+
+#[test]
+fn chunk_split_size_one() {
+    let r = exec1_params(&ChunkSplitFn, b"abc", params(&[("size", "1")])).unwrap();
+    assert_eq!(r.as_ref(), b"a\x00b\x00c");
+}
+
+// ── #68 ZipFn ──
+
+#[test]
+fn zip_basic() {
+    let inputs = vec![Bytes::from("a\nb\nc"), Bytes::from("1\n2\n3")];
+    let r = ZipFn.execute(inputs, &params(&[("separator", ",")])).unwrap();
+    assert_eq!(r.as_ref(), b"a,1\nb,2\nc,3");
+}
+
+#[test]
+fn zip_unequal_lengths_truncates() {
+    let inputs = vec![Bytes::from("a\nb\nc"), Bytes::from("1\n2")];
+    let r = ZipFn.execute(inputs, &params(&[("separator", ":")])).unwrap();
+    assert_eq!(r.as_ref(), b"a:1\nb:2");
+}
+
+#[test]
+fn zip_single_line_each() {
+    let inputs = vec![Bytes::from("hello"), Bytes::from("world")];
+    let r = ZipFn.execute(inputs, &params(&[("separator", " ")])).unwrap();
+    assert_eq!(r.as_ref(), b"hello world");
+}
+
+#[test]
+fn zip_wrong_input_count() {
+    let inputs = vec![Bytes::from("a")];
+    let r = ZipFn.execute(inputs, &params(&[("separator", ",")]));
+    assert!(matches!(r, Err(ComputeError::InputCount { expected: 2, got: 1 })));
+}
+
+#[test]
+fn zip_empty_separator() {
+    let inputs = vec![Bytes::from("a\nb"), Bytes::from("1\n2")];
+    let r = ZipFn.execute(inputs, &params(&[("separator", "")])).unwrap();
+    assert_eq!(r.as_ref(), b"a1\nb2");
+}

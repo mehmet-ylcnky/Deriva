@@ -157,6 +157,9 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(HeadFn));
     registry.register(Arc::new(TailFn));
     registry.register(Arc::new(SampleFn));
+    registry.register(Arc::new(NthFn));
+    registry.register(Arc::new(ChunkSplitFn));
+    registry.register(Arc::new(ZipFn));
     registry.register(Arc::new(ReplaceFn));
     registry.register(Arc::new(RegexReplaceFn));
     registry.register(Arc::new(GrepFn));

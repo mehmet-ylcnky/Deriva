@@ -895,7 +895,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Task 6.2: Progress guarantee with minimum 1 permit
+    // Progress guarantee with minimum 1 permit
     // -----------------------------------------------------------------------
 
     /// Helper: collect all data chunks from a receiver into a single Bytes.

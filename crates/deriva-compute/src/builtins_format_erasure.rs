@@ -103,7 +103,13 @@ impl ComputeFunction for ReedSolomonVerifyFn {
         let d = param_usize(p, "data_shards", 4)?;
         let par = param_usize(p, "parity_shards", 2)?;
         let total = d + par;
+        if b.is_empty() || b.len() < total {
+            return Err(ComputeError::ExecutionFailed("input too small for shard count".into()));
+        }
         let ss = b.len() / total;
+        if ss == 0 {
+            return Err(ComputeError::ExecutionFailed("shard size is zero".into()));
+        }
         let r = reed_solomon_erasure::ReedSolomon::<RsField>::new(d, par)
             .map_err(|e| ComputeError::ExecutionFailed(format!("rs init: {e}")))?;
         let shards: Vec<Vec<u8>> = b.chunks(ss).map(|c| c.to_vec()).collect();

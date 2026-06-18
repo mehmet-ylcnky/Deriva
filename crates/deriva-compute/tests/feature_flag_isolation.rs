@@ -718,8 +718,7 @@ fn phase1_registers_98_format_functions_total() {
 
     // Phase 1 totals: CSV/JSON/XML(25) + Archive(20) + Config(16) + Logs(13) + CAS(15) + Detection(17)
     // Detection has 9 core functions + 8 extended analysis functions (encoding_detect, is_text,
-    // is_binary, is_compressed, is_encrypted, byte_histogram, entropy_score, structure_heuristic)
-    // added in task 2.1.
+    // is_binary, is_compressed, is_encrypted, byte_histogram, entropy_score, structure_heuristic).
     let format_fns = register_format_functions();
     assert_eq!(
         format_fns.len(),

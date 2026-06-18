@@ -698,7 +698,20 @@ fn format_cas_registers_15_functions() {
     feature = "format-config",
     feature = "format-archive",
     feature = "format-log",
-    feature = "format-cas"
+    feature = "format-cas",
+    not(feature = "format-columnar"),
+    not(feature = "format-serialization"),
+    not(feature = "format-erasure"),
+    not(feature = "format-image"),
+    not(feature = "format-document"),
+    not(feature = "format-audio"),
+    not(feature = "format-geo"),
+    not(feature = "format-scientific"),
+    not(feature = "format-database"),
+    not(feature = "format-ml"),
+    not(feature = "format-network"),
+    not(feature = "format-bio"),
+    not(feature = "format-binary")
 ))]
 fn phase1_registers_98_format_functions_total() {
     use deriva_compute::builtins_format::register_format_functions;
@@ -712,6 +725,41 @@ fn phase1_registers_98_format_functions_total() {
         format_fns.len(),
         106,
         "Phase 1 (format-phase1) should register exactly 106 format functions, got {}",
+        format_fns.len()
+    );
+}
+
+#[test]
+#[cfg(all(
+    feature = "format-detect",
+    feature = "format-csv",
+    feature = "format-config",
+    feature = "format-archive",
+    feature = "format-log",
+    feature = "format-cas",
+    feature = "format-columnar",
+    feature = "format-serialization",
+    feature = "format-erasure",
+    not(feature = "format-image"),
+    not(feature = "format-document"),
+    not(feature = "format-audio"),
+    not(feature = "format-geo"),
+    not(feature = "format-scientific"),
+    not(feature = "format-database"),
+    not(feature = "format-ml"),
+    not(feature = "format-network"),
+    not(feature = "format-bio"),
+    not(feature = "format-binary")
+))]
+fn phase2_registers_46_additional_format_functions() {
+    use deriva_compute::builtins_format::register_format_functions;
+
+    // Phase 1 (106) + Phase 2: Columnar(18) + Serialization(19) + Erasure(9) = 46 additional
+    let format_fns = register_format_functions();
+    assert_eq!(
+        format_fns.len(),
+        152,
+        "Phase 1+2 (format-phase1 + format-phase2) should register exactly 152 format functions (106 + 46), got {}",
         format_fns.len()
     );
 }

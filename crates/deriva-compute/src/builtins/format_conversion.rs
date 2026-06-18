@@ -7,7 +7,7 @@ use super::spec_cost;
 pub struct JsonPrettyPrintFn;
 
 impl ComputeFunction for JsonPrettyPrintFn {
-    fn id(&self) -> FunctionId { FunctionId::new("json_pretty", "1.0.0") }
+    fn id(&self) -> FunctionId { FunctionId::new("pretty_json", "1.0.0") }
     fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
         if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
         let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("json_pretty requires UTF-8".into()))?;
@@ -23,7 +23,7 @@ impl ComputeFunction for JsonPrettyPrintFn {
 pub struct JsonMinifyFn;
 
 impl ComputeFunction for JsonMinifyFn {
-    fn id(&self) -> FunctionId { FunctionId::new("json_minify", "1.0.0") }
+    fn id(&self) -> FunctionId { FunctionId::new("minify_json", "1.0.0") }
     fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
         if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
         let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("json_minify requires UTF-8".into()))?;
@@ -71,8 +71,14 @@ impl ComputeFunction for JsonToCsvFn {
         let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("json_to_csv requires UTF-8".into()))?;
         let array: Vec<serde_json::Map<String, serde_json::Value>> = serde_json::from_str(text).map_err(|e| ComputeError::ExecutionFailed(format!("expected JSON array of objects: {}", e)))?;
         if array.is_empty() { return Ok(Bytes::new()); }
-        let mut headers: Vec<String> = array[0].keys().cloned().collect();
-        headers.sort();
+        // Derive headers from the UNION of all object keys
+        let mut header_set = std::collections::BTreeSet::new();
+        for obj in &array {
+            for key in obj.keys() {
+                header_set.insert(key.clone());
+            }
+        }
+        let headers: Vec<String> = header_set.into_iter().collect();
         let mut wtr = csv::Writer::from_writer(Vec::new());
         wtr.write_record(&headers).map_err(|e| ComputeError::ExecutionFailed(format!("csv write: {}", e)))?;
         for obj in &array {
@@ -115,7 +121,7 @@ impl ComputeFunction for YamlToJsonFn {
         if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
         let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("yaml_to_json requires UTF-8".into()))?;
         let value: serde_yaml::Value = serde_yaml::from_str(text).map_err(|e| ComputeError::ExecutionFailed(format!("invalid YAML: {}", e)))?;
-        let json = serde_json::to_string_pretty(&value).map_err(|e| ComputeError::ExecutionFailed(format!("json serialize: {}", e)))?;
+        let json = serde_json::to_string(&value).map_err(|e| ComputeError::ExecutionFailed(format!("json serialize: {}", e)))?;
         Ok(Bytes::from(json))
     }
     fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
@@ -147,11 +153,34 @@ impl ComputeFunction for TomlToJsonFn {
         if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
         let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("toml_to_json requires UTF-8".into()))?;
         let value: toml::Value = toml::from_str(text).map_err(|e| ComputeError::ExecutionFailed(format!("invalid TOML: {}", e)))?;
-        let json = serde_json::to_string_pretty(&value).map_err(|e| ComputeError::ExecutionFailed(format!("json serialize: {}", e)))?;
+        let json = serde_json::to_string(&value).map_err(|e| ComputeError::ExecutionFailed(format!("json serialize: {}", e)))?;
         Ok(Bytes::from(json))
     }
     fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
 }
 
-// ── #92 CAddrComputeFn ──
+// ── #92 JsonToTomlFn ──
+
+pub struct JsonToTomlFn;
+
+impl ComputeFunction for JsonToTomlFn {
+    fn id(&self) -> FunctionId { FunctionId::new("json_to_toml", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let text = std::str::from_utf8(&inputs[0]).map_err(|_| ComputeError::ExecutionFailed("json_to_toml requires UTF-8".into()))?;
+        let json_value: serde_json::Value = serde_json::from_str(text).map_err(|e| ComputeError::ExecutionFailed(format!("invalid JSON: {}", e)))?;
+        // TOML root must be an object/table
+        if !json_value.is_object() {
+            return Err(ComputeError::ExecutionFailed("json_to_toml: input must be a JSON object".into()));
+        }
+        // Convert serde_json::Value -> toml::Value via serde
+        let toml_value: toml::Value = serde_json::from_value(json_value)
+            .map_err(|e| ComputeError::ExecutionFailed(format!("json_to_toml conversion: {}", e)))?;
+        let toml_str = toml::to_string(&toml_value).map_err(|e| ComputeError::ExecutionFailed(format!("toml serialize: {}", e)))?;
+        Ok(Bytes::from(toml_str))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}
+
+// ── #93 CAddrComputeFn ──
 

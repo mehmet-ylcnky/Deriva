@@ -186,6 +186,7 @@ pub fn register_all(registry: &mut crate::registry::FunctionRegistry) {
     registry.register(Arc::new(YamlToJsonFn));
     registry.register(Arc::new(JsonToYamlFn));
     registry.register(Arc::new(TomlToJsonFn));
+    registry.register(Arc::new(JsonToTomlFn));
     registry.register(Arc::new(CAddrComputeFn));
     registry.register(Arc::new(CAddrVerifyFn));
     registry.register(Arc::new(CAddrEmbedFn));

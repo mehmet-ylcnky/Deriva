@@ -1,6 +1,7 @@
 use crate::function::{ComputeCost, ComputeError, ComputeFunction};
 use bytes::Bytes;
 use deriva_core::address::{FunctionId, Value};
+use sha2::{Sha256, Sha512, Digest};
 use std::collections::BTreeMap;
 use super::spec_cost;
 
@@ -168,6 +169,120 @@ impl ComputeFunction for AverageFn {
         Ok(Bytes::from((total / count as f64).to_string()))
     }
     fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(50, input_sizes) }
+}
+
+// ── Sha256AccFn (sha256_acc@1.0.0) ──
+
+pub struct Sha256AccFn;
+
+impl ComputeFunction for Sha256AccFn {
+    fn id(&self) -> FunctionId { FunctionId::new("sha256_acc", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let hash = Sha256::digest(&inputs[0]);
+        Ok(Bytes::copy_from_slice(&hash))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(20, input_sizes) }
+}
+
+// ── Sha512AccFn (sha512_acc@1.0.0) ──
+
+pub struct Sha512AccFn;
+
+impl ComputeFunction for Sha512AccFn {
+    fn id(&self) -> FunctionId { FunctionId::new("sha512_acc", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let hash = Sha512::digest(&inputs[0]);
+        Ok(Bytes::copy_from_slice(&hash))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(20, input_sizes) }
+}
+
+// ── Blake3AccFn (blake3_acc@1.0.0) ──
+
+pub struct Blake3AccFn;
+
+impl ComputeFunction for Blake3AccFn {
+    fn id(&self) -> FunctionId { FunctionId::new("blake3_acc", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let hash = blake3::hash(&inputs[0]);
+        Ok(Bytes::copy_from_slice(hash.as_bytes()))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(20, input_sizes) }
+}
+
+// ── Crc32AccFn (crc32_acc@1.0.0) ──
+
+pub struct Crc32AccFn;
+
+impl ComputeFunction for Crc32AccFn {
+    fn id(&self) -> FunctionId { FunctionId::new("crc32_acc", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let crc = crc32fast::hash(&inputs[0]);
+        Ok(Bytes::copy_from_slice(&crc.to_be_bytes()))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(20, input_sizes) }
+}
+
+// ── LineCountAccFn (line_count_acc@1.0.0) ──
+
+pub struct LineCountAccFn;
+
+impl ComputeFunction for LineCountAccFn {
+    fn id(&self) -> FunctionId { FunctionId::new("line_count_acc", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let newlines = inputs[0].iter().filter(|&&b| b == b'\n').count();
+        Ok(Bytes::from(newlines.to_string()))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(20, input_sizes) }
+}
+
+// ── WordCountAccFn (word_count_acc@1.0.0) ──
+
+pub struct WordCountAccFn;
+
+impl ComputeFunction for WordCountAccFn {
+    fn id(&self) -> FunctionId { FunctionId::new("word_count_acc", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        let mut count = 0u64;
+        let mut in_word = false;
+        for &b in inputs[0].iter() {
+            if b.is_ascii_whitespace() {
+                in_word = false;
+            } else if !in_word {
+                in_word = true;
+                count += 1;
+            }
+        }
+        Ok(Bytes::from(count.to_string()))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(20, input_sizes) }
+}
+
+// ── ChecksumAdler32Fn (checksum_adler32@1.0.0) ──
+
+pub struct ChecksumAdler32Fn;
+
+impl ComputeFunction for ChecksumAdler32Fn {
+    fn id(&self) -> FunctionId { FunctionId::new("checksum_adler32", "1.0.0") }
+    fn execute(&self, inputs: Vec<Bytes>, _params: &BTreeMap<String, Value>) -> Result<Bytes, ComputeError> {
+        if inputs.len() != 1 { return Err(ComputeError::InputCount { expected: 1, got: inputs.len() }); }
+        const MOD_ADLER: u32 = 65521;
+        let mut a: u32 = 1;
+        let mut b: u32 = 0;
+        for &byte in inputs[0].iter() {
+            a = (a + byte as u32) % MOD_ADLER;
+            b = (b + a) % MOD_ADLER;
+        }
+        let checksum = (b << 16) | a;
+        Ok(Bytes::copy_from_slice(&checksum.to_be_bytes()))
+    }
+    fn estimated_cost(&self, input_sizes: &[u64]) -> ComputeCost { spec_cost(20, input_sizes) }
 }
 
 // ── #50 InterleaveFn ──

@@ -6,6 +6,7 @@ use deriva_compute::streaming::DEFAULT_CHUNK_SIZE;
 use deriva_core::cache::EvictableCache;
 use deriva_core::gc::PinSet;
 use deriva_core::PersistentDag;
+use deriva_network::runtime::SwimRuntime;
 use deriva_storage::{StorageBackend, SledRecipeStore};
 use std::sync::Arc;
 use std::time::Instant;
@@ -25,6 +26,7 @@ pub struct ServerState {
     pub pins: Arc<RwLock<PinSet>>,
     pub start_time: Instant,
     pub global_memory_controller: Arc<Option<GlobalMemoryController>>,
+    pub swim: Option<Arc<SwimRuntime>>,
 }
 
 impl ServerState {
@@ -87,6 +89,7 @@ impl ServerState {
             pins: Arc::new(RwLock::new(PinSet::new())),
             start_time: Instant::now(),
             global_memory_controller,
+            swim: None,
         })
     }
 }

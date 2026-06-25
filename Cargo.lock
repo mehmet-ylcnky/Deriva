@@ -1838,6 +1838,7 @@ dependencies = [
  "clap",
  "deriva-compute",
  "deriva-core",
+ "deriva-network",
  "deriva-storage",
  "futures",
  "lazy_static",

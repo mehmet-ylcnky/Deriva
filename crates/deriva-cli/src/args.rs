@@ -87,4 +87,6 @@ pub enum Command {
     },
     /// List all pinned addrs
     ListPins,
+    /// Show cluster membership status
+    Cluster,
 }

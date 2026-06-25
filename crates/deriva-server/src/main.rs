@@ -34,6 +34,14 @@ struct Args {
     /// Log format: "text" or "json"
     #[arg(long, default_value = "text")]
     log_format: String,
+
+    /// SWIM gossip bind address (enables cluster mode)
+    #[arg(long)]
+    swim_bind: Option<String>,
+
+    /// Seed nodes for cluster join (comma-separated addr:port)
+    #[arg(long, value_delimiter = ',')]
+    seeds: Vec<String>,
 }
 
 fn parse_verification(s: &str) -> Result<VerificationMode, String> {
@@ -95,7 +103,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut registry = FunctionRegistry::new();
     builtins::register_all(&mut registry);
 
-    let state = Arc::new(ServerState::with_verification(storage, registry, verification)?);
+    let mut state = ServerState::with_verification(storage, registry, verification)?;
+
+    // Start SWIM if --swim-bind provided
+    if let Some(ref swim_bind_str) = args.swim_bind {
+        let swim_bind: std::net::SocketAddr = swim_bind_str.parse()
+            .map_err(|e| format!("invalid --swim-bind address: {}", e))?;
+        let seeds: Vec<std::net::SocketAddr> = args.seeds.iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let swim_config = deriva_network::SwimConfig {
+            bind_addr: swim_bind,
+            grpc_addr: addr,
+            seeds,
+            ..Default::default()
+        };
+        let (swim_runtime, _swim_events) = deriva_network::runtime::SwimRuntime::start(swim_config).await
+            .map_err(|e| format!("failed to start SWIM: {}", e))?;
+        tracing::info!("SWIM gossip listening on {}", swim_runtime.local_id().addr);
+        state.swim = Some(Arc::new(swim_runtime));
+    }
+
+    let state = Arc::new(state);
     let service = DerivaService::new(Arc::clone(&state));
 
     if args.metrics_port > 0 {

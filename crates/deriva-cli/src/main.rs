@@ -152,6 +152,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  {}", addr_to_hex(a));
             }
         }
+        Command::Cluster => {
+            let resp = client.cluster_status(ClusterStatusRequest {}).await?.into_inner();
+            println!("Cluster: {} alive, {} suspect, {} dead",
+                resp.alive_count, resp.suspect_count, resp.dead_count);
+            println!();
+            for node in &resp.nodes {
+                let icon = match node.state.as_str() {
+                    "alive" => "●",
+                    "suspect" => "◐",
+                    "dead" => "○",
+                    _ => "?",
+                };
+                println!("  {} {} ({}) [{}]", icon, node.name, node.addr, node.state);
+                println!("    gRPC: {}  role: {}  cpu: {:.0}%",
+                    node.grpc_addr, node.role, node.cpu_load * 100.0);
+                println!("    cache: {} entries ({} bytes)  blobs: {}",
+                    node.cache_entries, node.cache_bytes, node.blob_count);
+                println!("    uptime: {}s  incarnation: {}", node.uptime_secs, node.incarnation);
+            }
+        }
     }
 
     Ok(())

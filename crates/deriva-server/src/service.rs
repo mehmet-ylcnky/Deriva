@@ -516,4 +516,48 @@ impl Deriva for DerivaService {
         record_rpc("list_pins", start, true);
         Ok(Response::new(proto::ListPinsResponse { addrs, count }))
     }
+
+    async fn cluster_status(
+        &self,
+        _request: Request<proto::ClusterStatusRequest>,
+    ) -> Result<Response<proto::ClusterStatusResponse>, Status> {
+        let swim = self.state.swim.as_ref()
+            .ok_or_else(|| Status::unavailable("cluster mode not enabled (start with --swim-bind)"))?;
+
+        let members = swim.members().await;
+        let mut nodes = Vec::new();
+        let mut alive = 0u64;
+        let mut suspect = 0u64;
+        let mut dead = 0u64;
+
+        for (id, state) in &members {
+            match state {
+                deriva_network::MemberState::Alive => alive += 1,
+                deriva_network::MemberState::Suspect => suspect += 1,
+                deriva_network::MemberState::Dead => dead += 1,
+            }
+
+            let meta = swim.get_metadata(id).await;
+            nodes.push(proto::ClusterNodeInfo {
+                name: id.name.clone(),
+                addr: id.addr.to_string(),
+                state: format!("{:?}", state).to_lowercase(),
+                incarnation: id.incarnation,
+                grpc_addr: meta.as_ref().map(|m| m.grpc_addr.to_string()).unwrap_or_default(),
+                role: meta.as_ref().map(|m| format!("{:?}", m.role)).unwrap_or_default(),
+                cache_entries: meta.as_ref().map(|m| m.cache_entry_count).unwrap_or(0),
+                cache_bytes: meta.as_ref().map(|m| m.cache_size_bytes).unwrap_or(0),
+                blob_count: meta.as_ref().map(|m| m.blob_count).unwrap_or(0),
+                cpu_load: meta.as_ref().map(|m| m.cpu_load).unwrap_or(0.0),
+                uptime_secs: meta.as_ref().map(|m| m.uptime_secs).unwrap_or(0),
+            });
+        }
+
+        Ok(Response::new(proto::ClusterStatusResponse {
+            nodes,
+            alive_count: alive,
+            suspect_count: suspect,
+            dead_count: dead,
+        }))
+    }
 }

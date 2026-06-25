@@ -14,6 +14,7 @@ service Deriva {
   rpc Pin (PinRequest) returns (PinResponse);
   rpc Unpin (UnpinRequest) returns (UnpinResponse);
   rpc ListPins (ListPinsRequest) returns (ListPinsResponse);
+  rpc ClusterStatus (ClusterStatusRequest) returns (ClusterStatusResponse);
 }
 
 message PutLeafRequest { bytes data = 1; }
@@ -121,4 +122,28 @@ message ListPinsRequest {}
 message ListPinsResponse {
   repeated bytes addrs = 1;
   uint64 count = 2;
+}
+
+
+message ClusterStatusRequest {}
+
+message ClusterStatusResponse {
+  repeated ClusterNodeInfo nodes = 1;
+  uint64 alive_count = 2;
+  uint64 suspect_count = 3;
+  uint64 dead_count = 4;
+}
+
+message ClusterNodeInfo {
+  string name = 1;
+  string addr = 2;
+  string state = 3;
+  uint64 incarnation = 4;
+  string grpc_addr = 5;
+  string role = 6;
+  uint64 cache_entries = 7;
+  uint64 cache_bytes = 8;
+  uint64 blob_count = 9;
+  float cpu_load = 10;
+  uint64 uptime_secs = 11;
 }

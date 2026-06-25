@@ -5,3 +5,15 @@ edition = "2021"
 
 [dependencies]
 deriva-core = { path = "../deriva-core" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+rand = "0.8"
+tracing = "0.1"
+prometheus = "0.13"
+lazy_static = "1"
+blake3 = "1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = "1"

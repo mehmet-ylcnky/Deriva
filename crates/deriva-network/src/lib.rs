@@ -6,6 +6,10 @@ pub mod metrics;
 pub mod runtime;
 pub mod types;
 
+pub mod proto {
+    tonic::include_proto!("deriva_internal");
+}
+
 pub use config::SwimConfig;
 pub use runtime::SwimRuntime;
 pub use types::{MemberState, NodeId, NodeMetadata, NodeRole, SwimEvent};

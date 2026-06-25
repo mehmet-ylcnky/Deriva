@@ -1,0 +1,55 @@
+syntax = "proto3";
+package deriva_internal;
+
+// Internal node-to-node service for recipe replication and anti-entropy sync.
+// NOT exposed to external clients — used only between cluster peers.
+service DerivaInternal {
+  // Replicate a single recipe from coordinator to peer.
+  rpc ReplicateRecipe(ReplicateRecipeRequest) returns (ReplicateRecipeResponse);
+
+  // Anti-entropy: exchange recipe set fingerprints to detect divergence.
+  rpc SyncRecipes(SyncRecipesRequest) returns (SyncRecipesResponse);
+
+  // Fetch specific recipes by their CAddr (used after detecting missing recipes).
+  rpc FetchRecipes(FetchRecipesRequest) returns (FetchRecipesResponse);
+}
+
+message ReplicateRecipeRequest {
+  bytes addr = 1;
+  string function_name = 2;
+  string function_version = 3;
+  repeated bytes inputs = 4;
+  map<string, string> params = 5;
+}
+
+message ReplicateRecipeResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message SyncRecipesRequest {
+  bytes fingerprint = 1;   // SHA-256 of sorted recipe addrs
+  uint64 recipe_count = 2;
+}
+
+message SyncRecipesResponse {
+  bool in_sync = 1;
+  bytes fingerprint = 2;           // Peer's own fingerprint
+  repeated bytes recipe_addrs = 3; // Full addr list if not in sync (empty if in_sync=true)
+}
+
+message FetchRecipesRequest {
+  repeated bytes addrs = 1;
+}
+
+message FetchRecipesResponse {
+  repeated RecipeData recipes = 1;
+}
+
+message RecipeData {
+  bytes addr = 1;
+  string function_name = 2;
+  string function_version = 3;
+  repeated bytes inputs = 4;
+  map<string, string> params = 5;
+}

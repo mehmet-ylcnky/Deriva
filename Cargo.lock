@@ -1821,10 +1821,14 @@ dependencies = [
  "lazy_static",
  "prometheus",
  "proptest",
+ "prost 0.13.5",
  "rand 0.8.5",
  "serde",
+ "sha2",
  "tokio",
  "tokio-test",
+ "tonic",
+ "tonic-build",
  "tracing",
 ]
 

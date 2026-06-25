@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use rand::seq::SliceRandom;
@@ -8,19 +9,14 @@ use crate::types::*;
 
 /// Manages the cluster membership list and implements the SWIM state machine.
 ///
-/// Responsibilities:
-/// - Track all known members and their states (Alive/Suspect/Dead)
-/// - Apply incoming membership updates with incarnation-based conflict resolution
-/// - Provide random peer selection for probing
-/// - Maintain a piggyback queue for gossip dissemination
-/// - Handle incarnation refutation when this node is falsely suspected
+/// Members are keyed by SocketAddr (not full NodeId) so that incarnation
+/// bumps update the existing entry rather than creating duplicates.
 pub struct MemberList {
     /// Our own node ID (mutable for incarnation bumps).
     local: NodeId,
-    /// All known members keyed by their NodeId.
-    members: HashMap<NodeId, Member>,
+    /// All known members keyed by their socket address.
+    members: HashMap<SocketAddr, Member>,
     /// Pending updates to piggyback on outgoing messages.
-    /// Each entry: (update, remaining_retransmit_count).
     pending_updates: Vec<(MemberUpdate, u8)>,
     /// Max retransmit count for each queued update.
     max_retransmit: u8,
@@ -31,7 +27,7 @@ impl MemberList {
     /// Create a new MemberList with the local node as the only alive member.
     pub fn new(local: NodeId) -> Self {
         let mut members = HashMap::new();
-        members.insert(local.clone(), Member {
+        members.insert(local.addr, Member {
             id: local.clone(),
             state: MemberState::Alive,
             state_change: Instant::now(),
@@ -60,7 +56,7 @@ impl MemberList {
     /// All alive members excluding self.
     pub fn alive_peers(&self) -> Vec<&Member> {
         self.members.values()
-            .filter(|m| m.id != self.local && m.state == MemberState::Alive)
+            .filter(|m| m.id.addr != self.local.addr && m.state == MemberState::Alive)
             .collect()
     }
 
@@ -68,7 +64,7 @@ impl MemberList {
     /// Includes suspect members (they're still probed to confirm/deny suspicion).
     pub fn random_peer(&self) -> Option<NodeId> {
         let candidates: Vec<&Member> = self.members.values()
-            .filter(|m| m.id != self.local && m.state != MemberState::Dead)
+            .filter(|m| m.id.addr != self.local.addr && m.state != MemberState::Dead)
             .collect();
         if candidates.is_empty() {
             return None;
@@ -83,8 +79,8 @@ impl MemberList {
     pub fn random_peers_excluding(&self, exclude: &NodeId, count: usize) -> Vec<NodeId> {
         let mut candidates: Vec<NodeId> = self.members.values()
             .filter(|m| {
-                m.id != self.local
-                    && m.id != *exclude
+                m.id.addr != self.local.addr
+                    && m.id.addr != exclude.addr
                     && m.state == MemberState::Alive
             })
             .map(|m| m.id.clone())
@@ -94,32 +90,32 @@ impl MemberList {
         candidates
     }
 
-    /// Snapshot of all members and their states (for status/debugging/RPC).
+    /// Snapshot of all members and their states.
     pub fn all_members(&self) -> Vec<(NodeId, MemberState)> {
-        self.members.iter()
-            .map(|(id, m)| (id.clone(), m.state))
+        self.members.values()
+            .map(|m| (m.id.clone(), m.state))
             .collect()
     }
 
     /// Get metadata for a specific node, if available.
     pub fn get_metadata(&self, node: &NodeId) -> Option<&NodeMetadata> {
-        self.members.get(node).and_then(|m| m.metadata.as_ref())
+        self.members.get(&node.addr).and_then(|m| m.metadata.as_ref())
     }
 
-    /// Update the local node's metadata (called by metadata refresh loop).
+    /// Update the local node's metadata.
     pub fn update_local_metadata(&mut self, metadata: NodeMetadata) {
-        if let Some(me) = self.members.get_mut(&self.local) {
+        if let Some(me) = self.members.get_mut(&self.local.addr) {
             me.metadata = Some(metadata);
         }
     }
 
     /// Get a reference to a member by NodeId.
     pub fn get_member(&self, node: &NodeId) -> Option<&Member> {
-        self.members.get(node)
+        self.members.get(&node.addr)
     }
 
     /// Expose members map for suspicion timeout checks in cleanup loop.
-    pub fn members(&self) -> &HashMap<NodeId, Member> {
+    pub fn members(&self) -> &HashMap<SocketAddr, Member> {
         &self.members
     }
 }
@@ -148,10 +144,10 @@ impl MemberList {
     /// Returns the SwimEvent to emit if a meaningful state transition occurred.
     pub fn apply_update(&mut self, update: &MemberUpdate) -> Option<SwimEvent> {
         // Track if someone is trying to suspect/kill us — we'll refute externally
-        if update.node == self.local {
+        if update.node.addr == self.local.addr {
             if update.state != MemberState::Alive && update.incarnation <= self.local.incarnation {
                 // Mark ourselves as suspected so the runtime can detect and refute
-                if let Some(me) = self.members.get_mut(&self.local) {
+                if let Some(me) = self.members.get_mut(&self.local.addr) {
                     if state_priority(update.state) > state_priority(me.state) {
                         me.state = update.state;
                         me.state_change = std::time::Instant::now();
@@ -161,7 +157,7 @@ impl MemberList {
             }
             // Higher incarnation alive about self — accept it (e.g., from our own refutation propagating back)
             if update.state == MemberState::Alive && update.incarnation >= self.local.incarnation {
-                if let Some(me) = self.members.get_mut(&self.local) {
+                if let Some(me) = self.members.get_mut(&self.local.addr) {
                     me.state = MemberState::Alive;
                     me.id.incarnation = update.incarnation;
                     self.local.incarnation = update.incarnation;
@@ -171,7 +167,7 @@ impl MemberList {
             return None;
         }
 
-        if let Some(existing) = self.members.get(&update.node) {
+        if let Some(existing) = self.members.get(&update.node.addr) {
             let existing_inc = existing.id.incarnation;
             let existing_state = existing.state;
 
@@ -193,7 +189,7 @@ impl MemberList {
 
 
             // Apply the update to existing member
-            let member = self.members.get_mut(&update.node).unwrap();
+            let member = self.members.get_mut(&update.node.addr).unwrap();
             member.state = update.state;
             member.state_change = Instant::now();
             member.id.incarnation = update.incarnation;
@@ -226,7 +222,7 @@ impl MemberList {
             }
         } else {
             // New member — insert into the member list
-            self.members.insert(update.node.clone(), Member {
+            self.members.insert(update.node.addr, Member {
                 id: NodeId {
                     addr: update.node.addr,
                     incarnation: update.incarnation,
@@ -252,7 +248,7 @@ impl MemberList {
     /// Convenience: mark a node as SUSPECT (failed probe).
     /// Uses the node's current incarnation from our records.
     pub fn suspect(&mut self, node: &NodeId) -> Option<SwimEvent> {
-        let incarnation = self.members.get(node)
+        let incarnation = self.members.get(&node.addr)
             .map(|m| m.id.incarnation)
             .unwrap_or(node.incarnation);
         self.apply_update(&MemberUpdate {
@@ -266,7 +262,7 @@ impl MemberList {
     /// Convenience: mark a node as DEAD (suspicion timeout expired).
     /// Uses the node's current incarnation from our records.
     pub fn declare_dead(&mut self, node: &NodeId) -> Option<SwimEvent> {
-        let incarnation = self.members.get(node)
+        let incarnation = self.members.get(&node.addr)
             .map(|m| m.id.incarnation)
             .unwrap_or(node.incarnation);
         self.apply_update(&MemberUpdate {
@@ -286,7 +282,7 @@ impl MemberList {
     /// Returns the MemberUpdate to queue for piggybacking.
     pub fn refute(&mut self) -> MemberUpdate {
         self.local.next_incarnation();
-        if let Some(me) = self.members.get_mut(&self.local) {
+        if let Some(me) = self.members.get_mut(&self.local.addr) {
             me.id.incarnation = self.local.incarnation;
             me.state = MemberState::Alive;
             me.state_change = Instant::now();
@@ -295,7 +291,7 @@ impl MemberList {
             node: self.local.clone(),
             state: MemberState::Alive,
             incarnation: self.local.incarnation,
-            metadata: self.members.get(&self.local)
+            metadata: self.members.get(&self.local.addr)
                 .and_then(|m| m.metadata.clone()),
         }
     }
@@ -325,7 +321,11 @@ impl MemberList {
         let mut result = Vec::with_capacity(max_count);
         let mut i = 0;
         while i < self.pending_updates.len() && result.len() < max_count {
-            result.push(self.pending_updates[i].0.clone());
+            let mut update = self.pending_updates[i].0.clone();
+            // Strip metadata from piggyback to keep messages small (metadata is
+            // exchanged via the node's own Ping/Ack, not via gossip piggyback)
+            update.metadata = None;
+            result.push(update);
             self.pending_updates[i].1 = self.pending_updates[i].1.saturating_sub(1);
             if self.pending_updates[i].1 == 0 {
                 self.pending_updates.remove(i);
@@ -343,12 +343,12 @@ impl MemberList {
     pub fn cleanup_dead(&mut self, timeout: Duration) -> Vec<NodeId> {
         let now = Instant::now();
         let mut removed = Vec::new();
-        self.members.retain(|id, member| {
+        self.members.retain(|addr, member| {
             if member.state == MemberState::Dead
                 && now.duration_since(member.state_change) > timeout
-                && *id != self.local  // Never remove self
+                && *addr != self.local.addr  // Never remove self
             {
-                removed.push(id.clone());
+                removed.push(member.id.clone());
                 false
             } else {
                 true
@@ -362,7 +362,7 @@ impl MemberList {
 
     /// Check if a node is suspected about us (used by runtime to trigger refutation).
     pub fn is_self_suspected(&self) -> bool {
-        self.members.get(&self.local)
+        self.members.get(&self.local.addr)
             .map(|m| m.state == MemberState::Suspect)
             .unwrap_or(false)
     }

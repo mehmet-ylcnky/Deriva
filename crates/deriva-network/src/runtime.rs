@@ -222,7 +222,7 @@ impl SwimRuntime {
             }
 
             SwimMessage::PingReq { target, sender, sequence, .. } => {
-                // Forward Ping to target on behalf of original sender
+                // Indirect probe: relay Ping to target, relay Ack back to requester.
                 let piggyback = {
                     let mut ml = members.write().await;
                     ml.drain_piggyback(config.max_piggyback)
@@ -236,7 +236,19 @@ impl SwimRuntime {
                     SWIM_GOSSIP_BYTES.inc_by(data.len() as u64);
                     let _ = socket.send_to(&data, target.addr).await;
                 }
-                // Also mark the PingReq sender as alive
+                // Send Ack back to the original requester to confirm we relayed.
+                // The target's response to our Ping will update our memberlist,
+                // and the requester checks recent_acks which includes relay acks.
+                let ack = SwimMessage::Ack {
+                    sender: local_id.clone(),
+                    sequence: *sequence,
+                    piggyback: vec![],
+                };
+                if let Ok(data) = ack.encode() {
+                    SWIM_GOSSIP_BYTES.inc_by(data.len() as u64);
+                    let _ = socket.send_to(&data, sender.addr).await;
+                }
+                // Mark the PingReq sender as alive
                 let mut ml = members.write().await;
                 ml.apply_update(&MemberUpdate {
                     node: sender.clone(),
@@ -430,15 +442,16 @@ impl SwimRuntime {
                         let suspects: Vec<NodeId> = ml.members().iter()
                             .filter(|(_, m)| m.state == MemberState::Suspect)
                             .filter(|(_, m)| m.state_change.elapsed() > suspicion_timeout)
-                            .map(|(id, _)| id.clone())
+                            .map(|(_, m)| m.id.clone())
                             .collect();
 
                         for suspect_id in suspects {
+                            let inc = ml.get_member(&suspect_id).map(|m| m.id.incarnation).unwrap_or(0);
                             if let Some(event) = ml.declare_dead(&suspect_id) {
                                 ml.queue_update(MemberUpdate {
                                     node: suspect_id,
                                     state: MemberState::Dead,
-                                    incarnation: 0, // Will use recorded incarnation
+                                    incarnation: inc,
                                     metadata: None,
                                 });
                                 let _ = event_tx.try_send(event);

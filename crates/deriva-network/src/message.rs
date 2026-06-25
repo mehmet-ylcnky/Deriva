@@ -14,6 +14,12 @@ impl SwimMessage {
         bincode::serialize(self)
     }
 
+    /// Encode with UDP size limit (65507 bytes). Returns None if too large.
+    pub fn encode_checked(&self) -> Option<Vec<u8>> {
+        let data = bincode::serialize(self).ok()?;
+        if data.len() > 65507 { None } else { Some(data) }
+    }
+
     pub fn decode(data: &[u8]) -> Result<Self, bincode::Error> {
         bincode::deserialize(data)
     }

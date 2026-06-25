@@ -89,7 +89,7 @@ fn higher_incarnation_wins_regardless_of_state() {
     let event = ml.apply_update(&alive_update(&peer, 6));
     assert!(matches!(event, Some(SwimEvent::MemberAlive(_))));
     let members = ml.all_members();
-    let (_, state) = members.iter().find(|(id, _)| *id == peer).unwrap();
+    let (_, state) = members.iter().find(|(id, _)| id.addr == peer.addr).unwrap();
     assert_eq!(*state, MemberState::Alive);
 }
 
@@ -105,7 +105,7 @@ fn stale_update_lower_incarnation_discarded() {
     });
     assert!(event.is_none());
     let members = ml.all_members();
-    let (_, state) = members.iter().find(|(id, _)| *id == peer).unwrap();
+    let (_, state) = members.iter().find(|(id, _)| id.addr == peer.addr).unwrap();
     assert_eq!(*state, MemberState::Alive);
 }
 

@@ -8,6 +8,7 @@ use tokio::sync::{mpsc, RwLock, Mutex, watch};
 use crate::config::SwimConfig;
 use crate::memberlist::MemberList;
 use crate::message::SwimMessage;
+use crate::metrics::*;
 use crate::types::*;
 
 /// The main SWIM runtime. Manages the probe loop, gossip dissemination,
@@ -90,6 +91,7 @@ impl SwimRuntime {
                 piggyback: vec![],
             };
             if let Ok(data) = msg.encode() {
+                SWIM_GOSSIP_BYTES.inc_by(data.len() as u64);
                 let _ = self.socket.send_to(&data, seed_addr).await;
             }
         }
@@ -131,6 +133,14 @@ impl SwimRuntime {
                                 continue;
                             }
                         };
+                        // Metric: count received message by type
+                        let msg_type = match &msg {
+                            SwimMessage::Ping { .. } => "ping",
+                            SwimMessage::Ack { .. } => "ack",
+                            SwimMessage::PingReq { .. } => "ping_req",
+                            SwimMessage::Sync { .. } => "sync",
+                        };
+                        SWIM_MESSAGES_RECEIVED.with_label_values(&[msg_type]).inc();
                         // Record Ack senders for probe loop
                         if matches!(&msg, SwimMessage::Ack { .. }) {
                             recent_acks.lock().await.insert(msg.sender().addr);
@@ -193,6 +203,7 @@ impl SwimRuntime {
                     piggyback,
                 };
                 if let Ok(data) = ack.encode() {
+                    SWIM_GOSSIP_BYTES.inc_by(data.len() as u64);
                     let _ = socket.send_to(&data, sender.addr).await;
                 }
             }
@@ -222,6 +233,7 @@ impl SwimRuntime {
                     piggyback,
                 };
                 if let Ok(data) = ping.encode() {
+                    SWIM_GOSSIP_BYTES.inc_by(data.len() as u64);
                     let _ = socket.send_to(&data, target.addr).await;
                 }
                 // Also mark the PingReq sender as alive
@@ -310,6 +322,9 @@ impl SwimRuntime {
 
         let seq = sequence.fetch_add(1, Ordering::Relaxed);
 
+        // Metric: count this probe
+        SWIM_PROBES_TOTAL.inc();
+
         // Clear ack tracking for this probe round
         recent_acks.lock().await.remove(&target.addr);
 
@@ -324,6 +339,7 @@ impl SwimRuntime {
             piggyback,
         };
         if let Ok(data) = ping.encode() {
+            SWIM_GOSSIP_BYTES.inc_by(data.len() as u64);
             let _ = socket.send_to(&data, target.addr).await;
         }
 
@@ -355,6 +371,7 @@ impl SwimRuntime {
                 piggyback,
             };
             if let Ok(data) = ping_req.encode() {
+                SWIM_GOSSIP_BYTES.inc_by(data.len() as u64);
                 let _ = socket.send_to(&data, relay.addr).await;
             }
         }
@@ -368,6 +385,8 @@ impl SwimRuntime {
         if still_no_ack {
             let mut ml = members.write().await;
             if let Some(event) = ml.suspect(&target) {
+                // Metric: probe failure
+                SWIM_PROBE_FAILURES.inc();
                 // Queue the suspect update for gossip dissemination
                 ml.queue_update(MemberUpdate {
                     node: target.clone(),
@@ -428,6 +447,14 @@ impl SwimRuntime {
 
                         // Purge long-dead members from the list entirely
                         ml.cleanup_dead(config.dead_cleanup);
+
+                        // Update member gauges
+                        let alive = ml.all_members().iter()
+                            .filter(|(_, s)| *s == MemberState::Alive).count();
+                        let suspect = ml.all_members().iter()
+                            .filter(|(_, s)| *s == MemberState::Suspect).count();
+                        SWIM_MEMBERS_ALIVE.set(alive as f64);
+                        SWIM_MEMBERS_SUSPECT.set(suspect as f64);
                     }
                 }
             }

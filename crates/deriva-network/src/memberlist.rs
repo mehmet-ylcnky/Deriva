@@ -65,13 +65,16 @@ impl MemberList {
     }
 
     /// Pick a uniformly random alive peer for probing. Returns None if no peers.
+    /// Includes suspect members (they're still probed to confirm/deny suspicion).
     pub fn random_peer(&self) -> Option<NodeId> {
-        let peers = self.alive_peers();
-        if peers.is_empty() {
+        let candidates: Vec<&Member> = self.members.values()
+            .filter(|m| m.id != self.local && m.state != MemberState::Dead)
+            .collect();
+        if candidates.is_empty() {
             return None;
         }
-        let idx = rand::thread_rng().gen_range(0..peers.len());
-        Some(peers[idx].id.clone())
+        let idx = rand::thread_rng().gen_range(0..candidates.len());
+        Some(candidates[idx].id.clone())
     }
 
 

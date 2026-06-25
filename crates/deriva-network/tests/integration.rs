@@ -185,27 +185,20 @@ async fn incarnation_refutation() {
     }
 
     // Wait for B to receive the gossip and refute with higher incarnation
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
-    // A should now see B as alive again (refutation accepted)
-    let members = runtime_a.members().await;
-    let b_entry = members.iter().find(|(id, _)| id.addr == b_id.addr);
-    assert!(
-        b_entry.is_some(),
-        "B should still be in A's member list"
-    );
-    let (b_current_id, b_state) = b_entry.unwrap();
-    assert_eq!(
-        *b_state, MemberState::Alive,
-        "B should be alive after refutation (state={:?}, incarnation={})",
-        b_state, b_current_id.incarnation
-    );
-    // B's incarnation should have increased
-    assert!(
-        b_current_id.incarnation > b_id.incarnation,
-        "B's incarnation should have increased from {} but is {}",
-        b_id.incarnation, b_current_id.incarnation
-    );
+    // Poll until B is alive again in A's view (or timeout)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut refuted = false;
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let members = runtime_a.members().await;
+        if let Some((id, state)) = members.iter().find(|(id, _)| id.addr == b_id.addr) {
+            if *state == MemberState::Alive && id.incarnation > b_id.incarnation {
+                refuted = true;
+                break;
+            }
+        }
+    }
+    assert!(refuted, "B should have refuted suspicion and returned to Alive");
 
     runtime_a.shutdown();
     runtime_b.shutdown();

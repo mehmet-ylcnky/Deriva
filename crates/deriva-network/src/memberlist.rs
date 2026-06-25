@@ -144,12 +144,27 @@ impl MemberList {
     ///
     /// Returns the SwimEvent to emit if a meaningful state transition occurred.
     pub fn apply_update(&mut self, update: &MemberUpdate) -> Option<SwimEvent> {
-        // Self-suspicion refutation (FR-2.7): if someone suspects us, refute immediately
-        if update.node == self.local
-            && update.state != MemberState::Alive
-            && update.incarnation <= self.local.incarnation
-        {
-            // We'll handle refutation externally; here we just ignore the update about us
+        // Track if someone is trying to suspect/kill us — we'll refute externally
+        if update.node == self.local {
+            if update.state != MemberState::Alive && update.incarnation <= self.local.incarnation {
+                // Mark ourselves as suspected so the runtime can detect and refute
+                if let Some(me) = self.members.get_mut(&self.local) {
+                    if state_priority(update.state) > state_priority(me.state) {
+                        me.state = update.state;
+                        me.state_change = std::time::Instant::now();
+                    }
+                }
+                return None;
+            }
+            // Higher incarnation alive about self — accept it (e.g., from our own refutation propagating back)
+            if update.state == MemberState::Alive && update.incarnation >= self.local.incarnation {
+                if let Some(me) = self.members.get_mut(&self.local) {
+                    me.state = MemberState::Alive;
+                    me.id.incarnation = update.incarnation;
+                    self.local.incarnation = update.incarnation;
+                }
+                return None;
+            }
             return None;
         }
 
@@ -218,6 +233,9 @@ impl MemberList {
                 state_change: Instant::now(),
                 metadata: update.metadata.clone(),
             });
+
+            // Queue the new member info for gossip dissemination to other nodes
+            self.queue_update(update.clone());
 
             match update.state {
                 MemberState::Alive => Some(SwimEvent::MemberJoined(update.node.clone())),

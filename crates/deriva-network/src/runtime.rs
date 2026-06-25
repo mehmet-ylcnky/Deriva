@@ -1,8 +1,9 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, RwLock, watch};
+use tokio::sync::{mpsc, RwLock, Mutex, watch};
 
 use crate::config::SwimConfig;
 use crate::memberlist::MemberList;
@@ -24,6 +25,8 @@ pub struct SwimRuntime {
     event_tx: mpsc::Sender<SwimEvent>,
     sequence: Arc<AtomicU64>,
     shutdown_tx: watch::Sender<bool>,
+    /// Set of NodeId addrs that recently acked (cleared each probe round).
+    recent_acks: Arc<Mutex<HashSet<std::net::SocketAddr>>>,
 }
 
 
@@ -60,6 +63,7 @@ impl SwimRuntime {
             event_tx: event_tx.clone(),
             sequence: Arc::new(AtomicU64::new(0)),
             shutdown_tx,
+            recent_acks: Arc::new(Mutex::new(HashSet::new())),
         };
 
         // Join seed nodes by sending initial Ping
@@ -106,6 +110,7 @@ impl SwimRuntime {
         let event_tx = self.event_tx.clone();
         let local_id = self.local_id.clone();
         let config = self.config.clone();
+        let recent_acks = self.recent_acks.clone();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         tokio::spawn(async move {
@@ -126,6 +131,10 @@ impl SwimRuntime {
                                 continue;
                             }
                         };
+                        // Record Ack senders for probe loop
+                        if matches!(&msg, SwimMessage::Ack { .. }) {
+                            recent_acks.lock().await.insert(msg.sender().addr);
+                        }
                         Self::handle_message(
                             &msg, src, &socket, &members,
                             &event_tx, &local_id, &config,
@@ -255,6 +264,7 @@ impl SwimRuntime {
         let local_id = self.local_id.clone();
         let config = self.config.clone();
         let sequence = self.sequence.clone();
+        let recent_acks = self.recent_acks.clone();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         tokio::spawn(async move {
@@ -266,7 +276,7 @@ impl SwimRuntime {
                     _ = interval.tick() => {
                         Self::probe_cycle(
                             &socket, &members, &event_tx,
-                            &local_id, &config, &sequence,
+                            &local_id, &config, &sequence, &recent_acks,
                         ).await;
                     }
                 }
@@ -286,6 +296,7 @@ impl SwimRuntime {
         local_id: &NodeId,
         config: &SwimConfig,
         sequence: &AtomicU64,
+        recent_acks: &Mutex<HashSet<std::net::SocketAddr>>,
     ) {
         // Step 1: Pick random peer
         let target = {
@@ -298,6 +309,9 @@ impl SwimRuntime {
         };
 
         let seq = sequence.fetch_add(1, Ordering::Relaxed);
+
+        // Clear ack tracking for this probe round
+        recent_acks.lock().await.remove(&target.addr);
 
         // Step 2: Send direct Ping
         let piggyback = {
@@ -317,14 +331,9 @@ impl SwimRuntime {
         // Wait for direct Ack (probe_timeout)
         tokio::time::sleep(config.probe_timeout).await;
 
-        // Check if target is now alive (Ack was processed by receive loop)
-        let target_alive = {
-            let ml = members.read().await;
-            ml.get_member(&target)
-                .map(|m| m.state == MemberState::Alive)
-                .unwrap_or(false)
-        };
-        if target_alive {
+        // Check if we received an Ack from the target
+        let got_ack = recent_acks.lock().await.contains(&target.addr);
+        if got_ack {
             return; // Direct probe succeeded
         }
 
@@ -353,15 +362,10 @@ impl SwimRuntime {
         // Wait for indirect Ack (another probe_timeout)
         tokio::time::sleep(config.probe_timeout).await;
 
-        // Step 4: Check again — if still not alive, mark as suspect
-        let still_not_alive = {
-            let ml = members.read().await;
-            ml.get_member(&target)
-                .map(|m| m.state != MemberState::Alive)
-                .unwrap_or(true)
-        };
+        // Step 4: Check again — if no ack received at all, mark as suspect
+        let still_no_ack = !recent_acks.lock().await.contains(&target.addr);
 
-        if still_not_alive {
+        if still_no_ack {
             let mut ml = members.write().await;
             if let Some(event) = ml.suspect(&target) {
                 // Queue the suspect update for gossip dissemination

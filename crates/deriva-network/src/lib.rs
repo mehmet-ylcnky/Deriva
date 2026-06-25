@@ -1,6 +1,7 @@
 pub mod anti_entropy;
 pub mod bloom;
 pub mod config;
+pub mod internal_service;
 pub mod memberlist;
 pub mod message;
 pub mod metrics;

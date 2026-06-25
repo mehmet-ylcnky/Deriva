@@ -3,6 +3,7 @@ pub mod config;
 pub mod memberlist;
 pub mod message;
 pub mod metrics;
+pub mod replication;
 pub mod runtime;
 pub mod types;
 

@@ -6,7 +6,7 @@ pub struct BloomFilter {
 
 impl BloomFilter {
     pub fn new(num_bits: usize, num_hashes: usize) -> Self {
-        let bytes = (num_bits + 7) / 8;
+        let bytes = num_bits.div_ceil(8);
         Self { bits: vec![0u8; bytes], num_bits, num_hashes }
     }
 

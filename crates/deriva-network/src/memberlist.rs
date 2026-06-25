@@ -181,11 +181,11 @@ impl MemberList {
             }
 
             // Rule 2: Same incarnation — state priority decides
-            if update.incarnation == existing_inc {
-                if state_priority(update.state) <= state_priority(existing_state) {
-                    // Update doesn't dominate — discard
-                    return None;
-                }
+            if update.incarnation == existing_inc
+                && state_priority(update.state) <= state_priority(existing_state)
+            {
+                // Update doesn't dominate — discard
+                return None;
             }
 
             // Rule 3: Higher incarnation OR same incarnation with higher priority — accept
